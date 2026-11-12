@@ -172,6 +172,97 @@ class AutoPushFiring(unittest.TestCase):
         self.assertEqual(self.calls, [], "one push per host at a time")
 
 
+class WhatAPushReports(unittest.TestCase):
+    """The phase and the Log notice of an automatic push follow what the push did (the user 2026-11-12, who wanted pages
+    to stay responsive after a deploy: a push that changes no kernel code leaves the kernel there running, converged in
+    place). A restart is announced only when one is coming, which _update_remote records on the row as restartExpected;
+    otherwise the push's own words are the report, and nothing claims the machine is restarting. _update_remote is
+    stubbed: these are _auto_push_remote's words and its once-per-advance key."""
+    INPLACE = "synced to aaaaaaaa; no kernel code changed, so the kernel there converged in place (no restart)"
+
+    def setUp(self):
+        self._saved = (km._update_remote, km._fresh_local_head, km._local_head, km._kernel_ver, km._behind_info,
+                       km._auto_update_remotes_on(), km.threading.Thread)
+        km._auto_push.clear()
+        km._auto_push_tried.clear()
+        km._fresh_local_head = lambda: LOCAL
+        km._local_head = lambda short=False: (LOCAL[:8] if short else LOCAL)
+        km._kernel_ver = lambda: "v9.9.9"
+        km._remotes["TESTHOST"] = {"host": "TESTHOST", "status": "up", "kernel_sha": REMOTE[:7]}
+        self.pushed = []
+
+    def tearDown(self):
+        (km._update_remote, km._fresh_local_head, km._local_head, km._kernel_ver, km._behind_info) = self._saved[:5]
+        km._set_auto_update_remotes(self._saved[5])
+        km.threading.Thread = self._saved[6]
+        km._remotes.pop("TESTHOST", None)
+        km._auto_push.clear()
+        km._auto_push_tried.clear()
+
+    def _answers(self, ok, detail, restarts):
+        """What the next push does: its (ok, detail), and whether it leaves a restart expected on the row."""
+        def push(host, head=None, restart="if-code-changed"):
+            self.pushed.append((host, head))
+            if restarts:
+                km._remotes[host]["restartExpected"] = {"sha": head, "t": 1.0, "quiet": False}
+            return ok, detail
+        km._update_remote = push
+
+    def _notice(self):
+        return km._sync_notice_rows(limit=1)[0]
+
+    def test_a_kernel_that_converged_in_place_is_not_said_to_be_restarting(self):
+        self._answers(True, self.INPLACE, restarts=False)
+        self.assertTrue(km._auto_push_remote("TESTHOST"))
+        self.assertEqual(self.pushed, [("TESTHOST", LOCAL)])
+        st = km._auto_push_state("TESTHOST")
+        self.assertEqual((st["phase"], st["detail"]), ("waiting", self.INPLACE), "the row shows the push's own words")
+        n = self._notice()
+        self.assertEqual((n["text"], n["ok"]), ("pushed this machine's build (v9.9.9) to TESTHOST: " + self.INPLACE, True))
+        self.assertNotIn("restarting", n["text"])
+
+    def test_a_push_that_restarts_the_kernel_says_so_as_before(self):
+        self._answers(True, "synced to aaaaaaaa + restarting now (through its manager)", restarts=True)
+        self.assertTrue(km._auto_push_remote("TESTHOST"))
+        self.assertEqual(km._auto_push_state("TESTHOST")["detail"], "pushed; waiting for it to restart")
+        self.assertEqual(self._notice()["text"], "pushed this machine's build (v9.9.9) to TESTHOST; it is restarting into it")
+
+    def test_a_converge_that_failed_and_fell_back_to_the_restart_reads_as_a_restart(self):
+        # _update_remote answers ok with the fallback in its detail and a restart expected: the phase waits for it
+        self._answers(True, "synced to aaaaaaaa + restarting now (through its manager); it was asked to converge in "
+                            "place and could not (its kernel answered HTTP 404), so it is restarting instead", restarts=True)
+        self.assertTrue(km._auto_push_remote("TESTHOST"))
+        self.assertEqual(km._auto_push_state("TESTHOST")["detail"], "pushed; waiting for it to restart")
+
+    def test_a_failed_push_stays_a_visible_failure(self):
+        self._answers(False, "git push to TESTHOST failed: no route", restarts=False)
+        self.assertFalse(km._auto_push_remote("TESTHOST"))
+        st = km._auto_push_state("TESTHOST")
+        self.assertEqual((st["phase"], st["detail"]), ("failed", "git push to TESTHOST failed: no route"))
+        self.assertFalse(self._notice()["ok"])
+
+    def test_one_advance_is_one_push_to_a_kernel_serving_a_checkout_newer_than_its_boot(self):
+        # A kernel that converged in place reports a checkout past the commit it booted from. The supervisor's hook
+        # keys an attempt on the checkout (_drift_sha); the push used to record it under the booted commit, so the
+        # two keys never agreed for such a machine and every pass pushed again.
+        km._remotes["TESTHOST"].update(kernel_sha="ccccccc", checkout_sha=REMOTE[:8])
+        km._behind_info = lambda sha, head=None: {"behind": 2, "ahead": 0, "date": ""}
+        km._set_auto_update_remotes(True)
+
+        class _Now:                                                    # the worker, run inline
+            def __init__(self, target=None, args=(), daemon=None):
+                self._t, self._a = target, args
+
+            def start(self):
+                self._t(*self._a)
+        km.threading.Thread = _Now
+        self._answers(False, "git push to TESTHOST failed: no route", restarts=False)
+        km._maybe_auto_push(dict(km._remotes["TESTHOST"]))
+        km._maybe_auto_push(dict(km._remotes["TESTHOST"]))
+        km._maybe_auto_push(dict(km._remotes["TESTHOST"]))
+        self.assertEqual(len(self.pushed), 1, "three passes over one advance: one attempt")
+
+
 class PublishedToTheClient(unittest.TestCase):
     """The popover has to be able to SAY what is happening — so the row carries the fast-forward verdict and
     any live phase, and the payload carries the setting."""

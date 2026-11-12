@@ -3,7 +3,8 @@
 
 Three things drift independently and a stale one is the usual cause of "the UI doesn't match the code":
   - the WORKING TREE (the .py/.js sources the kernel loads straight from bin/ and vscode-extension/),
-  - the RUNNING KERNEL (what it last (re)started from — reported by its /version endpoint),
+  - the RUNNING KERNEL (the commit it serves — the one it booted from, or one it converged onto in place since —
+    and whether the checkout holds kernel code it does not run, all from its /version endpoint),
   - the BUILT BUNDLES on disk vs the bundle the kernel is actually serving.
 This prints all three so you can see at a glance whether a `romp refresh` (or a browser hard-reload) is
 owed — instead of reading restart logs. No filesystem paths are printed (privacy).
@@ -173,13 +174,35 @@ def _demotes(stats):
     return ", ".join(out)
 
 
+def _served_sha(k):
+    """The commit the kernel serves: converged_sha, which names the commit an in-place converge moved it onto (a push or
+    pull that changed no kernel code, served with no restart), else kernel_sha, the commit it booted from (a kernel older
+    than converged_sha reports only that). kernel_sha alone made a kernel that converged in place look behind its own
+    checkout and invited a needless `romp refresh` (the review of the push converge, 2026-11-12)."""
+    return k.get("converged_sha") or k.get("kernel_sha") or "?"
+
+
+def _served_note(k):
+    """What a reader needs beside the served commit: the commit the process booted from when it serves another, and a
+    restart the checkout is owed when it holds kernel code this process does not run. Empty when neither applies."""
+    notes = []
+    booted = k.get("kernel_sha") or ""
+    if k.get("converged_sha") and booted and k["converged_sha"] != booted:
+        notes.append("booted from %s, converged in place" % booted)
+    if k.get("restart_pending") is True:
+        notes.append("⚠ restart pending — `romp refresh`")
+    elif k.get("restart_pending") is False and notes:
+        notes.append("no restart pending")
+    return (" (%s)" % "; ".join(notes)) if notes else ""
+
+
 def report():
     lines = ["romp     sha=%s  (working tree the kernel loads from)" % (_git_sha() or "?")]
     kind, k = _probe_kernel()
     if kind == "version":
         up = k.get("uptime_s", 0)
-        lines.append("kernel   sha=%s pid=%s up=%dm%02ds dist_ver=%s  (%s)"
-                     % (k.get("kernel_sha") or "?", k.get("pid"), up // 60, up % 60,
+        lines.append("kernel   sha=%s%s pid=%s up=%dm%02ds dist_ver=%s  (%s)"
+                     % (_served_sha(k), _served_note(k), k.get("pid"), up // 60, up % 60,
                         k.get("dist_ver"), k.get("url")))
         pa = k.get("parse") or {}
         if pa.get("fold", 0) + pa.get("full", 0) + pa.get("fallback", 0) > 0:

@@ -21,7 +21,7 @@ update` starts a session called "update".
 | `romp new -d <dir> <name>` | Start it in `<dir>` instead of the current folder |
 | `romp status` | Manager and kernel status; a kernel stopped by `romp down` says so |
 | `romp refresh` | Restart the postal bus and every kernel immediately, picking up new code (cut turns resume with their history) |
-| `romp update [host…]` | Push this machine's committed Romp to attached remotes and restart them at once (every deploy restart is immediate; boot reconcile resumes the cut turns with their history); a remote stopped by `romp down` is synced and left stopped |
+| `romp update [host…]` | Push this machine's committed Romp to attached remotes. A push that changes kernel code restarts that kernel at once (every deploy restart is immediate; boot reconcile resumes the cut turns with their history); one that changes none is [served without a restart](#updating-a-linked-machine-without-a-restart); a remote stopped by `romp down` is synced and left stopped |
 | `romp up` | Start the kernel: through the login service when one is installed, in the foreground otherwise. Clears a `romp down` marker |
 | `romp down` | Stop the kernel and keep it stopped until `romp up`. The turns the stop would cut get 5 seconds to finish first (a turn under a session host keeps running); sessions resume with their history at the next start. See [Stopping the kernel on purpose](#stopping-the-kernel-on-purpose) |
 | `romp version` | Version report across the moving parts |
@@ -1850,6 +1850,49 @@ has no `OOMScoreAdjust=` to reset it, so with `ROMP_CLI_SCOPE_OOM_SCORE_ADJ` set
 the machine-wide OOM killers rank it with the sessions, not with the kernel.
 Either way the next kernel boot runs `ensure` again, so at worst mail parks
 until `romp up`.
+
+### Updating a linked machine without a restart
+
+A push to a linked machine restarts its kernel only when the push changes
+kernel code. This holds for `romp update <host>`, the network popover's
+**Push** and the automatic push alike. Before pushing, this machine lists the
+files that differ between the commit the far kernel booted from and the commit
+being pushed. When none of them is kernel code (the files under `kernel/` and
+`bin/`, apart from their `.md` files and the message bus's launcher), the far
+checkout is reset as usual and the kernel running there is asked to converge
+in place: it rebuilds the page bundles itself, restarts the message bus alone
+when the push changed the bus's files, and open dashboards there show "A newer
+romp build is ready." The push's result reads `synced to <commit>; no kernel
+code changed, so the kernel there converged in place (no restart)`.
+
+Everything else restarts the far kernel as before: a diff that holds any
+kernel file (a commit touching both pages and kernel code included), a diff
+this machine cannot read, and a far kernel whose booted commit is unknown. The
+far kernel also decides for itself, from its own checkout, and refuses when it
+finds kernel code there that it does not run. A refusal, a bundle build that
+fails, no answer within 45 seconds, or a `GET /version` that does not name the
+pushed commit afterwards all end in the restart, and the result says a restart
+happened and why: `it was asked to converge in place and could not (<reason>),
+so it is restarting instead`. A far kernel older than this feature answers the
+ask with HTTP 404 and is restarted. The dashboard's restart button, which
+also pushes this build to the linked machines, always restarts them: a restart
+is what was asked for.
+
+After a converge in place, `GET /version` on that machine keeps `kernel_sha` at
+the commit the process booted from, which is the kernel code it runs.
+`converged_sha` names the commit it serves (equal to `kernel_sha` until a
+converge), `kernel_ver` the release of that commit, `checkout_sha` the
+checkout's head, and `restart_pending` is false. A deploy check asking whether
+a machine serves a commit reads `converged_sha` with `restart_pending`, and
+`romp version` prints the same: the served commit, the booted one beside it,
+and whether a restart is pending.
+
+A pull works the same way. When this machine pulls a linked machine's newer
+commits (`/tunnels/pull`, the popover's **Pull**) and they change no kernel
+code, the kernel converges as the pull lands, and the answer carries
+`converged: true`; before 2026-11-12 it waited for the periodic check, up to
+five minutes. A peer asked to pull that answers `converged: true` is not sent
+a restart.
 
 ### What survives a restart
 

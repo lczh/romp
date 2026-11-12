@@ -52,7 +52,7 @@ EOF
     _romp_cmd "romp new --no-inherit <name>" -          "Run from inside a session, a new session joins that session's tags by default; this starts it outside them"
     _romp_cmd "romp status"                romp-manager "Show manager + kernel status (a kernel stopped by romp down says so)"
     _romp_cmd "romp refresh"               romp-manager "Restart the postal bus + all romp kernels (picks up new code — run after an update)"
-    _romp_cmd "romp update [host]"         romp-update  "Push this machine's committed romp to attached remotes and restart them"
+    _romp_cmd "romp update [host]"         romp-update  "Push this machine's committed romp to attached remotes (their kernels restart only when kernel code changed)"
     _romp_cmd "romp down [--now] [--wait N]" romp-manager "Stop the kernel and keep it stopped until romp up; turns in flight get N seconds (default 5) to finish, --now skips the wait"
     _romp_cmd "romp up [--foreground]"     romp-manager "Start the kernel manager: through the login service when installed, else in the foreground"
     _romp_cmd "romp version"               romp-version "Versions across the parts (tree, kernel, served vs built bundles)"
@@ -129,10 +129,11 @@ if [[ "${1:-}" == "uninstall" ]]; then
     exec "$(dirname "$(readlink -f "$0")")/romp-uninstall" "$@"
 fi
 
-# `romp update [host...]` — PUSH this machine's committed romp to attached REMOTE kernels + restart them,
-# so they run exactly the local code (the user 2026-07-04: peer-to-peer, no GitHub). No host → every
-# out-of-date attached remote. Delegates to romp-update (python), which asks the LOCAL kernel to git-push
-# local HEAD over ssh + restart. To update THIS machine: `git pull`/checkout then `romp refresh`.
+# `romp update [host...]` — PUSH this machine's committed romp to attached REMOTE kernels, so they run
+# exactly the local code (the user 2026-07-04: peer-to-peer, no GitHub); a kernel there restarts only when
+# the push changed kernel code (2026-11-12). No host → every out-of-date attached remote. Delegates to
+# romp-update (python), which asks the LOCAL kernel to git-push local HEAD over ssh and converge the far
+# kernel. To update THIS machine: `git pull`/checkout then `romp refresh`.
 if [[ "${1:-}" == "update" ]]; then
     shift
     exec romp-update "$@"

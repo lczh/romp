@@ -148,6 +148,35 @@ def test_report_handles_predating_kernel():
     assert "predates /version" in out
 
 
+def _kernel_line(**fields):
+    ver._git_sha = lambda: "1111111"
+    ver._disk_bundles = lambda: {}
+    k = {"kernel_sha": "abc1234", "pid": 9, "uptime_s": 65, "dist_ver": 100, "url": "http://127.0.0.1:29855",
+         "bundles": {}}
+    k.update(fields)
+    ver._probe_kernel = lambda: ("version", k)
+    return next(ln for ln in ver.report().splitlines() if ln.startswith("kernel"))
+
+
+def test_report_names_the_commit_a_converge_in_place_serves():
+    # the review of the push converge, 2026-11-12: a push or pull that changes no kernel code is served without a
+    # restart, kernel_sha stays the booted commit, and the report printed only that one, so the kernel looked behind
+    # its own checkout and invited a `romp refresh` nothing needed
+    line = _kernel_line(converged_sha="11111111", restart_pending=False)
+    assert line.startswith("kernel   sha=11111111 (booted from abc1234, converged in place; no restart pending) pid=9"), line
+    assert "romp refresh" not in line, line
+
+
+def test_report_says_when_a_restart_is_pending():
+    line = _kernel_line(converged_sha="abc1234", restart_pending=True)
+    assert line.startswith("kernel   sha=abc1234 (⚠ restart pending — `romp refresh`) pid=9"), line
+
+
+def test_report_keeps_the_plain_line_for_a_kernel_on_its_boot_or_one_older_than_the_field():
+    assert _kernel_line(converged_sha="abc1234", restart_pending=False).startswith("kernel   sha=abc1234 pid=9")
+    assert _kernel_line().startswith("kernel   sha=abc1234 pid=9"), "a kernel without converged_sha: its booted commit"
+
+
 if __name__ == "__main__":
     test_report_flags_stale_served_bundle()
     test_report_handles_down_kernel()

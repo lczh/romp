@@ -186,7 +186,10 @@ class TheBuildersRunTheProductionProfile(unittest.TestCase):
         real = km.subprocess
         stand_in = types.SimpleNamespace(run=fake_run, TimeoutExpired=real.TimeoutExpired,
                                          CalledProcessError=real.CalledProcessError)
-        with mock.patch.dict(os.environ), mock.patch.object(km, "subprocess", stand_in):
+        lock_dir = tempfile.mkdtemp(prefix="romp-build-lock-")       # the builders' lock, off the checkout under test
+        self.addCleanup(lambda: __import__("shutil").rmtree(lock_dir, ignore_errors=True))
+        with mock.patch.dict(os.environ), mock.patch.object(km, "subprocess", stand_in), \
+                mock.patch.object(km, "_build_lock_path", lambda: Path(lock_dir) / ".romp-build.lock"):
             os.environ.pop("ROMP_EXT_DEV_BUILD", None)
             if knob is not None:
                 os.environ["ROMP_EXT_DEV_BUILD"] = knob
@@ -217,6 +220,281 @@ class TheBuildersRunTheProductionProfile(unittest.TestCase):
                     with self.subTest(knob=knob):
                         calls = self._run_with(knob, km._ensure_bundles)
                         self.assertEqual(calls, [want])
+
+
+class TheConvergeRebuildRetriesAfterNpmInstall(unittest.TestCase):
+    """EXECUTED. _rebuild_dist is the build a kernel serves a new commit with WITHOUT restarting (the in-place
+    converge, and since 2026-11-12 the answer to a peer's push that changed no kernel code). A build that failed
+    there sent the converge down the restart path, where _ensure_bundles cured the common cause, a merged commit
+    importing a package this machine's node_modules predates, with its `npm install` retry: a restart for a
+    page-only change. The converge's builder now carries the same one retry. A stand-in subprocess answers each
+    run() in turn; the argv of every run is asserted whole."""
+
+    BUILD = ["node", "esbuild.js", "--production"]
+    NPM = ["npm", "install", "--no-audit", "--no-fund"]
+    MISSING = 'Could not resolve "a-package-added-by-the-merge"'
+
+    @classmethod
+    def setUpClass(cls):
+        cls.km = load_source("romp_kernel_build_mode", os.path.join(ROOT, "bin", "romp-kernel"))
+
+    def _rebuild(self, *answers):
+        """_rebuild_dist() against runs that answer, in order, with each (returncode, stderr) given:
+        ((ok, err), [(argv, cwd) of each run])."""
+        km, calls, script = self.km, [], list(answers)
+
+        def fake_run(argv, *a, **kw):
+            calls.append((list(argv), kw.get("cwd")))
+            rc, err = script.pop(0)
+            return types.SimpleNamespace(returncode=rc, stdout="", stderr=err)
+
+        real = km.subprocess
+        stand_in = types.SimpleNamespace(run=fake_run, TimeoutExpired=real.TimeoutExpired,
+                                         CalledProcessError=real.CalledProcessError)
+        lock_dir = tempfile.mkdtemp(prefix="romp-build-lock-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(lock_dir, ignore_errors=True))
+        with mock.patch.dict(os.environ), mock.patch.object(km, "subprocess", stand_in), \
+                mock.patch.object(km, "_build_lock_path", lambda: Path(lock_dir) / ".romp-build.lock"):
+            os.environ.pop("ROMP_EXT_DEV_BUILD", None)
+            out = km._rebuild_dist()
+        return out, calls
+
+    def test_a_failed_build_is_retried_once_after_npm_install_and_can_succeed(self):
+        out, calls = self._rebuild((1, self.MISSING), (0, ""), (0, ""))
+        self.assertEqual(out, (True, ""), "the retry built: the converge serves the commit, no restart")
+        self.assertEqual([c[0] for c in calls], [self.BUILD, self.NPM, self.BUILD],
+                         "the same build command again, after the dependency refresh")
+        self.assertEqual({c[1] for c in calls}, {str(self.km.ROOT / "vscode-extension")}, "all three in the extension's directory")
+
+    def test_an_npm_install_that_fails_reports_the_builds_own_error_and_builds_no_more(self):
+        out, calls = self._rebuild((1, self.MISSING), (1, "npm ERR! network"))
+        self.assertEqual(out, (False, self.MISSING), "the build's words are the news, not npm's")
+        self.assertEqual([c[0] for c in calls], [self.BUILD, self.NPM])
+
+    def test_a_retry_that_fails_too_is_the_last_one(self):
+        out, calls = self._rebuild((1, self.MISSING), (0, ""), (1, "error: Unexpected token"))
+        self.assertEqual(out, (False, "error: Unexpected token"), "what the build says after the refresh")
+        self.assertEqual([c[0] for c in calls], [self.BUILD, self.NPM, self.BUILD], "one retry, never a loop")
+
+    def test_a_build_that_succeeds_runs_nothing_else(self):
+        out, calls = self._rebuild((0, ""))
+        self.assertEqual((out, [c[0] for c in calls]), ((True, ""), [self.BUILD]))
+
+
+class OneBuildOfACheckoutAtATime(unittest.TestCase):
+    """EXECUTED, across real processes. Every bundle builder of a checkout holds one fcntl lock (_bundle_build_lock) around
+    its build and its `npm install` retry, and hands the lock's descriptor to the children it runs. Before it, a kernel
+    stopped mid-build (the restart a push falls back to when the in-place build outlasts the ask, which is exactly when the
+    npm retry runs) left that `npm install` going, and the next kernel's boot build and dist check started their own in
+    the same node_modules (the review of the push converge, 2026-11-12). The other holder here is a real process this test
+    starts and stops by pid; the builds themselves are a recording stand-in for subprocess, so no node runs."""
+
+    BUILD = ["node", "esbuild.js", "--production"]
+    NPM = ["npm", "install", "--no-audit", "--no-fund"]
+    HOLD = ("import fcntl, os, sys\n"
+            "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "print('held', flush=True)\n"
+            "sys.stdin.read()\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.km = load_source("romp_kernel_build_mode", os.path.join(ROOT, "bin", "romp-kernel"))
+        cls.lock_path = staticmethod(cls.km._build_lock_path)       # the real one; setUp points the builders elsewhere
+
+    def setUp(self):
+        import shutil
+        self.dir = Path(tempfile.mkdtemp(prefix="romp-build-lock-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.lock = self.dir / "dist" / ".romp-build.lock"
+        self.calls, self.kws = [], []
+        self.real_sp = self.km.subprocess
+        self.answer = lambda argv, kw: types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        def fake_run(argv, *a, **kw):
+            self.calls.append(list(argv))
+            self.kws.append(kw)
+            r = self.answer(argv, kw)
+            if kw.get("check") and r.returncode:
+                raise self.real_sp.CalledProcessError(r.returncode, argv)
+            return r
+
+        stand_in = types.SimpleNamespace(run=fake_run, TimeoutExpired=self.real_sp.TimeoutExpired,
+                                         CalledProcessError=self.real_sp.CalledProcessError)
+        for patch in (mock.patch.dict(os.environ), mock.patch.object(self.km, "subprocess", stand_in),
+                      mock.patch.object(self.km, "_build_lock_path", lambda: self.lock),
+                      mock.patch.object(self.km, "_BUILD_LOCK_WAIT_S", 30)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        os.environ.pop("ROMP_EXT_DEV_BUILD", None)
+
+    def _hold(self, argv=None, pass_fds=()):
+        """A process of this test's own holding the lock until its stdin closes; stopped (by pid) at cleanup."""
+        import subprocess as sp
+        import sys
+        if argv is None:
+            self.lock.parent.mkdir(parents=True, exist_ok=True)
+            argv = [sys.executable, "-c", self.HOLD, str(self.lock)]
+        p = sp.Popen(argv, stdin=sp.PIPE, stdout=sp.PIPE, text=True, pass_fds=pass_fds)
+        self.addCleanup(lambda: (p.poll() is None and p.kill(), p.wait(10)))
+        if argv[-1] == str(self.lock):
+            self.assertEqual(p.stdout.readline().strip(), "held")
+        return p
+
+    def _release(self, p):
+        p.stdin.close()
+        p.wait(10)
+
+    def _free(self):
+        """Whether another process could take the lock now (a fresh open, one try)."""
+        import fcntl
+        fd = os.open(str(self.lock), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+        finally:
+            os.close(fd)
+
+    def test_a_build_waits_for_another_process_building_the_checkout_and_runs_after_it(self):
+        import threading
+        import time
+        other = self._hold()
+        out = []
+        t = threading.Thread(target=lambda: out.append(self.km._rebuild_dist()))
+        t.start()
+        time.sleep(1.0)
+        self.assertEqual(self.calls, [], "nothing runs while the other build holds the checkout")
+        self._release(other)
+        t.join(10)
+        self.assertEqual((out, self.calls), ([(True, "")], [self.BUILD]), "and the build runs once it ends")
+
+    def test_a_build_that_waits_past_its_bound_says_so_and_runs_nothing(self):
+        self._hold()
+        with mock.patch.object(self.km, "_BUILD_LOCK_WAIT_S", 0.5):
+            ok, why = self.km._rebuild_dist()
+        self.assertFalse(ok)
+        self.assertEqual(why, "another build of this checkout held its build lock past the 0.5 s a builder waits")
+        self.assertEqual(self.calls, [], "no esbuild and no npm beside the other build")
+
+    def test_the_npm_install_a_build_starts_keeps_the_checkout_after_the_kernel_lets_go(self):
+        # the retry's npm is the child that outlives a stopped kernel: here it is a real process started with the fds the
+        # builder passed, still running after _rebuild_dist returned and closed the kernel's own descriptor, as it would
+        # be after the kernel died
+        import sys
+        lingering = []
+
+        def answer(argv, kw):
+            if argv == self.NPM and not lingering:
+                lingering.append(self._hold([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                                            pass_fds=kw.get("pass_fds", ())))
+            rc = 1 if (argv == self.BUILD and len(self.calls) == 1) else 0
+            return types.SimpleNamespace(returncode=rc, stdout="", stderr="a package the merge added")
+        self.answer = answer
+        self.assertEqual(self.km._rebuild_dist(), (True, "a package the merge added"))
+        self.assertEqual(self.calls, [self.BUILD, self.NPM, self.BUILD])
+        self.assertFalse(self._free(), "the npm the build started still holds the checkout's lock")
+        self.calls.clear()
+        with mock.patch.object(self.km, "_BUILD_LOCK_WAIT_S", 0.5):
+            self.assertFalse(self.km._rebuild_dist()[0], "so the next kernel's build does not run beside it")
+        self.assertEqual(self.calls, [])
+        self._release(lingering[0])
+        self.assertTrue(self._free(), "it lets go when it ends")
+        self.assertEqual(self.km._rebuild_dist(), (True, "a package the merge added"))
+
+    def test_the_boot_build_does_not_hold_the_boot_for_another_build_and_builds_after_it(self):
+        import threading
+        import time
+        km = self.km
+        (self.dir / "vscode-extension" / "node_modules").mkdir(parents=True)
+        other = self._hold()
+        with mock.patch.object(km, "ROOT", self.dir), mock.patch.object(km, "DIST", self.dir / "no-dist"):
+            t0 = time.monotonic()
+            km._ensure_bundles()
+            self.assertLess(time.monotonic() - t0, 5.0, "the boot goes on")
+            self.assertEqual(self.calls, [], "and builds nothing beside the other build")
+            waiter = [th for th in threading.enumerate() if th.name == "romp-boot-bundles"]
+            self.assertEqual(len(waiter), 1, "the check waits on a thread of its own")
+            self._release(other)
+            waiter[0].join(10)
+        self.assertEqual(self.calls, [self.BUILD], "the bundles are built once the other build ends")
+
+    def test_the_boot_build_takes_the_same_lock(self):
+        km = self.km
+        (self.dir / "vscode-extension" / "node_modules").mkdir(parents=True)
+        seen = []
+        self.answer = lambda argv, kw: (seen.append(self._free()),
+                                        types.SimpleNamespace(returncode=0, stdout="", stderr=""))[1]
+        with mock.patch.object(km, "ROOT", self.dir), mock.patch.object(km, "DIST", self.dir / "no-dist"):
+            km._ensure_bundles()
+        self.assertEqual((self.calls, seen), ([self.BUILD], [False]), "held while its esbuild runs")
+        self.assertTrue(self._free(), "and let go after")
+
+    def test_a_host_where_the_lock_cannot_work_still_builds(self):
+        # the re-review, 2026-11-12: any flock error but "held" read as "not taken", so on a filesystem without locks
+        # (ENOLCK, as some NFS mounts are) the boot build, the dist check, the converge and the pre-restart build all stood
+        # down for good and the UI never built again. Such a host builds unlocked, as before the lock, and says so once
+        import errno
+        import fcntl
+        import io
+        import threading
+        km = self.km
+        (self.dir / "vscode-extension" / "node_modules").mkdir(parents=True)
+        (self.dir / "a-file").write_text("")
+
+        def failing(code):
+            def flock(fd, op):
+                raise OSError(code, os.strerror(code))
+            return types.SimpleNamespace(flock=flock, LOCK_EX=fcntl.LOCK_EX, LOCK_NB=fcntl.LOCK_NB, LOCK_UN=fcntl.LOCK_UN)
+        cases = (("ENOLCK", dict(fcntl=failing(errno.ENOLCK)), "No locks available"),
+                 ("EBADF", dict(fcntl=failing(errno.EBADF)), "Bad file descriptor"),
+                 ("the lock file cannot be opened", dict(_build_lock_path=lambda: self.dir / "a-file" / "x.lock"), "a-file"))
+        for name, over, words in cases:
+            for builder in ("_rebuild_dist", "_ensure_bundles"):
+                with self.subTest(name, builder=builder):
+                    self.calls.clear(); self.kws.clear()
+                    err = io.StringIO()
+                    with mock.patch.multiple(km, **over), mock.patch.object(km, "ROOT", self.dir), \
+                            mock.patch.object(km, "DIST", self.dir / "no-dist"), mock.patch("sys.stderr", err):
+                        out = getattr(km, builder)()
+                    if builder == "_rebuild_dist":
+                        self.assertEqual(out, (True, ""), "the converge serves the build")
+                    self.assertEqual(self.calls, [self.BUILD], "it builds")
+                    self.assertEqual(self.kws[0].get("pass_fds"), (), "with no lock to hand its children")
+                    said = [ln for ln in err.getvalue().splitlines() if "without the checkout's build lock" in ln]
+                    self.assertEqual(len(said), 1, err.getvalue())
+                    self.assertIn(words, said[0])
+                    self.assertFalse([t for t in threading.enumerate() if t.name == "romp-boot-bundles"],
+                                     "the boot builds there and then, with no waiter")
+
+    def test_a_thread_waiting_out_another_process_holds_nothing_the_others_need(self):
+        # the re-review, 2026-11-12: the process's own build queue (_REBUILD_LOCK) was held through the whole wait for
+        # another process's build, so every other thread that wanted a build stacked behind it with no bound of its own
+        import threading
+        import time
+        km = self.km
+        other = self._hold()
+        out = []
+        t = threading.Thread(target=lambda: out.append(km._rebuild_dist()))
+        t.start()
+        time.sleep(0.5)
+        self.assertTrue(t.is_alive(), "it is waiting for the other process")
+        free = km._REBUILD_LOCK.acquire(blocking=False)
+        if free:
+            km._REBUILD_LOCK.release()
+        self.assertTrue(free, "and holds the in-process queue meanwhile only once it has the checkout")
+        self._release(other)
+        t.join(10)
+        self.assertEqual((out, self.calls), ([(True, "")], [self.BUILD]))
+
+    def test_the_lock_lives_where_git_ignores_it_at_every_commit(self):
+        # anywhere else in the tree it would read as an uncommitted edit and turn the kernel's sha '-dirty'
+        km = self.km
+        self.assertEqual(self.lock_path(), km.ROOT / "vscode-extension" / "dist" / ".romp-build.lock")
+        self.assertIn("dist/", _read(os.path.join(ROOT, "vscode-extension", ".gitignore")).split())
+        self.assertIn("dist/.romp-build.lock", _read(os.path.join(ROOT, "vscode-extension", ".vscodeignore")).split(),
+                      "and stays out of the packaged extension")
 
 
 if __name__ == "__main__":

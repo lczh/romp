@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """usage: romp update [host...]
 
-Push THIS machine's committed romp to attached REMOTE kernels and restart them, so each runs exactly the
-local code. With no host, every attached remote that is out of date (running a different commit than local)
-is updated; naming hosts updates just those. The local kernel pushes its committed HEAD straight to each
-host over ssh and restarts it: peer-to-peer, no `git pull` from origin, no round trip through GitHub.
+Push THIS machine's committed romp to attached REMOTE kernels, so each runs exactly the local code. A push
+that changes kernel code restarts that kernel; one that changes none (pages, docs, tests) is served by the
+kernel already running there, with no restart. With no host, every attached remote that is out of date
+(running a different commit than local) is updated; naming hosts updates just those. The local kernel pushes
+its committed HEAD straight to each host over ssh: peer-to-peer, no `git pull` from origin, no round trip
+through GitHub.
 Uncommitted local edits are NOT sent; commit first. To update THIS machine, `git pull` or check out the
 commit you want, then `romp refresh`.
 

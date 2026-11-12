@@ -5,10 +5,12 @@ SYNTHETIC hosts; subprocess/http are stubbed so nothing actually launches or con
 import json
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from romp_load import load_source
 from git_fixture import git, init_repo
@@ -21,12 +23,56 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
+os.makedirs(os.path.join(os.environ["XDG_STATE_HOME"], "romp"), exist_ok=True)
+with open(os.path.join(os.environ["XDG_STATE_HOME"], "romp", "session-hosts"), "w") as _f:
+    _f.write("off")                       # a minted state root pins the hosts off (the 2026-09-11 rule): live handlers run over it below
 km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 
 class _R:
     def __init__(self, out="", err="", rc=0):
         self.stdout, self.stderr, self.returncode = out, err, rc
+
+
+class _FarKernel:
+    """Stands in for the kernel on the far host: a loopback server answering POST /converge and GET /version with
+    what the test scripts, and recording each ask as (path, the token header, the body)."""
+
+    def __init__(self, converge=(200, {"ok": True}), version=None, delay=0.0):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        far, self.asks = self, []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _answer(self, code, obj):
+                body = json.dumps(obj).encode()
+                try:
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except OSError:
+                    pass                      # the asker stopped waiting: the case one test is about
+
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                far.asks.append((self.path, self.headers.get("X-Romp-Token"), json.loads(raw or b"{}")))
+                time.sleep(delay)
+                self._answer(*converge)
+
+            def do_GET(self):
+                self._answer(200, version or {})
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
 
 
 class VersionDrift(unittest.TestCase):
@@ -1178,6 +1224,10 @@ class ApplyScriptRuns(unittest.TestCase):
                 # first gate refuses with REFMISMATCH when the scratch ref on the host holds anything else.
                 # The discover fake's HEAD below stays a different sha, so the host is not "already up to date"
                 return _R(out=self.full)
+            if argv[0] == "git" and "diff" in argv:
+                # what the push carries, to the classifier (read only for a row whose kernel answers: _far below):
+                # a page source and nothing the kernel process runs
+                return _R(out="ui/webview/strip.ts")
             cmd = argv[-1]
             if "for d in" in cmd:
                 return _R(out="DIR:%s\nHEAD:%s\nDIRTY:" % (self.host, "2" * 40))
@@ -1239,6 +1289,577 @@ class ApplyScriptRuns(unittest.TestCase):
         self.assertEqual(out, "SYNCED:%s:DOWN" % self.sha, err)
         self.assertEqual(self._rows(), [])
         self.assertEqual(self._calls(), [], "status was read, nothing restarted, no row for it to note")
+
+    # ── the in-place ask, RUN: a push that changes no kernel code asks the kernel on the host to converge, over
+    # loopback with the serve token from the state directory, and restarts it unless the ask ends in OK ──
+
+    def _far(self, **kw):
+        """A kernel answering on the host (_FarKernel), the token it accepts in the state directory, and the row of
+        a machine whose kernel is up: the three things that put the ask in the script."""
+        far = _FarKernel(**kw)
+        self.addCleanup(far.close)
+        self.PORT = far.port                                      # what _manager(owns=True) lists, and the port poll reads
+        self.token = "t" + os.urandom(6).hex()                    # minted per run: no credential-shaped literal in a fixture
+        with open(os.path.join(self.state, "serve-token"), "w") as fh:
+            fh.write(self.token + "\n")
+        km._remotes["TESTHOST"] = {"host": "TESTHOST", "kernel_port": far.port, "status": "up", "kernel_sha": "2222222"}
+        self._git("update-ref", "refs/heads/%s" % km._P2P_REF, "HEAD")   # the push each apply follows: an apply deletes the ref
+        # the immediate path's kill stays inert and now leaves a trace, so a test can say the restart ran (and that
+        # it ran against this stub, never the machine's own pkill)
+        self._stub(os.path.join(self.stubs, "pkill"), 'echo "$*" >> "%s/kills"' % self.root)
+        return far
+
+    def _kills(self):
+        p = os.path.join(self.root, "kills")
+        return open(p).read().splitlines() if os.path.exists(p) else []
+
+    def test_a_kernel_that_converges_ends_the_apply_with_nothing_restarted(self):
+        far = self._far(version={"converged_sha": self.full[:8], "restart_pending": False})
+        self._manager(owns=True)
+        out, err = self._apply()
+        self.assertEqual(out, "SYNCED:%s:INPLACE" % self.sha, err)
+        self.assertEqual(far.asks, [("/converge", self.token, {"sha": self.full})],
+                         "one ask, for the exact commit the checkout was reset to, with the state directory's token")
+        self.assertEqual(self._calls(), [], "the manager is asked for nothing: no status read, no restart")
+        self.assertEqual(self._kills(), [], "and nothing is killed")
+        self.assertEqual(self._rows(), [], "and no restart-audit row, because nothing was cut")
+        self.assertEqual(self._git("rev-parse", "HEAD").strip(), self.full, "the code was synced")
+
+    @unittest.skipUnless(shutil.which("node"), "the owning-manager check needs node on PATH")
+    def test_a_kernel_that_refuses_is_restarted_through_its_manager_and_the_outcome_carries_why(self):
+        why = "kernel code changed between 2222222 and %s, or the diff could not be read" % self.full[:8]
+        far = self._far(converge=(502, {"ok": False, "detail": why}))
+        self._manager(owns=True)
+        out, err = self._apply()
+        self.assertEqual(out, "SYNCED:%s:MANAGED:NOINPLACE:%s" % (self.sha, why), err)
+        self.assertEqual(len(far.asks), 1)
+        self.assertEqual(self._rows(), [("p2p-update", None)], "the restart that follows is attributed as it always was")
+        self.assertEqual(self._calls(), ["row-on-disk", "restart-all"])
+
+    def test_a_kernel_that_agrees_but_does_not_report_the_commit_afterwards_is_restarted(self):
+        # the ask's own second read: /version must name the pushed commit and owe no restart, or the apply does not
+        # take the kernel's word for it. No manager here, so the restart is the immediate path (pkill is inert in
+        # this sandbox and the port still answers, so the script's poll ends on its first second)
+        for version, why in (({"converged_sha": "3333333", "restart_pending": False},
+                              "after the ask it reports 3333333, not %s" % self.full[:8]),
+                             ({}, "after the ask it reports no commit, not %s" % self.full[:8]),
+                             ({"converged_sha": self.full[:8], "restart_pending": True},
+                              "after the ask it reports kernel code it does not run")):
+            with self.subTest(version=version):
+                far = self._far(version=version)
+                out, err = self._apply()
+                self.assertEqual(out, "SYNCED:%s:FALLBACK:NOINPLACE:%s" % (self.sha, why), err)
+                self.assertEqual(len(far.asks), 1)
+                self.assertEqual(self._kills()[-1:], ['-f bin/romp-kern[e]l'], "the kernel was restarted")
+                self.assertEqual(self._rows()[-1:], [("p2p-update", None)], "and the restart is on the record")
+
+    def test_no_token_to_ask_with_restarts_the_kernel(self):
+        far = self._far(version={"converged_sha": self.full[:8], "restart_pending": False})
+        os.unlink(os.path.join(self.state, "serve-token"))
+        out, err = self._apply()
+        self.assertEqual(out, "SYNCED:%s:FALLBACK:NOINPLACE:no serve token in the state directory there" % self.sha, err)
+        self.assertEqual(far.asks, [], "nothing was asked")
+        self.assertEqual(self._kills(), ['-f bin/romp-kern[e]l'], "so the kernel was restarted")
+
+    def test_a_kernel_that_does_not_answer_within_the_bound_is_restarted(self):
+        # the wait is bounded (_INPLACE_ASK_S, cut to a second here): an ask that never comes back must not hold the
+        # detached apply, and with it the restart, forever
+        saved = km._INPLACE_ASK_S
+        km._INPLACE_ASK_S = 1
+        try:
+            self._far(delay=2.5)
+            out, err = self._apply()
+        finally:
+            km._INPLACE_ASK_S = saved
+        self.assertTrue(out.startswith("SYNCED:%s:FALLBACK:NOINPLACE:its kernel did not answer the ask" % self.sha), (out, err))
+        self.assertEqual(self._kills(), ['-f bin/romp-kern[e]l'])
+
+    def test_nothing_listening_on_the_port_is_not_a_converge(self):
+        # a row that still read "up" over a kernel that has since gone: the ask fails to connect, and the script goes
+        # on to whatever it would have done (here a host stopped on purpose, which keeps the test off the port poll)
+        self._far()
+        km._remotes["TESTHOST"]["kernel_port"] = 1
+        self._marker()
+        out, err = self._apply()
+        self.assertTrue(out.startswith("SYNCED:%s:DOWN:NOINPLACE:its kernel did not answer the ask" % self.sha), (out, err))
+        self.assertEqual((self._rows(), self._kills()), ([], []))
+
+
+class PushWithoutARestart(unittest.TestCase):
+    """A push that changes no kernel code leaves the far kernel running (the user 2026-11-12, who wanted pages to stay
+    responsive after a deploy: every kernel restart costs minutes of slow pages). The hub classifies the diff from the
+    commit that kernel BOOTED from to the pushed one with the converge's own classifier; when it holds nothing the
+    kernel process runs, the apply asks the kernel there to converge in place and restarts it only if that is refused.
+    Whatever cannot be shown restart-free restarts exactly as every push did before. The three subprocess calls are
+    faked as in UpdateRemote, plus the classifier's `git diff` (the changed paths, NUL-separated) and `git show`."""
+    LFULL, RHEAD = UpdateRemote.LFULL, UpdateRemote.RHEAD
+    PAGE = ["ui/webview/strip.ts", "docs/guide.md", "tests/test_strip.py"]      # nothing the kernel process runs
+
+    def setUp(self):
+        self._run, self._hc = km.subprocess.run, dict(km._HEAD_CACHE)
+        km._HEAD_CACHE.update(ts=0.0, full=None, short=None)
+        self._row()
+        self.addCleanup(km._remotes.pop, "TESTHOST", None)
+        self.diffs, self.waits = [], []
+
+    def tearDown(self):
+        km.subprocess.run = self._run
+        km._HEAD_CACHE.clear(); km._HEAD_CACHE.update(self._hc)
+
+    def _row(self, **over):
+        """The hub's row for a machine whose kernel answers, booted from 2222222."""
+        row = {"host": "TESTHOST", "status": "up", "kernel_sha": "2222222", "kernel_port": 29855}
+        row.update(over)
+        km._remotes["TESTHOST"] = {k: v for k, v in row.items() if v is not None}
+        return km._remotes["TESTHOST"]
+
+    def _wire(self, files, apply_out="SYNCED:abcdef0:INPLACE", unreadable=False, same_ast=False, timeout=False, rhead=None):
+        calls = []
+
+        def fake(argv, **kw):
+            calls.append(argv)
+            if argv[0] == "git" and "diff" in argv:
+                self.diffs.append(argv[-1])
+                return _R(out="\0".join(files), rc=1 if unreadable else 0)
+            if argv[0] == "git" and "show" in argv:                # _ast_equal_blobs: the same bytes on both sides, or unreadable
+                return _R(out=b"x = 1\n", rc=0 if same_ast else 1)
+            if argv[0] == "git" and "push" in argv:
+                return _R()
+            if argv[0] == "git" and "rev-parse" in argv:
+                return _R(out=self.LFULL)
+            cmd = argv[-1]
+            if "for d in" in cmd:
+                return _R(out="DIR:/home/u/romp\nHEAD:%s\nDIRTY:" % (rhead or self.RHEAD))
+            if "reset --hard" in cmd:
+                self.waits.append(kw.get("timeout"))
+                if timeout:
+                    raise km.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+                return _R(out=apply_out)
+            return _R()
+        km.subprocess.run = fake
+        return calls
+
+    def _push(self, files, restart=None, **kw):
+        """Push LFULL to TESTHOST when the diff from its booted commit is `files`: (ok, detail, the inner apply script)."""
+        calls = self._wire(files, **kw)
+        try:
+            ok, detail = km._update_remote("TESTHOST", **({"restart": restart} if restart else {}))
+        finally:
+            km.subprocess.run = self._run
+        wrapper = next((a[-1] for a in calls if isinstance(a[-1], str) and "reset --hard" in a[-1]), "")
+        inner = shlex.split(wrapper.split("; if command -v setsid")[0][len("APPLY="):])[0] if wrapper else ""
+        return ok, detail, inner
+
+    def test_a_push_that_changes_only_pages_asks_the_kernel_to_converge_and_restarts_nothing(self):
+        row = km._remotes["TESTHOST"]
+        self.assertTrue(km._remote_out_of_date(row, head=self.LFULL), "the machine is behind before the push")
+        ok, detail, script = self._push(self.PAGE)
+        self.assertEqual((ok, detail), (True, "synced to abcdef0; no kernel code changed, so the kernel there "
+                                              "converged in place (no restart)"))
+        self.assertEqual(self.diffs, ["2222222..%s" % self.LFULL], "classified from the commit that kernel booted from")
+        # the ask sits after the reset and ahead of every restart step, and an OK ends the script there
+        self.assertIn("/converge", script)
+        self.assertLess(script.index("reset --hard"), script.index("/converge"))
+        self.assertLess(script.index("/converge"), script.index("restart-audit.jsonl"), "no audit row before the ask")
+        self.assertLess(script.index("/converge"), script.index('romp-manager" restart-all >>'))
+        self.assertLess(script.index("/converge"), script.index('pkill -f "bin/romp-kern[e]l"'))
+        self.assertIn('if [ "$IP" = OK ]; then echo "SYNCED:$NEW:INPLACE$K"; exit 0; fi', script)
+        self.assertIn('"$LOGDIR" 29855 "$WANT" %d' % km._INPLACE_ASK_S, script,
+                      "the ask names the state directory, the polled port, the pushed commit and its bound")
+        self.assertNotIn("restartExpected", row, "no restart is coming, so none is expected")
+        self.assertEqual((row.get("checkout_sha"), row.get("restart_pending")), (self.LFULL[:8], False),
+                         "the row says what the apply read back from that kernel")
+        self.assertFalse(km._remote_out_of_date(row, head=self.LFULL), "and the machine no longer reads as behind")
+        self.assertEqual(self.waits, [60 + km._INPLACE_ASK_S], "the hub waits out the far kernel's build")
+
+    def test_no_caller_gives_up_on_a_push_that_is_still_converging(self):
+        # the hub's wait for an in-place push is the apply's 60 s plus the ask's bound; whoever asked the hub waits
+        # longer than that, or a push that converged a moment later is reported as one that failed
+        hub = 60 + km._INPLACE_ASK_S
+        cli = re.search(r"urlopen\(req, timeout=(\d+)\) as r:\s+# git pull \+ restart", open(os.path.join(BIN, "romp-update")).read())
+        self.assertTrue(cli, "romp update's wait for the push located")
+        self.assertLess(hub, int(cli.group(1)), "`romp update` outwaits the hub")
+        self.assertLess(hub, km._VIA_TIMEOUT["/tunnels/update"], "and so does a machine relaying the update")
+
+    def test_a_push_that_changes_kernel_code_restarts_exactly_as_before(self):
+        for files in (["kernel/kernel.py"], ["bin/romp-manager"], ["kernel/new_module.py", "docs/guide.md"]):
+            with self.subTest(files=files):
+                row = self._row()
+                ok, detail, script = self._push(files, apply_out="SYNCED:abcdef0:MANAGED")
+                self.assertEqual((ok, detail), (True, "synced to abcdef0 + restarting now (through its manager)"))
+                self.assertNotIn("/converge", script, "nothing is asked of a kernel that must restart")
+                self.assertNotIn("INPLACE", script)
+                self.assertIn('romp-manager" restart-all >>', script)
+                self.assertTrue(row["restartExpected"]["sha"] == self.LFULL and row["restartExpected"]["quiet"] is False)
+                self.assertEqual(self.waits[-1], 60, "the restart's own confirmation window")
+        # and the script is, byte for byte, the one sent to a machine the hub knows nothing about: no ask means no change
+        self._row(status=None, kernel_sha=None)
+        _, _, plain = self._push(self.PAGE, apply_out="SYNCED:abcdef0:MANAGED")
+        self.assertEqual(script, plain)
+
+    def test_a_push_that_changes_both_pages_and_kernel_code_restarts(self):
+        for files in (["ui/webview/strip.ts", "kernel/kernel.py"], ["ui/webview/strip.ts", "bin/romp-manager"],
+                      ["postal/bus.py", "kernel/event_model.py", "docs/guide.md"]):
+            with self.subTest(files=files):
+                row = self._row()
+                ok, detail, script = self._push(files, apply_out="SYNCED:abcdef0:MANAGED")
+                self.assertEqual((ok, detail), (True, "synced to abcdef0 + restarting now (through its manager)"))
+                self.assertNotIn("/converge", script)
+                self.assertIn("restartExpected", row)
+
+    def test_whatever_cannot_be_shown_restart_free_restarts(self):
+        cases = (
+            ("no kernel answers there", dict(status="starting"), {}),
+            ("the row carries no status", dict(status=None), {}),
+            ("its kernel reported no booted commit", dict(kernel_sha=None), {}),
+            ("it booted from an uncommitted tree", dict(kernel_sha="2222222-dirty"), {}),
+            ("it already owes a restart", dict(restart_pending=True), {}),
+            ("the diff cannot be read here", {}, dict(unreadable=True)),
+            # byte identity is what the far kernel's restart_pending reads, so a comment-only kernel edit served in
+            # place would leave that kernel reporting a restart owed for the rest of its life
+            ("a kernel file changed bytes with the same AST", {}, dict(files=["kernel/kernel.py"], same_ast=True)),
+            ("the user asked for a restart", {}, dict(restart="always")),
+        )
+        for name, row_over, push_kw in cases:
+            with self.subTest(name):
+                self._row(**row_over)
+                files = push_kw.pop("files", self.PAGE)
+                ok, detail, script = self._push(files, apply_out="SYNCED:abcdef0:MANAGED", **push_kw)
+                self.assertEqual((ok, detail), (True, "synced to abcdef0 + restarting now (through its manager)"))
+                self.assertNotIn("/converge", script, name)
+                self.assertEqual(self.waits[-1], 60)
+
+    def test_a_message_bus_change_is_asked_in_place_too(self):
+        # the bus is its own process: the far kernel bounces it during the converge (_bus_converge), and a kernel
+        # restart would not have updated it
+        for files in (["postal/bus.py"], ["bin/romp-postal-service", "ui/webview/strip.ts"]):
+            with self.subTest(files=files):
+                self._row()
+                ok, detail, script = self._push(files)
+                self.assertTrue(ok, detail)
+                self.assertIn("/converge", script)
+                self.assertIn("converged in place", detail)
+
+    def test_a_converge_that_fails_there_restarts_and_the_result_says_so(self):
+        why = "its kernel answered HTTP 404"
+        fell = "; it was asked to converge in place and could not (%s), so it is restarting instead" % why
+        for out, want in (
+                ("SYNCED:abcdef0:MANAGED:NOINPLACE:" + why, "synced to abcdef0 + restarting now (through its manager)" + fell),
+                ("SYNCED:abcdef0:FALLBACK:NOINPLACE:" + why,
+                 "synced to abcdef0 + restarting now (no manager owns that kernel there — an immediate restart)" + fell),
+                ("SYNCED:abcdef0:MANAGED:NOINPLACE:" + why + ":REFKEPT",
+                 "synced to abcdef0 + restarting now (through its manager)" + fell + "; the scratch ref on TESTHOST now "
+                 "holds another sender's push, left alone for that sender's own apply")):
+            with self.subTest(out=out):
+                row = self._row()
+                ok, detail, script = self._push(self.PAGE, apply_out=out)
+                self.assertEqual((ok, detail), (True, want))
+                self.assertIn("/converge", script, "it was asked")
+                exp = row.get("restartExpected")
+                self.assertTrue(exp and exp["sha"] == self.LFULL and exp["quiet"] is False,
+                                "a restart IS coming, and the hub expects its gap")
+                self.assertNotIn("checkout_sha", row, "nothing was read back from that kernel")
+
+    def test_a_host_stopped_on_purpose_is_synced_and_neither_converged_nor_restarted(self):
+        why = "its kernel did not answer the ask (URLError)"
+        row = self._row()
+        ok, detail, _ = self._push(self.PAGE, apply_out="SYNCED:abcdef0:DOWN:NOINPLACE:" + why)
+        self.assertEqual((ok, detail), (True, "synced to abcdef0; TESTHOST is stopped by romp down, so nothing was "
+                                              "restarted there (romp up on it starts the new code); the in-place "
+                                              "converge asked of its kernel did not happen (%s)" % why))
+        self.assertNotIn("restartExpected", row)
+
+    def test_an_ask_the_hub_stops_waiting_for_says_what_was_asked_and_expects_no_restart(self):
+        row = self._row()
+        ok, detail, _ = self._push(self.PAGE, timeout=True)
+        self.assertFalse(ok)
+        self.assertIn("asked to converge in place", detail)
+        self.assertIn("restarts it if that fails", detail)
+        self.assertNotIn("restartExpected", row, "a kernel that converged must not be accused of never restarting")
+        # the restart's own timeout keeps its wording and its expectation, as before
+        row = self._row()
+        ok, detail, _ = self._push(["kernel/kernel.py"], timeout=True)
+        self.assertFalse(ok)
+        self.assertIn("confirming the restart timed out", detail)
+        self.assertIn("restartExpected", row)
+
+    def test_a_checkout_already_on_the_build_expects_no_restart_of_a_kernel_that_owes_none(self):
+        # the kernel there booted from an older commit and converged in place since: its checkout holds the build and
+        # it says it owes no restart, so the hub does not start expecting one
+        row = self._row(checkout_sha=self.LFULL[:8], restart_pending=False)
+        ok, detail, script = self._push(self.PAGE, rhead=self.LFULL)
+        self.assertEqual((ok, detail), (True, "already up to date (%s)" % self.LFULL[:8]))
+        self.assertEqual(script, "", "nothing was pushed or applied")
+        self.assertNotIn("restartExpected", row)
+        # a kernel that does owe one (or cannot say) is still expected to restart, as before
+        for pending in (True, None):
+            row = self._row(checkout_sha=self.LFULL[:8], restart_pending=pending)
+            ok, detail, _ = self._push(self.PAGE, rhead=self.LFULL)
+            self.assertIn("has not restarted into it yet", detail)
+            self.assertEqual(row["restartExpected"]["sha"], self.LFULL)
+
+    def test_the_ask_is_python_and_the_script_that_carries_it_is_bash(self):
+        compile(km._INPLACE_ASK_PY, "<the in-place ask>", "exec")
+        self.assertNotIn("'", km._INPLACE_ASK_PY, "double quotes only: it rides inside two layers of shell quoting")
+        _, _, script = self._push(self.PAGE)
+        r = subprocess.run(["bash", "-n"], input=script, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_automatic_push_reports_the_converge_and_claims_no_restart(self):
+        saved = dict(km._auto_push), dict(km._auto_push_tried)
+        km._auto_push.clear(); km._auto_push_tried.clear()
+
+        def restore():
+            km._auto_push.clear(); km._auto_push.update(saved[0])
+            km._auto_push_tried.clear(); km._auto_push_tried.update(saved[1])
+        self.addCleanup(restore)
+        self._wire(self.PAGE)
+        self.assertTrue(km._auto_push_remote("TESTHOST"))
+        st = km._auto_push_state("TESTHOST")
+        self.assertEqual(st["phase"], "waiting")
+        self.assertIn("converged in place (no restart)", st["detail"])
+        notice = km._sync_notice_rows(limit=1)[0]
+        self.assertTrue(notice["ok"])
+        self.assertIn("converged in place (no restart)", notice["text"])
+        self.assertNotIn("restarting into it", notice["text"], "nothing restarts, and the Log does not say it does")
+        # the supervisor's next pass over the row: the machine matches, which is the event that ends the phase
+        km._maybe_auto_push(dict(km._remotes["TESTHOST"]))
+        self.assertIsNone(km._auto_push_state("TESTHOST"))
+        # a push that does restart keeps the wording it had
+        self._row()
+        self._wire(["kernel/kernel.py"], apply_out="SYNCED:abcdef0:MANAGED")
+        self.assertTrue(km._auto_push_remote("TESTHOST"))
+        self.assertEqual(km._auto_push_state("TESTHOST")["detail"], "pushed; waiting for it to restart")
+        self.assertIn("it is restarting into it", km._sync_notice_rows(limit=1)[0]["text"])
+
+
+class ConvergeAsk(unittest.TestCase):
+    """POST /converge, the far side of a push that changed no kernel code (_converge_ask): this kernel is asked to
+    serve the commit its checkout was just reset to without restarting. It decides again from its own tree and
+    refuses whatever it cannot show is restart-free, and the asker answers a refusal by restarting it. The checkout,
+    the booted commit and the bundle build are stubbed; the diff is the fake git's."""
+    WANT, BOOTED = "1" * 40, "2222222"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        dist = pathlib.Path(self.tmp) / "dist"
+        dist.mkdir()
+        (dist / "feed.js").write_text("old")
+        os.utime(dist / "feed.js", (1_000_000, 1_000_000))            # a bundle built long ago
+        self.files, self.unreadable = ["ui/webview/strip.ts", "docs/guide.md"], False
+        self.head, self.pending, self.booted, self.build_ok = self.WANT, False, self.BOOTED, True
+        self.builds, self.bounces, self.notices, self.audits, self.diffs = [], [], [], [], []
+        self.ranges, self.bounce_ok, self.git_reads = {}, True, []
+        names = ("_fresh_local_head", "_restart_pending", "_kernel_sha", "_booted_sha", "_rebuild_dist", "_bus_converge",
+                 "_sync_notice", "_audit_restart_request", "DIST", "_VER", "_SHA", "ROOT")
+        saved = {n: getattr(km, n) for n in names}
+        self.saved = saved
+        self._run, hc = km.subprocess.run, dict(km._HEAD_CACHE)
+        latches = (km._REBUILT_FOR[0], km._INPLACE_TRIED[0], km._BUS_BOUNCED_FOR[0], km._SHA_MISS_T[0])
+
+        def restore():
+            for n, v in saved.items():
+                setattr(km, n, v)
+            km.subprocess.run = self._run
+            km._HEAD_CACHE.clear(); km._HEAD_CACHE.update(hc)
+            km._REBUILT_FOR[0], km._INPLACE_TRIED[0], km._BUS_BOUNCED_FOR[0], km._SHA_MISS_T[0] = latches
+        self.addCleanup(restore)
+
+        def build():
+            self.builds.append(1)
+            if self.build_ok:
+                (dist / "feed.js").write_text("new")                  # a fresh bundle: its mtime is now
+            return self.build_ok, ("" if self.build_ok else "esbuild: could not resolve a module")
+
+        def fake(argv, **kw):
+            if argv[0] == "git" and "diff" in argv:
+                self.diffs.append(argv[-1])
+                a, b = argv[-1].split("..")
+                files = self.ranges.get((a[:8], b[:8]), self.files)    # a range named in the test, else the one diff
+                return _R(out="\0".join(files), rc=1 if self.unreadable else 0)
+            self.git_reads.append(argv)
+            return _R(rc=1)                                           # every other read of git: unanswered
+        km.DIST = dist
+        km._fresh_local_head = lambda: self.head
+        km._restart_pending = lambda checkout=None: self.pending
+        km._kernel_sha = lambda reask=False: self.booted
+        km._booted_sha = lambda: self.booted
+        km._rebuild_dist = build
+        km._bus_converge = lambda: (self.bounces.append(1), (self.bounce_ok, "" if self.bounce_ok else "no bus answered"))[1]
+        km._BUS_BOUNCED_FOR[0] = ""
+        km._sync_notice = lambda text, ok=True, kind="sync": self.notices.append((text, ok))
+        km._audit_restart_request = lambda action, **kw: self.audits.append(action)
+        km.subprocess.run = fake
+        km._REBUILT_FOR[0] = km._INPLACE_TRIED[0] = ""
+
+    def test_a_page_only_commit_is_built_and_served_and_open_pages_are_offered_a_reload(self):
+        before = km._dist_ver()
+        self.assertEqual(km._converged_sha(), self.BOOTED, "until it converges, the commit it serves is the booted one")
+        self.assertEqual(km._converge_ask(self.WANT), (True, "converged in place onto 11111111"))
+        self.assertEqual(self.diffs[0], "%s..%s" % (self.BOOTED, self.WANT), "its own classification, from its own boot")
+        self.assertEqual((len(self.builds), self.bounces), (1, []), "one bundle build, and the bus is left alone")
+        # the reload offer: every page's keepalive carries the bundles' version, and a page holding an older one
+        # offers the reload, so the moved version IS the offer; the Log row beside it says what happened
+        self.assertGreater(km._dist_ver(), before, "the served bundles' version moved")
+        self.assertIn(("new build served in place (no kernel-code change; no restart) — reload the dashboard to "
+                       "pick it up", True), self.notices)
+        self.assertEqual(self.audits, ["main-converge-skip"], "the skipped restart is on the record")
+        self.assertEqual(km._converged_sha(), "11111111")
+        km.subprocess.run = self._run                                 # /version reads the rest of its fields for real
+        v = km._version_info()
+        self.assertEqual(v["converged_sha"], "11111111", "what a deploy check reads to see the build is live")
+        self.assertEqual(v["kernel_sha"], self.BOOTED, "the booted commit stays the booted commit")
+        self.assertIs(v["restart_pending"], False)
+
+    def test_a_message_bus_change_bounces_the_bus_once_and_builds(self):
+        self.files = ["postal/bus.py", "ui/webview/strip.ts"]
+        self.assertEqual(km._converge_ask(self.WANT), (True, "converged in place onto 11111111"))
+        self.assertEqual((len(self.bounces), len(self.builds)), (1, 1))
+        self.assertEqual(self.audits, ["bus-converge", "main-converge-skip"])
+
+    def test_it_refuses_whatever_it_cannot_show_is_restart_free(self):
+        def case(**over):
+            self.head, self.pending, self.booted = self.WANT, False, self.BOOTED
+            self.files, self.unreadable = ["ui/webview/strip.ts"], False
+            for k, v in over.items():
+                setattr(self, k, v)
+        code = "kernel code changed between 2222222 and 11111111, or the diff could not be read"
+        for name, over, want, why in (
+                ("no commit in the ask", {}, "", "no commit named"),
+                ("an abbreviated commit", {}, "1111111", "no commit named"),
+                ("the checkout is somewhere else", dict(head="3" * 40), self.WANT,
+                 "the checkout this kernel runs from is at 33333333, not 11111111"),
+                ("the checkout cannot be read", dict(head=""), self.WANT,
+                 "the checkout this kernel runs from is at no commit, not 11111111"),
+                ("kernel bytes on disk this process does not run", dict(pending=True), self.WANT,
+                 "the checkout holds kernel code this process does not run"),
+                ("the booted commit is unknown", dict(booted=None), self.WANT,
+                 "the commit this kernel booted from was not read before its checkout moved"),
+                ("kernel code in the diff", dict(files=["kernel/kernel.py"]), self.WANT, code),
+                ("pages and kernel code in one diff", dict(files=["ui/webview/strip.ts", "bin/romp-manager"]), self.WANT, code),
+                ("a diff that cannot be read", dict(unreadable=True), self.WANT, code)):
+            with self.subTest(name):
+                case(**over)
+                self.assertEqual(km._converge_ask(want), (False, why))
+                self.assertEqual((self.builds, self.bounces), ([], []), "a refusal builds nothing and bounces nothing")
+                self.assertEqual(km._converged_sha(), self.booted or "", "and it still names the commit it booted from")
+
+    def test_a_build_that_fails_is_a_refusal_and_the_kernel_keeps_naming_its_booted_commit(self):
+        self.build_ok = False
+        ok, why = km._converge_ask(self.WANT)
+        self.assertEqual((ok, why), (False, "the in-place build for 11111111 failed (the notice there carries the "
+                                            "build's own words)"))
+        self.assertEqual(km._converged_sha(), self.BOOTED, "it does not claim a commit it could not build")
+        self.assertTrue(any("esbuild: could not resolve a module" in t and not ok_ for t, ok_ in self.notices),
+                        "and the build's words reach the Log")
+
+    def test_asked_twice_for_one_commit_it_builds_once(self):
+        self.assertTrue(km._converge_ask(self.WANT)[0])
+        self.assertEqual(km._converge_ask(self.WANT), (True, "converged in place onto 11111111"))
+        self.assertEqual(len(self.builds), 1)
+
+    def test_a_kernel_booted_from_the_commit_has_nothing_to_do(self):
+        self.booted = "1111111"
+        self.assertEqual(km._converge_ask(self.WANT), (True, "already running 11111111"))
+        self.assertEqual((self.builds, self.diffs), ([], []))
+
+    def test_a_kernel_whose_boot_was_never_read_does_not_take_the_pushed_commit_for_its_own(self):
+        # the review of the push converge, 2026-11-12: with no earlier read of the booted commit, a read here names the
+        # commit the apply just reset the checkout to, and the ask answered "already running" with nothing built or
+        # classified, a bin/ change included. The real readers, over a git that would answer the new head
+        km._kernel_sha, km._booted_sha = self.saved["_kernel_sha"], self.saved["_booted_sha"]
+        km._SHA, km._SHA_MISS_T[0] = None, 0.0
+        self.files = ["bin/romp-manager"]
+
+        def git(argv, **kw):
+            self.git_reads.append(argv)
+            if "rev-parse" in argv:
+                return _R(out="1111111\n")
+            return _R(out="") if "status" in argv else _R(rc=1)
+        km.subprocess.run = git
+        self.assertEqual(km._converge_ask(self.WANT),
+                         (False, "the commit this kernel booted from was not read before its checkout moved"))
+        self.assertEqual((self.builds, self.git_reads), ([], []), "nothing built, and git is not asked for a boot it never saw")
+
+    def test_the_bus_is_bounced_once_per_change_to_its_files(self):
+        # the review of the push converge, 2026-11-12: measured from the booted commit, every later converge re-bounced a
+        # bus already running the code, five seconds of unreachable mail and a peer re-notify each time
+        t1, t2, t3 = self.WANT, "3" * 40, "4" * 40
+        self.ranges = {(self.BOOTED, t1[:8]): ["postal/bus.py", "ui/webview/strip.ts"],
+                       (self.BOOTED, t2[:8]): ["postal/bus.py", "ui/webview/feed.ts"],   # still differs from the boot…
+                       (t1[:8], t2[:8]): ["ui/webview/feed.ts"],                         # …not from the bus's code
+                       (self.BOOTED, t3[:8]): ["ui/webview/feed.ts"],                    # a revert: none since the boot…
+                       (t1[:8], t3[:8]): ["postal/bus.py", "ui/webview/feed.ts"]}        # …but the bus runs t1's code
+        for want, bounces in ((t1, 1), (t2, 1), (t3, 2)):
+            self.head = want
+            self.assertTrue(km._converge_ask(want)[0], want[:8])
+            self.assertEqual(len(self.bounces), bounces, "bounces after converging onto %s" % want[:8])
+        self.assertEqual(len(self.builds), 3, "every converge builds")
+
+    def test_a_bounce_that_failed_is_tried_again_on_the_next_converge(self):
+        t1, t2 = self.WANT, "3" * 40
+        self.ranges = {(self.BOOTED, t1[:8]): ["postal/bus.py"], (self.BOOTED, t2[:8]): ["postal/bus.py"],
+                       (t1[:8], t2[:8]): ["ui/webview/feed.ts"]}
+        self.bounce_ok = False
+        self.assertTrue(km._converge_ask(t1)[0])
+        self.bounce_ok, self.head = True, t2
+        self.assertTrue(km._converge_ask(t2)[0])
+        self.assertEqual(len(self.bounces), 2, "the bus never reached t1's code, so the bus files since the boot stand")
+
+    def test_a_release_bump_served_in_place_is_the_release_it_reports(self):
+        # the review of the push converge, 2026-11-12: VERSION is no kernel code, so a release bump converges in place,
+        # and the release read once per process kept naming the old one on /version, in the network panel and to the
+        # release check, which then offered (or in auto mode restarted for) the update already served
+        root = pathlib.Path(self.tmp) / "checkout"
+        root.mkdir()
+        (root / "VERSION").write_text("0.9.0\n")                    # the bumped release, on disk after the reset
+        km.ROOT, km._VER = root, "v0.8.0"                             # the release the process read at its boot
+        self.files = ["VERSION", "ui/webview/strip.ts"]
+        self.build_ok = False
+        self.assertFalse(km._converge_ask(self.WANT)[0])
+        self.assertEqual(km._kernel_ver(), "v0.8.0", "a converge that did not happen keeps the release it serves")
+        self.build_ok, km._INPLACE_TRIED[0] = True, ""
+        self.assertTrue(km._converge_ask(self.WANT)[0])
+        self.assertEqual(km._kernel_ver(), "v0.9.0")
+        km.subprocess.run = self._run
+        self.assertEqual(km._version_info()["kernel_ver"], "v0.9.0", "what /version and the network panel show")
+
+    def test_the_route_requires_the_token_and_answers_with_the_verdict(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+        def ask(sha, token=True, cookie=False):
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["X-Romp-Token"] = km.TOKEN
+            if cookie:
+                headers["Cookie"] = "romp_token=" + km.TOKEN
+            c.request("POST", "/converge", json.dumps({"sha": sha}).encode(), headers)
+            resp = c.getresponse()
+            raw = resp.read().decode()
+            c.close()
+            return resp.status, raw
+        status, _ = ask(self.WANT, token=False)
+        self.assertEqual(status, 403, "a caller without the serve token moves nothing")
+        status, raw = ask(self.WANT, token=False, cookie=True)
+        self.assertEqual(status, 403, "nor one with only the cookie a browser attaches for any loopback page: %s" % raw)
+        self.assertEqual(self.builds, [])
+        status, raw = ask(self.WANT)
+        self.assertEqual((status, json.loads(raw)), (200, {"ok": True, "detail": "converged in place onto 11111111",
+                                                           "converged_sha": "11111111"}))
+        self.files = ["kernel/kernel.py"]
+        status, raw = ask("4" * 40)
+        body = json.loads(raw)
+        self.assertEqual((status, body["ok"], body["converged_sha"]), (502, False, "11111111"),
+                         "a refusal is an error status, and the answer still names the commit served")
+        self.assertIn("the checkout this kernel runs from is at 11111111, not 44444444", body["detail"])
 
 
 if __name__ == "__main__":

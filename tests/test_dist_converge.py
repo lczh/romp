@@ -143,5 +143,57 @@ class DraggableBannerPins(BannerRaiserPins):
         self.assertNotIn("dismissed=", drag)
 
 
+class TheRailGearFollowsTheCheckout(unittest.TestCase):
+    """EXECUTED. The rail's gear character is read from ui/webview/icons.ts, the constant the strip's gear in the
+    bundle renders. It was read once per kernel life, which was the same thing while every checkout move
+    restarted the kernel; a kernel that converges in place onto a page-only commit (2026-11-12: a peer's push
+    that moved no kernel code no longer restarts it) serves the rebuilt bundle's gear beside the booted file's.
+    The read is keyed on the file's mtime and size: one read per state of the file, a fresh one when it moves."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self._saved = (km.UI, dict(km._gear_glyph_memo))
+        km.UI = Path(self.td.name) / "ui"
+        (km.UI / "webview").mkdir(parents=True)
+        self.icons = km.UI / "webview" / "icons.ts"
+        km._gear_glyph_memo.clear()
+        self.t = time.time() - 1000
+
+    def tearDown(self):
+        km.UI, memo = self._saved
+        km._gear_glyph_memo.clear(); km._gear_glyph_memo.update(memo)
+        self.td.cleanup()
+
+    def _write(self, literal):
+        """icons.ts declaring `literal` as the gear, stamped one second after the last write (a checkout that moved)."""
+        self.icons.write_text('export const OTHER = "x";\nexport const GEAR_GLYPH = "%s";\n' % literal, encoding="utf-8")
+        self.t += 1
+        os.utime(self.icons, (self.t, self.t))
+
+    def test_a_moved_icons_file_is_read_again(self):
+        self._write("\\u2699")
+        self.assertEqual(km._gear_glyph(), "\u2699")
+        self._write("\\u26ed")
+        self.assertEqual(km._gear_glyph(), "\u26ed", "the checkout moved under a kernel that did not restart")
+
+    def test_an_unmoved_file_is_read_once(self):
+        self._write("\\u2699")
+        reads, real = [], Path.read_text
+        def counting(path, *a, **kw):
+            reads.append(str(path))
+            return real(path, *a, **kw)
+        Path.read_text = counting
+        try:
+            self.assertEqual([km._gear_glyph() for _ in range(3)], ["\u2699"] * 3)
+        finally:
+            Path.read_text = real
+        self.assertEqual(reads, [str(self.icons)], "every page render asks; the file is read once per state of it")
+
+    def test_a_file_that_appears_later_replaces_the_fallback(self):
+        self.assertEqual(km._gear_glyph(), km._GEAR_GLYPH_FALLBACK, "no UI tree: the literal, said in the log")
+        self._write("\\u2699")
+        self.assertEqual(km._gear_glyph(), "\u2699", "the fallback is a state of the file too, not the kernel's life")
+
+
 if __name__ == "__main__":
     unittest.main()

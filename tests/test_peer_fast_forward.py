@@ -137,6 +137,26 @@ class AskingThePeer(unittest.TestCase):
         self.assertIn("no kernel code changed", detail)
         self.assertIn("keeps running", detail)
 
+    def test_a_peer_that_converged_as_the_pull_landed_is_reported_in_its_own_words(self):
+        """The peer's pull route converges in place the moment a pull leaves its kernel code alone, and its answer says
+        whether that worked (`converged`). True: its detail already says the commit is served, so nothing is added and
+        no restart is asked."""
+        said = "pulled 2 commits from hubname — now at aaaaaaa; no kernel code changed, so it is served without a restart"
+        (ok, detail), calls = self._ask([(200, {"ok": True, "detail": said, "kernel_code_changed": False, "converged": True})])
+        self.assertEqual((ok, detail), (True, said))
+        self.assertEqual([c[1] for c in calls], ["/tunnels/pull"], "no restart asked")
+
+    def test_a_peer_that_could_not_converge_in_place_is_restarted(self):
+        """False: it tried and could not (a bundle build that failed there). Its kernel code is unchanged, yet the
+        restart is the one thing left that puts it on the build, so the hub asks it instead of reporting success."""
+        said = ("pulled 2 commits from hubname — now at aaaaaaa; restart romp to run it (this kernel could not serve it "
+                "in place: the in-place build for aaaaaaaa failed)")
+        (ok, detail), calls = self._ask([(200, {"ok": True, "detail": said, "kernel_code_changed": False, "converged": False}),
+                                         (200, {"ok": True, "restarting": True})])
+        self.assertEqual((ok, detail), (True, said + "; restarting it"))
+        self.assertEqual([c[1] for c in calls], ["/tunnels/pull", "/restart"])
+        self.assertEqual(calls[1][2], {"fleet": False})
+
     def test_a_pull_that_changed_kernel_code_asks_the_restart(self):
         (ok, detail), calls = self._ask([(200, {"ok": True, "detail": "pulled 2 commits from hubname", "kernel_code_changed": True}),
                                          (200, {"ok": True, "restarting": True})])
@@ -466,6 +486,66 @@ class DriftOnTheCheckout(unittest.TestCase):
         finally:
             srv.shutdown(); srv.server_close()
             km._pull_remote = saved
+
+    def test_the_pull_route_converges_at_once_when_the_pull_moved_no_kernel_code(self):
+        """A pull that left the kernel code as booted was served only when the periodic drift pass next ran, up to five
+        minutes later and never on a kernel whose update checks are off, while the hub that asked for the pull had
+        already been told the machine was done. The route converges as the pull lands (one bundle build, which is what
+        offers open pages the reload) and answers whether this kernel serves the commit now."""
+        import http.client, threading
+        from http.server import ThreadingHTTPServer
+        a = self._booted("x = 1\n")
+        saved = (km._pull_remote, km._rebuild_dist, km._REBUILT_FOR[0], km._INPLACE_TRIED[0])
+        builds, build_ok, head = [], [True], ["d" * 40]
+
+        def run(cmd, *args, **kw):
+            if isinstance(cmd, (list, tuple)) and "diff" in cmd:                      # the classifier: a page source only
+                return subprocess.CompletedProcess(cmd, 0, stdout="ui/webview/strip.ts", stderr="")
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        km.subprocess.run = run
+        km._SHA = REMOTE[:8]                                                          # the commit this kernel booted from
+        km._fresh_local_head = lambda: head[0]                                        # where the pull left the checkout
+        km._pull_remote = lambda host: (True, "pulled 1 commit from %s — now at %s%s"
+                                        % (host, head[0][:7], km._PULL_RESTART_TAIL))
+        km._rebuild_dist = lambda: (builds.append(1) or build_ok[0], "" if build_ok[0] else "esbuild: could not resolve a module")
+        km._REBUILT_FOR[0] = km._INPLACE_TRIED[0] = ""
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+        def ask():
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+            c.request("POST", "/tunnels/pull", json.dumps({"host": "hubname"}).encode(),
+                      {"Content-Type": "application/json", "X-Romp-Token": km.TOKEN})
+            resp = c.getresponse(); body = json.loads(resp.read().decode()); c.close()
+            return resp.status, body
+        try:
+            status, body = ask()
+            self.assertEqual(status, 200)
+            self.assertIs(body["kernel_code_changed"], False)
+            self.assertIs(body["converged"], True, "this kernel serves the pulled commit already")
+            self.assertEqual(body["detail"], "pulled 1 commit from hubname — now at ddddddd; no kernel code changed, "
+                                             "so it is served without a restart")
+            self.assertEqual(len(builds), 1, "one bundle build, at the pull")
+            self.assertEqual(km._converged_sha(), "dddddddd", "and /version names the commit it serves")
+            # a build that fails: the answer says so, with the reason, and keeps the restart hint (the hub restarts it)
+            head[0], build_ok[0] = "e" * 40, False
+            status, body = ask()
+            self.assertEqual(status, 200)
+            self.assertIs(body["converged"], False)
+            self.assertIn("; restart romp to run it (this kernel could not serve it in place: the in-place build for "
+                          "eeeeeeee failed", body["detail"])
+            self.assertEqual(km._converged_sha(), "dddddddd", "it does not claim the commit it could not build")
+            # a pull that moved kernel code: nothing is attempted, and the answer is the one it always was
+            a.write_text("x = 22\n")
+            n = len(builds)
+            status, body = ask()
+            self.assertIs(body["kernel_code_changed"], True)
+            self.assertIsNone(body["converged"])
+            self.assertEqual(len(builds), n, "no build for a kernel that must restart")
+            self.assertTrue(body["detail"].endswith("; restart romp to run it"), body["detail"])
+        finally:
+            srv.shutdown(); srv.server_close()
+            km._pull_remote, km._rebuild_dist, km._REBUILT_FOR[0], km._INPLACE_TRIED[0] = saved
 
 if __name__ == "__main__":
     unittest.main()
