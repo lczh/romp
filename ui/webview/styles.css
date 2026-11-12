@@ -2700,27 +2700,18 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
   color: var(--dim); font-size: 0.92em; line-height: 1.4; cursor: pointer; user-select: none; }
 .thought-line:hover { color: var(--fg); }
 .turn-thought > .dot.ring { background: var(--dim); }   /* the dim ink, flat: a thought sits under a reply's dot */
-/* Progress notes (2026-11-06, DRAFT looks; the user picks one). B: a note keeps the reply's prose but takes a thought's dim flat
-   dot and a tighter step, so the final answer stands out on the rail. C and C2 (compact): a run's latest note under its line. */
-.narr-look-b .turn-narration { padding-top: 3px; padding-bottom: 3px; }
-.narr-look-b .turn-narration > .dot.ring { background: var(--dim); }
-/* the caption is two lines at most, cut with an ellipsis (a line clamp, never a fade); the run opens to the note whole, and so
-   does a click on the caption. A code block or a table does not take the clamp's ellipsis: the height cap holds them to the
-   same two lines, cut without one */
-.toolgroup-caption { margin-top: 2px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; max-height: 3.1em; cursor: pointer; }
-.toolgroup-caption > * { margin-top: 0; margin-bottom: 0; }
-/* E (the default): the tools after a prose row fold into one dim line under it, the row's own, tucked up to the prose it
-   follows; it opens to the calls in place. A lone call is its own row (its label, its file link), dimmed the same. No time of
-   its own, and a rail dot only when the line has something to say: a call still running (the working dot, "running…" and its
-   time), one that failed (the red dot, "failed" in red), or one cut before its result (the plain dot, "no result"), as A's
-   rows say them */
+/* Progress notes (2026-11-06), compact mode: the tools after a prose row fold into one dim line under it, the row's own, tucked
+   up to the prose it follows; it opens to the calls in place. A lone call is its own row (its label, its file link), dimmed the
+   same. No time of its own, and a rail dot only when the line has something to say: a call still running (the working dot,
+   "running…" and its time), one that failed (the red dot, "failed" in red), or one cut before its result (the plain dot, "no
+   result"), as a tool's own row says them */
 .turn-toolgroup.toolgroup-attached, .turn-tool.tool-attached { padding-top: 0; margin-top: -3px; }
-/* the dot sits on its label where A's sits on A's (A's rows place it 10px down a 7px top pad; these rows have no pad, and a lone
-   call's label is the line's size) */
+/* the dot sits on its label where a tool row's own sits (those rows place it 10px down a 7px top pad; these rows have no pad,
+   and a lone call's label is the line's size) */
 .turn-toolgroup.toolgroup-attached > .dot { top: 6px; }
 .turn-tool.tool-attached > .dot { top: 5px; }
 /* the rail dot shows whenever the call says more than "done": running (the working dot), failed (the red ✗), or cut before its
-   result could come (the plain dot), exactly as A's rows draw them; a done call's ✓ and the time stay off */
+   result could come (the plain dot), exactly as a tool's own row draws them; a done call's ✓ and the time stay off */
 .toolgroup-attached > .dot.green, .toolgroup-attached > .time-marker, .tool-attached > .dot.green, .tool-attached > .time-marker { visibility: hidden; }
 .tool-attached:not(.tool-err) .tool-label { color: var(--dim); }
 /* a lone call wears the line's size (the font rule: one kind of information, one size); its code face compensates the nesting */

@@ -2,28 +2,35 @@
 """While a turn is open nothing on the chat moves, and a call that can never get its result says so, on the real /chat page of
 a hermetic kernel (progress notes, round six, 2026-11-06).
 
-The fork spot under a response and the turn's "worked …" line wait for the turn to END as the kernel reads it: the status's
-`turnOpen`, the event model's open turn (_session_working), the reading the running-call stamp takes. Never the status chip,
-which leaves "working" mid-turn for a permission prompt, a question and a retry. A spot rides the LAST row of its turn, inline
-in that row's "worked …" line, so it takes no row of its own.
+The fork spot under a response and the turn's "worked …" line wait for the turn to END, as the status's `turnOpen` says (the
+kernel's _turn_open, the reading the running-call stamp takes): the CLI's result frame in the states log ends it. Never the
+status chip, which leaves "working" mid-turn for a permission prompt, a question and a retry, nor the transcript's end_turn,
+which a Stop hook's block and a compaction mid-turn outlive. A spot rides its turn's last row, inline in that row's "worked …"
+line, and overlays the line's own height, so it takes no row of its own.
 
-- Session `web`, stepped while four pages watch it (look E compact dark and light, look A compact, full mode): a finished turn;
+- Session `web`, stepped while three pages watch it (compact mode dark and light, full mode): a finished turn;
   then a turn of a note and an edit, a note and an edit held on a permission prompt, the prompt granted, a note and a question,
   its answer, a retry, a text block an older model writes between its tools, a note and two calls with one still running, its
   result, and the reply. At every step every row already painted keeps its place, the open turn carries no fork spot and no
   "worked …" line, and the finished turn keeps its one spot; at the end the turn's spot lands in its reply's "worked …" line.
   The chip of a permission prompt, a question and a retry is the one a running backend reports (the lab runs none): the page's
-  socket carries it over the kernel's frames (needsInput, retrying), the kernel's turnOpen untouched.
+  socket carries it over the kernel's frames (needsInput, retrying), the kernel's turnOpen untouched. Then a turn the session
+  runs for real, held open by the fake Agent SDK, while the lab writes what its transcript closes the turn on and its CLI
+  outlives: the reply's end_turn before a Stop hook's block, the block's feedback, the continuation's end_turn, a compaction
+  and the continuation's first record; the turn ends at the stop. The same holds at every step, and the kernel's turnOpen
+  stays true until the stop.
 - Session `api`: a turn that ends on a Thought row right after a single call; the turn ends by its state record (the CLI's
   result frame, "waiting"). The Thought row does not move, and the spot rides its "worked …" line.
-- Session `tests`, look E: a cut Edit and a cut Read after notes, and a line of three calls with one cut. Each cut call wears
-  A's plain ring dot and says "no result"; the line says "· 1 no result" with the ring; the rail dots of the attached rows sit
-  on their labels as A's do; a one-call row and a line wear one font size; a line with a call still running keeps its dot's
-  own classes (dot-nav).
+- Session `tests`, compact mode: a cut Edit and a cut Read after notes, and a line of three calls with one cut. Each cut call
+  wears the plain dot and says what its own row (full mode) says; the line says "· 1 no result" with the plain dot; the rail
+  dots of the attached rows sit on their labels as a call's own row and a plain run do; a one-call row and a line wear one font
+  size; a line with a call still running keeps its dot's own classes (dot-nav). Its last turn's words come before a question
+  box and two more calls: a hover on the words shows the fork button in the worked line of the turn's last row, inline at its
+  left, over no words, at 1200px and at 320px, and every worked line is one line of its text tall.
 
-With NARRATION_SHOTS_REALISTIC5=<dir> the driver writes look E screenshots, dark and light: the cut calls, and a note then a
-permission prompt, before and while it is pending. Skips LOUDLY without the extension deps or a Playwright browser; the
-extension CI job requires it. SYNTHETIC fixtures only: the notes-api demo world, sessions `web`, `api` and `tests`, invented
+With NARRATION_SHOTS=<dir> the driver writes compact-mode screenshots, dark and light: the cut calls, a note then a
+permission prompt before and while it is pending, worked lines with no button, and the end-of-work button at two widths.
+Skips LOUDLY without the extension deps or a Playwright browser; the extension CI job requires it. SYNTHETIC fixtures only: the notes-api demo world, sessions `web`, `api` and `tests`, invented
 text, placeholder ids, host TESTHOST."""
 import json
 import os
@@ -79,6 +86,8 @@ C_PROMPT_3 = "Run the three steps together."
 C_NOTE_3 = "Reading the schema, editing the route and running the tests at once."
 C_PROMPT_4 = "Carry on."
 C_REPLY = "The flag is called hidden now, in the migration, the route and the tests. All tests pass."
+C_PROMPT_P = "Which migrations are there?"
+C_REPLY_P = "Two: 007 adds the archived column and 008 renames it to hidden."
 C_PROMPT_5 = "Hide archived notes from search."
 C_NOTE_5 = "Search reads the archived flag now."
 C_REPLY_5 = "Archived notes are hidden from search. One question before I touch the export."
@@ -211,6 +220,11 @@ def _tests(cwd, base):
     _result(tr, ids[2], "all passing")
     tr.user(C_PROMPT_4)
     tr.reply(C_REPLY)
+    # calls before the turn's first words: a plain run, as compact mode always folded one (the line's dot is set against its dot)
+    tr.user(C_PROMPT_P)
+    tr.tool("Bash", {"command": "ls db/migrations", "description": "Listed the migrations"}, "007.sql 008.sql")
+    tr.tool("Read", {"file_path": cwd + "/db/migrations/008.sql"}, "alter table notes rename archived to hidden")
+    tr.reply(C_REPLY_P)
     # the turn's last words, then a question box and the work after it: the turn ends on that work's row, its worked line there
     tr.user(C_PROMPT_5)
     tr.note_tool(C_NOTE_5, "Edit", {"file_path": cwd + "/src/routes/search.ts", "old_string": "where", "new_string": "where hidden = 0 and"}, "edited")
@@ -236,10 +250,10 @@ catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const painted = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 60)))));
 const errors = [];
 const showing = (t) => Array.from(document.querySelectorAll("#content .turn")).some((n) => n.getClientRects().length > 0 && (n.textContent || "").includes(t));
-// one page: the theme, compact or full, the look, the session's tab, a text it must show. Its socket carries the chip a running
+// one page: the theme, compact or full, the session's tab, a text it must show. Its socket carries the chip a running
 // backend would report for `web` while a step forces one (needsInput, retrying), the kernel's turnOpen untouched, and can replay
 // the session's last frame with that chip (a forced chip with no kernel change has no frame of its own)
-const open = async (name, theme, compact, look, sid, wait, width) => {
+const open = async (name, theme, compact, sid, wait, width) => {
   const page = await browser.newPage({ viewport: { width: width || 1200, height: 1500 }, deviceScaleFactor: 1 });
   page.on("pageerror", (e) => errors.push(name + ": " + String(e).slice(0, 300)));
   const io = { forced: null, last: null, ws: null, frames: 0, status: {} };
@@ -263,7 +277,7 @@ const open = async (name, theme, compact, look, sid, wait, width) => {
     server.onClose(() => ws.close()); ws.onClose(() => server.close());
     io.ws = ws;
   });
-  await page.addInitScript(([th, c, lk]) => { try { localStorage.setItem("romp:settings", JSON.stringify({ theme: th, compact: c })); if (lk) localStorage.setItem("romp:narration-look", lk); } catch (e) {} }, [theme, compact, look]);
+  await page.addInitScript(([th, c]) => { try { localStorage.setItem("romp:settings", JSON.stringify({ theme: th, compact: c })); } catch (e) {} }, [theme, compact]);
   await page.goto(cfg.chat);
   await page.waitForSelector('#tabs .tab[data-id="' + sid + '"]', { state: "attached", timeout: 30000 });
   const active = await page.evaluate((id) => !!document.querySelector('#tabs .tab.active[data-id="' + id + '"]'), sid);
@@ -305,11 +319,10 @@ const shot = async (p, dir, name, prompt, _unused, keepHover) => {
   await p.page.screenshot({ path: dir + "/" + name + ".png", clip: { x: 0, y: 0, width: w, height: 900 } });
 };
 const out = { steps: {}, edge: {}, cuts: {}, turnOpen: [], sends: [] };
-const dir5 = cfg.shots5;
-const dir6 = cfg.shots6;
-// THE STEPPED TURN (web): four pages watch one session
-const pages = [await open("E", "yatharth", true, "E", cfg.web, cfg.p2), await open("A", "yatharth", true, "A", cfg.web, cfg.p2),
-               await open("full", "yatharth", false, "", cfg.web, cfg.p2), await open("E-light", "yatharth-light", true, "E", cfg.web, cfg.p2)];
+const dir = cfg.shots;
+// THE STEPPED TURN (web): three pages watch one session
+const pages = [await open("compact", "yatharth", true, cfg.web, cfg.p2), await open("full", "yatharth", false, cfg.web, cfg.p2),
+               await open("compact-light", "yatharth-light", true, cfg.web, cfg.p2)];
 for (const p of pages) out.steps[p.name] = [{ step: "open", rows: await geom(p.page) }];
 // the transcript's last record: a held turn's records continue the chain from it, as the CLI's do
 const fileLast = () => { const ls = fs.readFileSync(cfg.webPath, "utf8").trim().split("\n"); for (let i = ls.length - 1; i >= 0; i--) { try { const u = JSON.parse(ls[i]).uuid; if (u) return u; } catch (e) {} } return null; };
@@ -347,11 +360,11 @@ for (const st of cfg.steps) {
     out.steps[p.name].push({ step: st.name, rows: await geom(p.page) });
   }
   out.turnOpen.push([st.name, pages[0].io.status[cfg.web] ? pages[0].io.status[cfg.web].turnOpen : null]);
-  if (st.name === "note-then-edit") await shot(pages[0], dir5, "permission-before-E-dark", cfg.p2), await shot(pages[3], dir5, "permission-before-E-light", cfg.p2);
-  if (st.name === "permission-pending") await shot(pages[0], dir5, "permission-pending-E-dark", cfg.p2), await shot(pages[3], dir5, "permission-pending-E-light", cfg.p2);
+  if (st.name === "note-then-edit") await shot(pages[0], dir, "permission-before-dark", cfg.p2), await shot(pages[2], dir, "permission-before-light", cfg.p2);
+  if (st.name === "permission-pending") await shot(pages[0], dir, "permission-pending-dark", cfg.p2), await shot(pages[2], dir, "permission-pending-light", cfg.p2);
   // worked lines with no button: the turns above the compaction keep their worked lines and lose their spots (a fork cannot cut
   // above a compaction); the line is as tall as it was with one
-  if (st.name === "stopped") await shot(pages[0], dir6, "worked-no-spot-E-dark", cfg.p1), await shot(pages[3], dir6, "worked-no-spot-E-light", cfg.p1);
+  if (st.name === "stopped") await shot(pages[0], dir, "worked-no-spot-dark", cfg.p1), await shot(pages[2], dir, "worked-no-spot-light", cfg.p1);
   if (st.name === "line-running") {
     // the running line's dot: the working dot, its own classes kept (dot-nav: the pointer, the hit area, the hover growth)
     out.runningDot = await pages[0].page.evaluate(() => { const h = Array.from(document.querySelectorAll("#content .toolgroup-attached")).pop(); const d = h && h.querySelector(":scope > .dot"); return d ? d.className : null; });
@@ -360,8 +373,7 @@ for (const st of cfg.steps) {
 out.lastStatus = Object.fromEntries(pages.map((p) => [p.name, p.io.last ? { state: p.io.last.status.state, turnOpen: p.io.last.status.turnOpen } : null]));
 for (const p of pages) await p.page.close();
 // THE TURN THAT ENDS ON A THOUGHT ROW (api): the turn ends by its state record
-const edge = [await open("E", "yatharth", true, "E", cfg.api, cfg.eThought.slice(0, 30)), await open("A", "yatharth", true, "A", cfg.api, cfg.eThought.slice(0, 30)),
-              await open("full", "yatharth", false, "", cfg.api, cfg.eThought.slice(0, 30))];
+const edge = [await open("compact", "yatharth", true, cfg.api, cfg.eThought.slice(0, 30)), await open("full", "yatharth", false, cfg.api, cfg.eThought.slice(0, 30))];
 for (const p of edge) out.edge[p.name] = [await geom(p.page)];
 // the CLI's result frame: the backend files "waiting" (a stop a few seconds back, so the span it opens has a length at the build
 // that reads it)
@@ -373,12 +385,13 @@ for (const p of edge) {
   out.edge[p.name].push(await geom(p.page));
   await p.page.close();
 }
-// THE CUT CALLS (tests): look E, and look A beside it for the dots
-for (const [name, theme, look] of [["E", "yatharth", "E"], ["E-light", "yatharth-light", "E"], ["A", "yatharth", "A"]]) {
-  const p = await open(name, theme, true, look, cfg.tests, cfg.cReply.slice(0, 30));
+// THE CUT CALLS (tests): compact mode, and full mode beside it, whose rows draw each call as its own row (the reference for the
+// words and the dots); the plain run of the turn whose calls came before its words is compact mode's reference for a line's dot
+for (const [name, theme, compact] of [["compact", "yatharth", true], ["compact-light", "yatharth-light", true], ["full", "yatharth", false]]) {
+  const p = await open(name, theme, compact, cfg.tests, cfg.cReply.slice(0, 30));
   out.cuts[name] = await p.page.evaluate((stop) => {
     const all = Array.from(document.querySelectorAll("#content .turn")).filter((t) => t.getClientRects().length > 0 && !(t.parentElement && t.parentElement.closest(".turn")));
-    const end = all.findIndex((t) => t.classList.contains("turn-user") && (t.textContent || "").includes(stop));   // the cut calls' turns alone
+    const end = all.findIndex((t) => t.classList.contains("turn-user") && (t.textContent || "").includes(stop));   // the cut calls' turns and the plain run
     const rows = all.slice(0, end < 0 ? all.length : end).filter((t) => /\bturn-(tool|toolgroup)\b/.test(t.className) && !t.classList.contains("tg-child"));
     const mid = (n) => { if (!n) return null; const r = n.getBoundingClientRect(); return r.top + r.height / 2; };
     return rows.map((t) => {
@@ -391,15 +404,15 @@ for (const [name, theme, look] of [["E", "yatharth", "E"], ["E-light", "yatharth
                head: ((t.querySelector(":scope > .tool-head, :scope > .toolgroup-line") || {}).innerText || "").replace(/\s+/g, " ").trim() };
     });
   }, cfg.cPrompt5);
-  await shot(p, dir5, name === "E" ? "cuts-E-dark" : name === "A" ? "cuts-A-dark" : "cuts-E-light", cfg.cPrompt1);   // A beside E: the dots
+  await shot(p, dir, "cuts-" + (name === "compact" ? "dark" : name === "full" ? "full-dark" : "light"), cfg.cPrompt1);
   await p.page.close();
 }
-// THE END-OF-WORK SPOT (tests, look E): a hover on the turn's last words shows the button in the worked line of the turn's last
+// THE END-OF-WORK SPOT (tests, compact): a hover on the turn's last words shows the button in the worked line of the turn's last
 // row, past a question box and the work after it, inline at its left, over no words, at a wide window and at 320px; every
 // worked line is one line of its text tall, with or without a button
 out.endSpot = {};
-for (const [name, theme, width] of [["E-1200", "yatharth", 1200], ["E-320", "yatharth", 320], ["E-light-1200", "yatharth-light", 1200], ["E-light-320", "yatharth-light", 320]]) {
-  const p = await open(name, theme, true, "E", cfg.tests, cfg.cReply5.slice(0, 30), width);
+for (const [name, theme, width] of [["dark-1200", "yatharth", 1200], ["dark-320", "yatharth", 320], ["light-1200", "yatharth-light", 1200], ["light-320", "yatharth-light", 320]]) {
+  const p = await open(name, theme, true, cfg.tests, cfg.cReply5.slice(0, 30), width);
   await p.page.evaluate((t) => { const u = Array.from(document.querySelectorAll("#content .turn-user")).find((n) => (n.textContent || "").includes(t)); if (u) u.scrollIntoView({ block: "start" }); }, cfg.cPrompt5);
   await painted(p.page);
   await p.page.locator("#content .turn-assistant", { hasText: cfg.cReply5.slice(0, 30) }).first().hover();
@@ -421,16 +434,16 @@ for (const [name, theme, width] of [["E-1200", "yatharth", 1200], ["E-320", "yat
              overRows: rows.filter((r) => r !== host && hit(br, r.getBoundingClientRect())).length,
              inView: br.left >= 0 && br.right <= window.innerWidth };
   });
-  if (dir6) {
+  if (dir) {
     // the turn under test, its prompt to its last row, the pointer still on its words
-    fs.mkdirSync(dir6, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true });
     const box = await p.page.evaluate((t) => {
       const rows = Array.from(document.querySelectorAll("#content .turn")).filter((x) => x.getClientRects().length > 0 && !(x.parentElement && x.parentElement.closest(".turn")));
       const u = rows.find((x) => x.classList.contains("turn-user") && (x.textContent || "").includes(t));
       const top = u ? u.getBoundingClientRect().top : 0, bottom = rows[rows.length - 1].getBoundingClientRect().bottom;
       return { y: Math.max(0, top - 20), h: Math.min(window.innerHeight, bottom + 30) - Math.max(0, top - 20) };
     }, cfg.cPrompt5);
-    await p.page.screenshot({ path: dir6 + "/endspot-" + name.replace(/^E-(\d+)$/, "E-dark-$1") + ".png", clip: { x: 0, y: box.y, width: width, height: box.h } });
+    await p.page.screenshot({ path: dir + "/endspot-" + name + ".png", clip: { x: 0, y: box.y, width: width, height: box.h } });
   }
   await p.page.close();
 }
@@ -540,8 +553,7 @@ class ServedNarrationSteps(unittest.TestCase):
                        "base": "http://127.0.0.1:%d" % cls.port, "token": cls.token,
                        "tests": SID_TESTS, "p1": P1, "p2": P2, "steps": cls.steps, "webPath": cls.web_path, "apiStates": cls.api_states,
                        "eThought": E_THOUGHT, "cReply": C_REPLY, "cPrompt1": C_PROMPT_1, "cPrompt5": C_PROMPT_5, "cReply5": C_REPLY_5,
-                       "shots6": os.environ.get("NARRATION_SHOTS_REALISTIC6", ""),
-                       "shots5": os.environ.get("NARRATION_SHOTS_REALISTIC5", ""),
+                       "shots": os.environ.get("NARRATION_SHOTS", ""),
                        "resultFile": os.path.join(cls.lab, "result.json")}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -577,7 +589,7 @@ class ServedNarrationSteps(unittest.TestCase):
         i = next(k for k, r in enumerate(rows) if r["kind"] == "user" and prompt in r["text"])
         return rows[:i], rows[i + 1:]
 
-    def test_while_the_turn_is_open_no_painted_row_moves_and_no_spot_or_footer_appears_in_any_look(self):
+    def test_while_the_turn_is_open_no_painted_row_moves_and_no_spot_or_footer_appears_in_compact_or_full_mode(self):
         r = self._result()
         self.assertEqual(r["errors"], [])
         self.assertTrue(all(x.get("ok") for x in r["sends"]), r["sends"])
@@ -637,35 +649,33 @@ class ServedNarrationSteps(unittest.TestCase):
             for f in e["feet"]:
                 self.assertLessEqual(abs(f["h"] - f["lh"]), 1.0, (name, f))
 
-    def test_a_cut_call_says_no_result_on_its_row_and_on_a_line_in_look_e(self):
+    def test_a_cut_call_says_no_result_on_its_row_and_on_a_line(self):
         r = self._result()
-        e = [x for x in r["cuts"]["E"] if x["attached"]]
+        compact = r["cuts"]["compact"]
+        e = [x for x in compact if x["attached"]]
         singles = [x for x in e if not x["group"]]
         lines = [x for x in e if x["group"]]
-        a = r["cuts"]["A"]
-        a_singles = [x for x in a if not x["group"]]
+        full = [x for x in r["cuts"]["full"] if not x["group"]]   # full mode: every call its own row
         self.assertEqual(len(singles), 2, e)
-        self.assertEqual(len(a_singles), 2, a)
-        for x, ax in zip(singles, a_singles):   # the cut Edit and the cut Read: A's plain ring, shown, and A's words
+        self.assertGreaterEqual(len(full), 2, full)
+        for x, fx in zip(singles, full):   # the cut Edit and the cut Read: the plain dot, shown, and the words their own rows say
             self.assertRegex(x["dot"], r"\bring\b")
             self.assertNotRegex(x["dot"], r"\b(green|err|working)\b")
             self.assertTrue(x["dotShown"], x)
-            self.assertRegex(ax["dot"], r"\bring\b")
-            self.assertEqual(x["head"], ax["head"], "the row says what A's row says")
+            self.assertRegex(fx["dot"], r"\bring\b")
+            self.assertEqual(x["head"], fx["head"], "the row says what the call's own row says")
         self.assertEqual(len(lines), 1, e)
         self.assertRegex(lines[0]["dot"], r"\bring\b")
         self.assertTrue(lines[0]["dotShown"], lines[0])
         self.assertIn("· 1 no result", lines[0]["text"])
         # one font size for a one-call row and a line (the font rule)
         self.assertEqual({x["fontSize"] for x in e}, {lines[0]["fontSize"]}, e)
-        # the dots sit on their labels as A's do (A draws the same calls as rows and a group)
-        a_single = [x["dotOff"] for x in a if not x["group"]]
-        a_group = [x["dotOff"] for x in a if x["group"]]
-        self.assertTrue(a_single and a_group, a)
-        for x in singles:
-            self.assertLessEqual(abs(x["dotOff"] - a_single[0]), 1.5, (x, a_single))
-        self.assertLessEqual(abs(lines[0]["dotOff"] - a_group[0]), 1.5, (lines[0], a_group))
-
+        # the dots sit on their labels as a call's own row and a plain run do (calls before a turn's words fold as they always did)
+        plain = [x for x in compact if x["group"] and not x["attached"]]
+        self.assertEqual(len(plain), 1, compact)
+        for x, fx in zip(singles, full):
+            self.assertLessEqual(abs(x["dotOff"] - fx["dotOff"]), 1.5, (x, fx))
+        self.assertLessEqual(abs(lines[0]["dotOff"] - plain[0]["dotOff"]), 1.5, (lines[0], plain[0]))
 
 if __name__ == "__main__":
     unittest.main()

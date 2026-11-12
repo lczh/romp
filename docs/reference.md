@@ -7390,8 +7390,8 @@ Calls before a turn's first words fold into a run as they always did, an Agent c
 own, and a stretch of work that ends on a folded line keeps its "worked" line under it.
 
 A response's fork button sits in its turn's "worked" line, on the turn's last row before the next prompt, whatever lies
-between (its tool line, the calls of an open line, a question box and the work after it, a Thought row), in every look
-and in the full view; a hover on the response or on any row after it in its turn shows it. The button overlays the line's
+between (its tool line, the calls of an open line, a question box and the work after it, a Thought row), in compact and
+in full view; a hover on the response or on any row after it in its turn shows it. The button overlays the line's
 own height, so a line is as tall with it as without. A turn with no clock draws no "worked" line, and its button gets a
 line of its own with no words.
 

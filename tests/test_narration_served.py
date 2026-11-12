@@ -4,27 +4,27 @@
 On Claude Opus 5.5 a note the model writes between tool calls comes back as a `thinking` block, and the chat drew it as a
 collapsed Thought row, so a reply to a message sent mid-turn never reached the person. The CLI lists those blocks on the
 frames it streams; the kernel files the list (kernel/narration.py) and the chat build draws a listed block with words as an
-assistant message flagged `narration`. Here, on the served page, session `web`, under look A (plain prose):
+assistant message flagged `narration`. Here, on the served page:
 
-- a progress note before the first tool and the note answering the mid-turn message are prose (`.turn-assistant`, the
-  `turn-narration` hook), in order, between the tools, in compact mode and in full mode;
-- the reasoning summary of the same turn stays a Thought row (compact) or the clamped thinking row (full);
-- an older turn's note with no mark (history from before the store) stays a Thought row;
-- LIVE: the turn's second half lands in the transcript while the page is open; the note answering the mid-turn message
-  arrives as prose through the push, without a reload; after a reload the page draws the same.
-
-And session `api`, the realistic Opus 5.5 shape (a note before nearly every tool), under look C, the default (compact mode
-folds the notes between tools into the tool run): a turn of four tool/note pairs is ONE run whose caption is its latest note,
-and in the turn with a message delivered mid-turn the note answering it stands on its own while the four tool/note pairs
-after it fold; an expanded run shows every tool and note in order.
+- session `web`: a progress note before the first tool and the note answering the mid-turn message are prose
+  (`.turn-assistant`, the `turn-narration` hook), in order, between the tools, in compact mode and in full mode; the reasoning
+  summary of the same turn stays a Thought row (compact) or the clamped thinking row (full); an older turn's note with no mark
+  (history from before the store) stays a Thought row; LIVE, the turn's second half lands in the transcript while the page is
+  open and the note answering the mid-turn message arrives as prose through the push, without a reload; after a reload the
+  page draws the same;
+- session `api`, the realistic Opus 5.5 shape (a note before nearly every tool): compact mode keeps every note a row and folds
+  the calls after each into one dim line under it;
+- session `tests`, the mix Opus 5.5 writes (notes as thinking blocks and as text, a question mid-turn, a summary before cleanup
+  tools, a long note with code, the tools' states): every thing the session said is a row of its own, in order; one call is its
+  own row with its label and file link; a line says what its calls are doing (running, failed); the fork spot rides the
+  response's line and a hover on the response, the line's head or any call shows it.
 
 The lab writes the store as the kernel's own writer would have (its marks are filed as frames arrive, so a mark can stand
-before its record lands, which is how the live half is staged). The look is the page's localStorage "romp:narration-look".
-With NARRATION_SHOTS=<dir> the driver writes screenshots: `web` in compact and full mode under looks A and B, dark and
-light, and the realistic `api` turns in compact mode under looks A, B and C, dark and light, in <dir>/realistic/;
-NARRATION_BEFORE_ROOT=<checkout> serves another checkout's kernel and built bundle for the before shots and skips the
-assertions. Skips LOUDLY without the extension deps or a Playwright browser; the extension CI job requires it. SYNTHETIC
-fixtures only: the notes-api demo world, sessions `web` and `api`, invented text, placeholder ids, host TESTHOST."""
+before its record lands, which is how the live half is staged). With NARRATION_SHOTS=<dir> the driver writes screenshots of
+each session, dark and light, into <dir>; NARRATION_BEFORE_ROOT=<checkout> serves another checkout's kernel and built bundle for
+the before shots and skips the assertions. Skips LOUDLY without the extension deps or a Playwright browser; the extension CI job
+requires it. SYNTHETIC fixtures only: the notes-api demo world, sessions `web`, `api` and `tests`, invented text, placeholder
+ids, host TESTHOST."""
 import json
 import os
 import re
@@ -303,11 +303,11 @@ catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const painted = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 60)))));
 const errors = [];
 const showing = (t) => Array.from(document.querySelectorAll("#content .turn")).some((n) => n.getClientRects().length > 0 && (n.textContent || "").includes(t));
-// one page: the theme, compact or full, the look (A, B, C: localStorage romp:narration-look), the session's tab, and a text it must show
-const open = async (theme, compact, look, sid, wait, h) => {
+// one page: the theme, compact or full, the session's tab, and a text it must show
+const open = async (theme, compact, sid, wait, h) => {
   const page = await browser.newPage({ viewport: { width: 1200, height: h || 1000 }, deviceScaleFactor: 1 });
   page.on("pageerror", (e) => errors.push(String(e).slice(0, 300)));
-  await page.addInitScript(([th, c, lk]) => { try { localStorage.setItem("romp:settings", JSON.stringify({ theme: th, compact: c })); if (lk) localStorage.setItem("romp:narration-look", lk); } catch (e) {} }, [theme, compact, look]);
+  await page.addInitScript(([th, c]) => { try { localStorage.setItem("romp:settings", JSON.stringify({ theme: th, compact: c })); } catch (e) {} }, [theme, compact]);
   await page.goto(cfg.chat);
   await page.waitForSelector('#tabs .tab[data-id="' + sid + '"]', { state: "attached", timeout: 30000 });
   // the session's tab: a real click on the strip's visible element
@@ -329,18 +329,15 @@ const rows = (page) => page.evaluate(() => Array.from(document.querySelectorAll(
   const c = t.className;
   const kind = c.includes("turn-thought") ? "thought" : c.includes("turn-thinking") ? "thinking" : c.includes("turn-assistant") ? "assistant"
              : c.includes("turn-user") ? "user" : c.includes("turn-toolgroup") ? "toolgroup" : c.includes("turn-tool") ? "tool" : "other";
-  const cap = t.querySelector(".toolgroup-caption");
   const body = kind === "toolgroup" ? null : (t.querySelector(".assistant.md") || t.querySelector(".thought-gist") || t.querySelector(".thinking") || t.querySelector(".user-bubble"));
   const words = (n) => n ? (n.innerText || n.textContent || "").replace(/\s+/g, " ").trim() : "";
   const foot = t.querySelector(":scope > .turn-elapsed");
-  const capLh = cap ? parseFloat(getComputedStyle(cap).lineHeight) || 18 : 0;
   return { kind, narration: c.includes("turn-narration"), opaque: !!t.querySelector(".thinking.encrypted"), fork: !!t.querySelector(".fork-spot"),
-           child: c.includes("tg-child"), text: words(body), caption: words(cap), head: words(t.querySelector(".toolgroup-head")),
+           child: c.includes("tg-child"), text: words(body), head: words(t.querySelector(".toolgroup-head")),
            attached: c.includes("toolgroup-attached") || c.includes("tool-attached"), err: c.includes("tool-err") || !!t.querySelector(":scope > .dot.err"),
            dotShown: (() => { const d = t.querySelector(":scope > .dot"); return !!d && getComputedStyle(d).visibility === "visible"; })(),
            working: !!t.querySelector(":scope > .dot.working"), tool: words(t.querySelector(".tool-head")), line: words(t.querySelector(".toolgroup-line")),
-           file: words(t.querySelector(".tool-head .tool-file, .tool-head a")), foot: foot ? words(foot) : "", capLines: cap ? Math.round(cap.getBoundingClientRect().height / capLh) : 0,
-           capClamp: cap ? getComputedStyle(cap).webkitLineClamp : "" };
+           file: words(t.querySelector(".tool-head .tool-file, .tool-head a")), foot: foot ? words(foot) : "" };
 }));
 const shot = async (page, dir, name, prompt, hover) => {
   if (!dir) return;
@@ -351,71 +348,43 @@ const shot = async (page, dir, name, prompt, hover) => {
   await page.screenshot({ path: dir + "/" + name + ".png" });
 };
 const out = {};
-// LIVE (web, look A): the page holds the first half; the second half lands while it is open and arrives through the push
-const live = await open("yatharth", true, "A", cfg.web, cfg.midturn);
+// LIVE (web): the page holds the first half; the second half lands while it is open and arrives through the push
+const live = await open("yatharth", true, cfg.web, cfg.midturn);
 out.beforeLand = await rows(live);
 fs.writeFileSync(cfg.landFlag, "go");
 await live.waitForFunction(showing, cfg.replyStart, { timeout: 30000 });
 await painted(live);
 out.live = await rows(live);
 await live.close();
-// AFTER RELOAD (web): look A in both modes, and the shots of A and B
+// AFTER RELOAD (web): compact and full mode, dark and light
 for (const [compact, mname] of [[true, "compact"], [false, "full"]]) {
   for (const [theme, tname] of [["yatharth", "dark"], ["yatharth-light", "light"]]) {
-    for (const look of cfg.before ? [""] : ["A", "B"]) {
-      const p = await open(theme, compact, look, cfg.web, cfg.replyStart);
-      if (tname === "dark" && look !== "B") out[mname] = await rows(p);
-      await shot(p, cfg.shots, "narration-" + mname + "-" + tname + (look === "B" ? "-optB" : ""), cfg.prompt);
-      await p.close();
-    }
-  }
-}
-// THE REALISTIC TURNS (api, compact): A, B and C, dark and light; C's rows, and its runs opened
-for (const look of cfg.before ? [""] : ["A", "B", "C"]) {
-  for (const [theme, tname] of [["yatharth", "dark"], ["yatharth-light", "light"]]) {
-    const p = await open(theme, true, look, cfg.api, cfg.rReplyStart, 1300);
-    await shot(p, cfg.shots && cfg.shots + "/realistic", "realistic-" + (look || "before") + "-" + tname, cfg.rPrompt);
-    if (look === "C" && tname === "dark") {
-      out.realC = await rows(p);
-      const lines = p.locator("#content .turn-toolgroup .toolgroup-line:visible");
-      const n = await lines.count();
-      await lines.nth(n - 1).click();                    // the last run: the four tool/note pairs after the answer
-      await p.waitForFunction(() => !!document.querySelector("#content .tg-child"), null, { timeout: 10000 });
-      await painted(p);
-      out.realCOpen = await rows(p);
-      await shot(p, cfg.shots && cfg.shots + "/realistic", "realistic-C-dark-opened", cfg.rPrompt2);
-    }
+    const p = await open(theme, compact, cfg.web, cfg.replyStart);
+    if (tname === "dark") out[mname] = await rows(p);
+    await shot(p, cfg.shots, "narration-" + mname + "-" + tname, cfg.prompt);
     await p.close();
   }
 }
-// THE MIXED TURNS (tests, compact): A, E (the default) and C2, dark and light, the realistic turns and the hard cases (a question
-// mid-turn, a summary before cleanup tools, a long note with code) as two shots each; C2 with its first run opened by its
-// caption; C for its rows alone. E, the default, is probed further, and shot again into realistic4: the tools' states (a failed
-// command, a line with one failure, a command still running and its timer), a fork spot revealed by a hover, a line opened
-const dir3 = cfg.shots3 || (cfg.shots && cfg.shots + "/realistic3");
-const dir4 = cfg.shots4 || (cfg.shots && cfg.shots + "/realistic4");
+// THE REALISTIC TURNS (api, compact): a note before nearly every tool, dark and light
+for (const [theme, tname] of [["yatharth", "dark"], ["yatharth-light", "light"]]) {
+  const p = await open(theme, true, cfg.api, cfg.rReplyStart, 1300);
+  await shot(p, cfg.shots, "realistic-" + tname, cfg.rPrompt);
+  if (tname === "dark") out.real = await rows(p);
+  await p.close();
+}
+// THE MIXED TURNS (tests, compact), dark and light: the turns and the hard cases (a question mid-turn, a summary before cleanup
+// tools, a long note with code), the tools' states (a failed command, a line with one failure, a command still running and its
+// timer), a fork spot revealed by a hover, a line opened
+const dir = cfg.shots;
 const lineAfter = (p, text) => p.locator("#content .turn-assistant", { hasText: text }).first()
   .locator("xpath=following-sibling::div[contains(concat(' ', normalize-space(@class), ' '), ' turn ')][1]");
-for (const look of cfg.before ? [""] : ["A", "E", "C2", "C"]) {
-  for (const [theme, tname] of [["yatharth", "dark"], ["yatharth-light", "light"]]) {
-    if (look === "C" && tname === "light") continue;
-    const p = await open(theme, true, look, cfg.tests, cfg.xReplyStart, 1500);
-    if (look !== "C") {
-      await shot(p, dir3, "mixed-" + (look || "before") + "-" + tname, cfg.xPrompt);
-      await shot(p, dir3, "cases-" + (look || "before") + "-" + tname, cfg.xPrompt4);
-    }
-    if (tname === "dark" && look) out["mixed" + look] = await rows(p);
-    if (look === "C2" && tname === "dark") {
-      // the caption of the first run opens it (its ellipsis invites the click)
-      await p.locator("#content .toolgroup-caption:visible").first().click();
-      await p.waitForFunction(() => !!document.querySelector("#content .tg-child"), null, { timeout: 10000 });
-      await painted(p);
-      out.mixedC2Open = await rows(p);
-    }
-    if (look === "E") {
-      await shot(p, dir4, "mixed-E-" + tname, cfg.xPrompt);
-      await shot(p, dir4, "onecall-E-" + tname, cfg.xPrompt4);
-      await shot(p, dir4, "states-E-" + tname, cfg.xPrompt7);
+for (const [theme, tname] of [["yatharth", "dark"], ["yatharth-light", "light"]]) {
+  const p = await open(theme, true, cfg.tests, cfg.xReplyStart, 1500);
+  if (tname === "dark") out.mixed = await rows(p);
+  {
+      await shot(p, dir, "mixed-" + tname, cfg.xPrompt);
+      await shot(p, dir, "onecall-" + tname, cfg.xPrompt4);
+      await shot(p, dir, "states-" + tname, cfg.xPrompt7);
       if (tname === "dark") {
         // the running command's time ticks without a rebuild
         const tick = () => p.evaluate(() => { const ts = Array.from(document.querySelectorAll("#content .tool-attached .tool-elapsed, #content .toolgroup-attached .tool-elapsed")).filter((n) => n.getClientRects().length > 0); return ts.length ? ts[ts.length - 1].textContent : null; });
@@ -438,7 +407,7 @@ for (const look of cfg.before ? [""] : ["A", "E", "C2", "C"]) {
       await p.waitForFunction(() => !!document.querySelector("#content .tg-child"), null, { timeout: 10000 });
       await painted(p);
       if (tname === "dark") {
-        out.mixedEOpen = await rows(p);
+        out.mixedOpen = await rows(p);
         out.openSpot = await p.evaluate((t) => {
           const prose = Array.from(document.querySelectorAll("#content .turn-assistant")).find((n) => (n.textContent || "").includes(t));
           const head = prose && prose.nextElementSibling;
@@ -472,10 +441,9 @@ for (const look of cfg.before ? [""] : ["A", "E", "C2", "C"]) {
         await p.waitForTimeout(200);
         out.openReveal.away = await p.evaluate(() => { const b = document.querySelector("#content .tg-last .fork-spot .msg-fork"); return b ? parseFloat(getComputedStyle(b).opacity) : null; });
       }
-      await shot(p, dir4, "opened-E-" + tname, cfg.xPrompt5, "#content .tg-last");
-    }
-    await p.close();
+      await shot(p, dir, "opened-" + tname, cfg.xPrompt5, "#content .tg-last");
   }
+  await p.close();
 }
 out.errors = errors;
 fs.writeFileSync(cfg.resultFile, JSON.stringify(out));   // a file, not stdout: the result outgrows one pipe write
@@ -575,11 +543,9 @@ class ServedNarration(unittest.TestCase):
                        "web": SID, "api": SID_API, "prompt": "Add cursor pagination", "replyStart": "Pagination is in.",
                        "rPrompt": R_PROMPT_1, "rPrompt2": R_PROMPT_2, "rReplyStart": R_REPLY_2[:40], "landFlag": flag,
                        "tests": SID_TESTS, "xPrompt": X_PROMPT_1, "xReplyStart": X_REPLY_6.replace("`", "")[:30], "xPrompt4": X_PROMPT_4,
-                       "shots3": os.environ.get("NARRATION_SHOTS_REALISTIC3", ""), "question": X_QUESTION,
-                       "shots4": os.environ.get("NARRATION_SHOTS_REALISTIC4", ""), "summary": X_SUMMARY.replace("`", ""),
+                       "question": X_QUESTION, "summary": X_SUMMARY.replace("`", ""),
                        "xPrompt5": X_PROMPT_5, "xPrompt7": X_PROMPT_7,
                        "resultFile": os.path.join(self.lab, "result.json"),
-                       "shots2": os.environ.get("NARRATION_SHOTS_REALISTIC2", ""),
                        "shots": os.environ.get("NARRATION_SHOTS", ""), "before": bool(self.before)}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -655,60 +621,7 @@ class ServedNarration(unittest.TestCase):
         hist = [x for x in r["compact"] if x["kind"] in ("thought", "assistant") and HISTORY_NOTE[:30] in x["text"]]
         self.assertEqual([(x["kind"], x["narration"]) for x in hist], [("thought", False)], "unmarked history: %r" % hist)
 
-    def test_mixed_notes_c2_folds_text_and_thinking_notes_clamps_captions_and_keeps_answers_and_footers(self):
-        r = self.result()
-        if self.before:
-            self.skipTest("a before-the-change checkout: screenshots only, the assertions describe the change")
-        self.assertEqual(r["errors"], [], "no page errors")
-        shown = lambda t: t.replace("`", "")
-        allrows = [x for x in r["mixedC2"] if x["kind"] != "other"]
-        cut = next(k for k, x in enumerate(allrows) if x["kind"] == "user" and X_PROMPT_4[:20] in x["text"])
-        rows = allrows[:cut]
-        shape = [(x["kind"], x["narration"], (x["caption"][:30] if x["kind"] == "toolgroup" else x["text"][:30])) for x in rows]
-        self.assertEqual(shape, [
-            ("user", False, X_PROMPT_1[:30]),
-            ("toolgroup", False, "The change touches two places:"),   # text and thinking notes fold; the long note is the caption
-            ("assistant", False, shown(X_REPLY_1)[:30]),               # the final message after the last tool stays a reply
-            ("user", False, X_PROMPT_2[:30]),
-            ("toolgroup", False, X_TEXT_2[:30]),                      # a TEXT note is the caption
-            ("user", False, X_MID_2[:30]),
-            ("assistant", False, X_ANSWER_2[:30]),                    # the answer as a TEXT block stands alone
-            ("toolgroup", False, shown(X_NOTES_2[1])[:30]),
-            ("assistant", False, shown(X_REPLY_2)[:30]),
-            ("user", False, X_PROMPT_3[:30]),
-            ("toolgroup", False, shown("Adding `cursor` and `limit` to search.")[:30]),
-            ("user", False, X_MID_3[:30]),
-            ("assistant", True, X_ANSWER_3[:30]),                     # the answer as a NOTE stands alone too
-            ("toolgroup", False, "Running the search tests."[:30]),
-            ("assistant", False, shown(X_REPLY_3)[:30]),
-        ], "C2, compact: %r" % shape)
-        long_cap = rows[1]
-        self.assertEqual(long_cap["capClamp"], "2", "the caption is a two-line clamp, not a fade")
-        self.assertLessEqual(long_cap["capLines"], 2, "…and shows two lines at most: %r" % long_cap)
-        answer = rows[6]
-        self.assertEqual(answer["capLines"], 0)
-        # the segment before each mid-turn message ends on a tool inside a folded run: its "worked" line rides the run
-        self.assertTrue(rows[4]["foot"], "the run before the first mid-turn message carries the segment's footer: %r" % rows[4])
-        self.assertTrue(rows[10]["foot"], "…and the one before the second: %r" % rows[10])
-        # a turn's last prose is its reply wherever it sits: the summary before a cleanup tool stays a row, never a caption
-        summary = [x for x in allrows if x["kind"] == "assistant" and x["text"].startswith(shown(X_SUMMARY)[:30])]
-        self.assertEqual(len(summary), 1, "the summary before the cleanup tool is its own row: %r" % allrows[cut:])
-        # a caption cut from a note with a code block holds to two lines too (the height cap)
-        code = next(x for x in allrows if x["kind"] == "toolgroup" and x["caption"].startswith("Here is the query"))
-        self.assertLessEqual(code["capLines"], 2, "a code block in a caption is cut at two lines: %r" % code)
-        # opened by a click on its CAPTION: every tool and note in order, the long note whole
-        opened = [x for x in r["mixedC2Open"] if x["child"]]
-        self.assertEqual(["note" if x["kind"] == "assistant" else x["kind"] for x in opened],
-                         ["note", "tool", "note", "tool", "note", "tool", "note", "tool"], "opened: %r" % opened)
-        self.assertIn("then the whole suite", opened[6]["text"], "the long note opens whole")
-        # C (thinking notes only): a text answer to a mid-turn message disarms the rule; no later note is pulled out
-        c = [x for x in r["mixedC"] if x["kind"] != "other"]
-        i = next(k for k, x in enumerate(c) if x["kind"] == "user" and X_MID_2 in x["text"])
-        self.assertEqual([(x["kind"], x["narration"]) for x in c[i + 1:i + 4]],
-                         [("assistant", False), ("toolgroup", False), ("assistant", False)],
-                         "C: the text answer, then ONE run holding both later notes, then the reply: %r" % c[i:i + 5])
-
-    def test_look_e_keeps_every_prose_row_whole_and_folds_the_tools_after_each_into_its_trailing_line(self):
+    def test_compact_mode_keeps_every_prose_row_whole_and_folds_the_tools_after_each_into_its_trailing_line(self):
         r = self.result()
         if self.before:
             self.skipTest("a before-the-change checkout: screenshots only, the assertions describe the change")
@@ -717,10 +630,9 @@ class ServedNarration(unittest.TestCase):
         recs, _marks = _realistic2("/tmp/notes-api", 0)
         said = [key(b.get("text") or b.get("thinking") or "") for rec in recs if rec["type"] == "assistant"
                 for b in rec["message"]["content"] if (b.get("type") == "text" and b.get("text")) or (b.get("type") == "thinking" and b.get("thinking"))]
-        rows = [x for x in r["mixedE"] if x["kind"] != "other"]
+        rows = [x for x in r["mixed"] if x["kind"] != "other"]
         shown = [key(x["text"]) for x in rows if x["kind"] == "assistant"]
         self.assertEqual(shown, said, "every thing the session said is a row of its own, in order: nothing folded")
-        self.assertFalse(any(x["caption"] or x["capLines"] for x in rows), "no caption and no clamp in E")
         # four note/tool pairs: four notes and four tool lines under them, then the reply
         i1 = next(k for k, x in enumerate(rows) if x["kind"] == "user" and X_PROMPT_1[:20] in x["text"])
         self.assertEqual([("prose" if x["kind"] == "assistant" else "line" if x["attached"] else x["kind"]) for x in rows[i1 + 1:i1 + 10]],
@@ -754,11 +666,11 @@ class ServedNarration(unittest.TestCase):
         for where in ("response", "head", "firstCall", "lastCall"):
             self.assertGreater(rv[where] or 0, 0.5, "a hover on the open line's %s: %r" % (where, rv))
         self.assertLess(rv["away"], 0.1, rv)
-        op = [x for x in r["mixedEOpen"] if x["kind"] != "other"]
+        op = [x for x in r["mixedOpen"] if x["kind"] != "other"]
         s2 = next(k for k, x in enumerate(op) if x["kind"] == "assistant" and key(x["text"]) == key(X_SUMMARY))
         self.assertTrue(op[s2 + 1]["attached"] and not op[s2 + 1]["head"], "the open line's head: %r" % op[s2 + 1])
         self.assertEqual([(x["kind"], x["child"]) for x in op[s2 + 2:s2 + 4]], [("tool", True)] * 2, "its calls, in place")
-        # the tools' states, as A's rows say them
+        # the tools' states, as each call's own row says them
         i7 = next(k for k, x in enumerate(rows) if x["kind"] == "user" and X_PROMPT_7[:20] in x["text"])
         failed, line, running = rows[i7 + 2], rows[i7 + 4], rows[i7 + 6]
         self.assertTrue(failed["attached"] and failed["err"] and failed["dotShown"], "a failed call: its row, red, its dot shown: %r" % failed)
@@ -772,33 +684,23 @@ class ServedNarration(unittest.TestCase):
         # the turn still runs, so its tip spot waits for the turn to end: no spot under its newest note
         self.assertFalse(any(x["fork"] for x in rows[i7:]), "no tip spot while the turn runs: %r" % rows[i7:])
 
-    def test_look_c_folds_the_notes_between_tools_into_the_run_and_keeps_the_answer_to_a_midturn_message_out(self):
+    def test_the_realistic_turns_keep_each_note_a_row_with_its_calls_folded_under_it(self):
         r = self.result()
         if self.before:
             self.skipTest("a before-the-change checkout: screenshots only, the assertions describe the change")
         self.assertEqual(r["errors"], [], "no page errors")
-        rows = [x for x in r["realC"] if x["kind"] != "other"]
-        shape = [(x["kind"], x["narration"], x["caption"] if x["kind"] == "toolgroup" else x["text"]) for x in rows]
-        self.assertEqual(shape, [
-            ("user", False, R_PROMPT_1),
-            ("toolgroup", False, R_NOTES_1[3]),            # four note/tool pairs: ONE run, its caption the latest note
-            ("assistant", False, R_REPLY_1),
-            ("user", False, R_PROMPT_2),
-            ("toolgroup", False, R_NOTES_2A[1]),           # the two pairs before the message
-            ("user", False, R_MIDTURN),
-            ("assistant", True, R_ANSWER),                 # the answer to the message, on its own as prose
-            ("toolgroup", False, R_NOTES_2B[3]),           # the pairs after it fold again
-            ("assistant", False, R_REPLY_2),
-        ], "look C, compact: %r" % shape)
-        self.assertTrue(rows[1]["head"].startswith("Read 2 files"), "the run's head still counts its tools: %r" % rows[1])
-        # the last run opened: every tool and note in order, each note as prose
-        opened = [x for x in r["realCOpen"] if x["child"]]
-        kinds = ["note" if x["narration"] else x["kind"] for x in opened]
-        self.assertEqual(kinds, ["tool", "tool", "note", "tool", "note", "tool", "note", "tool", "note", "tool"], "opened: %r" % opened)
-        self.assertEqual([x["text"] for x in opened if x["narration"]], R_NOTES_2B)
-        head = next(x for x in r["realCOpen"] if x["kind"] == "toolgroup" and not x["head"])
-        self.assertEqual(head["caption"], "", "an open run shows its notes in place, not the caption")
-
+        rows = [x for x in r["real"] if x["kind"] != "other"]
+        shape = [("prose" if x["kind"] == "assistant" else "line" if x["attached"] else x["kind"], x["text"][:30] if x["kind"] in ("assistant", "user") else "")
+                 for x in rows]
+        pair = lambda t: [("prose", t[:30]), ("line", "")]
+        self.assertEqual(shape, [("user", R_PROMPT_1[:30])] + sum((pair(t) for t in R_NOTES_1), []) + [("prose", R_REPLY_1[:30]),
+                                 ("user", R_PROMPT_2[:30])] + sum((pair(t) for t in R_NOTES_2A), []) + [("user", R_MIDTURN[:30])]
+                         + pair(R_ANSWER) + sum((pair(t) for t in R_NOTES_2B), []) + [("prose", R_REPLY_2[:30])],
+                         "four note/tool pairs read as four notes, a call under each, and the reply; the answer to the mid-turn "
+                         "message is a row of its own: %r" % shape)
+        answer = next(k for k, x in enumerate(rows) if x["kind"] == "assistant" and x["text"].startswith(R_ANSWER[:30]))
+        self.assertTrue(rows[answer]["narration"], "the answer is a note, drawn as prose")
+        self.assertTrue(rows[answer + 1]["line"].startswith("▸ Edited"), "the two edits after it are one line: %r" % rows[answer + 1])
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,8 +41,7 @@ import { windowFocusedElement } from "./window-focus";   // the window's focus a
 import { markerLabel, dayContext, DayWalk, relativeLabel, relativeLines } from "./time-marker";
 import { composeStatusWidgets, folderIconNode, folderLink, type StatusRecord } from "./status-widgets";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
-import { compactDisplay, isFoldableNoticeShape, isProseShape, isSplicedMessage, itemAnchor, itemHolds, runCaption, runRows, segmentReplies, thoughtHasWords, thoughtOf, thoughtKey, type DisplayItem, type NoteRoles } from "./compact";
-import { anchorUuidAt } from "./anchor-uuid";
+import { compactDisplay, isFoldableNoticeShape, isProseShape, itemAnchor, itemHolds, runRows, thoughtHasWords, thoughtOf, thoughtKey, type DisplayItem, type NoteRoles } from "./compact";
 import { forkSpotPlan } from "./fork-spots";
 import { insertRun, regionsFromRuns, gapHeight, gapTurnPx, GAPS_SHARE, HIDDEN_SHARE, heldUnitPx, LAYOUT_LIMIT_FALLBACK, pageAt, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, kernelTurnOf, measureTurnPx, type MeasuredRow, type Region, type Run, type Gap, type Ev } from "./chat-regions";
 import { senderKind, SenderKind } from "./sender-identity";
@@ -496,18 +495,6 @@ function openSettingsOn(tab: string, section?: string): void {
 }
 
 let settings: RompSettings = loadSettings();   // global webview settings (compact mode, …) — see settings.ts
-// How progress notes look (2026-11-06, DRAFT: the user picks one from screenshots, and the others then go). A, a note is plain
-// assistant prose; B, the same prose with the thought's dim rail dot and tighter spacing (html.narr-look-b, styles.css);
-// C, compact mode folds the progress notes between tools into the run, its latest note the run's clamped caption; C2, the
-// same for ANY assistant prose between tools, text blocks included (compact.ts, options C and C2). E, the default: compact
-// mode keeps every prose row whole and folds the tools after each into one dim line under it (compact.ts, option E): what
-// the session says is never hidden or clipped. A, B, C and C2 are kept for comparison.
-// Read once per page from localStorage "romp:narration-look"; E when unset.
-const narrationLook: "A" | "B" | "C" | "C2" | "E" = (() => {
-  try { const v = localStorage.getItem("romp:narration-look"); if (v === "A" || v === "B" || v === "C" || v === "C2" || v === "E") return v; } catch { /* no storage */ }
-  return "E";
-})();
-if (narrationLook === "B") document.documentElement.classList.add("narr-look-b");
 // (compact mode's expanded tool/notice runs are keyed in openFolds — "tg:<uuid>" / "ng:<uuid>" — the ONE fold
 // store since 2026-09-08; this had its own expandedGroups set)
 
@@ -12571,7 +12558,7 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
       // turnWorkedSecs, with the thread session's own busy reading standing in for `working`
       const node = renderEvent(ev, prev, turnWorkedSecs(evs, it.index, thWorking));
       list.appendChild(node);
-      if (it.attached) node.classList.add("tool-attached");   // look E: a lone call after a prose row, tucked under it
+      if (it.attached) node.classList.add("tool-attached");   // a lone call after a prose row, tucked under it
       if (!quoteHost && ev.kind === "user") quoteHost = node;
       const ep = eventEpoch(ev);
       if (ep != null) prev = ep;
@@ -15236,49 +15223,21 @@ function displayItems(s: Session): DisplayItem[] {
 function compactItems(evs: readonly ChatEvent[]): DisplayItem[] {
   return compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === "tool" ? e.name : undefined), evs.map(isFoldableNotice), evs.map(thoughtHasWords), noteRoles(evs));
 }
-/** The roles compactDisplay folds by. E: every prose row (the tools after it attach to it) and the Agent cards that stay rows.
- *  C and C2: the rows that may join a run (never a segment's reply: segmentReplies) and the messages delivered mid-turn
- *  (isSplicedMessage). None under looks A and B. */
-function noteRoles(evs: readonly ChatEvent[]): NoteRoles | undefined {
-  if (narrationLook === "E") return { note: evs.map(isProse), spliced: [], attach: true, keep: evs.map(isKeptCard) };
-  if (narrationLook !== "C" && narrationLook !== "C2") return undefined;
-  const replies = turnReplies(evs);
-  return { note: evs.map((e, i) => runNote(e) && !replies.has(i)), spliced: evs.map((e) => isSplicedMessage(e as any)) };
+/** The roles compactDisplay folds by: every prose row (the tools after it attach to it) and the Agent cards that stay rows. */
+function noteRoles(evs: readonly ChatEvent[]): NoteRoles {
+  return { note: evs.map(isProse), keep: evs.map(isKeptCard) };
 }
-/** Each turn's reply (compact.ts segmentReplies): its last prose, a turn ending at a user row that opens one (a message
- *  delivered mid-turn, absorbed, opens none). */
-function turnReplies(evs: readonly ChatEvent[]): Set<number> {
-  return segmentReplies(evs.map((e) => e.kind), (i) => isProse(evs[i]), (i) => evs[i].kind === "user" && !(evs[i] as { absorbed?: boolean }).absorbed);
-}
-/** Look E: a tool that stays its own row between prose rows, as it does today: an Agent (or Task) card, the report it carries. */
+/** A tool that stays its own row between prose rows, as it always did: an Agent (or Task) card, the report it carries. */
 function isKeptCard(e: ChatEvent): boolean { return e.kind === "tool" && (e.name === "Agent" || e.name === "Task"); }
-/** A progress note: an assistant event the kernel built from a thinking block the CLI listed as the model's note (narration). */
-function isNote(e: ChatEvent | undefined): boolean { return !!e && e.kind === "assistant" && !!e.narration; }
 /** Assistant prose a reader reads as the agent speaking: a reply or a note, never the interrupt's settle (a seam marker) or a
  *  slash command's output. */
 function isProse(e: ChatEvent | undefined): boolean { return !!e && isProseShape(e as { kind: string }); }
-/** The rows a run may hold as notes: C, the progress notes; C2, any prose. */
-function runNote(e: ChatEvent | undefined): boolean { return narrationLook === "C2" ? isProse(e) : isNote(e); }
-/** Looks C and C2: a collapsed run's caption, its latest note (compact.ts runCaption), drawn as prose under the run's line on
- *  the run's head `head`, clamped to two lines (.toolgroup-caption); nothing under looks A and B, or for a run that holds no
- *  note. An open run shows its notes in place, whole. */
-function captionRun(head: HTMLElement, evs: readonly ChatEvent[], indices: readonly number[]): void {
-  if (narrationLook !== "C" && narrationLook !== "C2") return;
-  const i = runCaption(indices, (j) => runNote(evs[j]));
-  if (i < 0) return;
-  const ev = evs[i] as Extract<ChatEvent, { kind: "assistant" }>;
-  const c = assistantBody(ev);
-  c.classList.add("toolgroup-caption");
-  if (ev.uuid) c.dataset.noteUuid = ev.uuid;   // a quote or comment that starts here anchors on the note's own record
-  c.dataset.act = "noticetoggle"; c.dataset.gkey = toolGroupKey(evs[indices[0]]);   // the cut caption opens the run
-  head.appendChild(c);
-}
-/** Look E: a tool line folds its calls, so it says what A's rows would: a call still RUNNING (the kernel's `running` stamp)
- *  wears the working dot and "running…" with its elapsed time, ticked by the 1 s timer (.tool-elapsed[data-since]) and gone at
- *  the push that brings its result; a FAILED call wears the red dot and the line says how many failed, in red, as A's rows say
- *  "error"; a call CUT before its result could come (stamped not running, with no result: renderTool's "no result") wears
- *  A's plain dot and the line says how many have no result. The dot is the only part of an attached line's rail mark that
- *  shows, and only for these states (a done line's ✓ stays off). The dot keeps its own classes (dot-nav, its hit area). */
+/** A tool line folds its calls, so it says what each call's own row would: a call still RUNNING (the kernel's `running`
+ *  stamp) wears the working dot and "running…" with its elapsed time, ticked by the 1 s timer (.tool-elapsed[data-since]) and
+ *  gone at the push that brings its result; a FAILED call wears the red dot and the line says how many failed, in red, as a
+ *  row says "error"; a call CUT before its result could come (stamped not running, with no result: renderTool's "no result")
+ *  wears the plain dot and the line says how many have no result. The dot is the only part of an attached line's rail mark
+ *  that shows, and only for these states (a done line's ✓ stays off). The dot keeps its own classes (dot-nav, its hit area). */
 function attachedRunState(head: HTMLElement, evs: readonly ChatEvent[], indices: readonly number[], open: boolean): void {
   const tools = runTools(evs, indices);
   const failed = tools.filter((t) => t.isError).length;
@@ -15309,16 +15268,14 @@ function attachedRunState(head: HTMLElement, evs: readonly ChatEvent[], indices:
     }
   }
 }
-/** A tool run's head, past its line: under look E, the attached class (the tools after a prose row, drawn as its trailing
- *  line). And what a COLLAPSED run's head carries under its line: the caption (captionRun, looks C and C2), then, when the run's last
- *  member is the last row of a finished segment (`secs`, the worked-footer rule over that member), the segment's "worked …"
- *  footer: a segment that ends inside a folded run (a run of tools, and under C and C2 its notes, before a message sent
- *  mid-turn or the session going idle) keeps the line every other segment shows. An open run's last row carries it instead
- *  (appendItem); patchWorkedFooters keeps both. */
+/** A tool run's head, past its line: the attached class (the tools after a prose row, drawn as its trailing line) and the
+ *  line's state. And what a COLLAPSED run's head carries under its line: when the run's last member is the last row of a
+ *  finished segment (`secs`, the worked-footer rule over that member), the segment's "worked …" footer: a segment that ends
+ *  inside a folded run (before a message sent mid-turn or the session going idle) keeps the line every other segment shows.
+ *  An open run's last row carries it instead (appendItem); patchWorkedFooters keeps both. */
 function foldedRunHead(head: HTMLElement, evs: readonly ChatEvent[], it: Extract<DisplayItem, { kind: "toolgroup" }>, open: boolean, secs: number | null, thought: number | null): void {
-  if (it.attached) { head.classList.add("toolgroup-attached"); attachedRunState(head, evs, it.indices, open); }   // look E
+  if (it.attached) { head.classList.add("toolgroup-attached"); attachedRunState(head, evs, it.indices, open); }
   if (open) return;
-  captionRun(head, evs, it.indices);
   if (secs != null) head.appendChild(elapsedFooter(secs, thought));
 }
 // T386 stage 2: the history the page does not hold is GAPS between its runs (and before the first), each a display unit of its own
@@ -15451,7 +15408,7 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
     }
   } else {
     const node = tag(renderEvent(s.events[it.index], prevEpoch, ...turnFoot(s.events, it.index, working)));
-    if (it.attached) node.classList.add("tool-attached");   // look E: a lone call after a prose row, tucked under it
+    if (it.attached) node.classList.add("tool-attached");   // a lone call after a prose row, tucked under it
     host.appendChild(node);
     adv(it.index);
   }
@@ -15784,8 +15741,8 @@ function appendTotals(line: HTMLElement, add: number, del: number): void {
   if (!add && !del) return;
   line.append(" ", diffTotals(add, del));
 }
-/** An assistant message's prose: markdown, highlighted code, the kernel-verified path links, the team's terms. A reply, a
- *  progress note and a run's caption (option C) draw it alike. */
+/** An assistant message's prose: markdown, highlighted code, the kernel-verified path links, the team's terms. A reply and a
+ *  progress note draw it alike. */
 function assistantBody(ev: Extract<ChatEvent, { kind: "assistant" }>): HTMLElement {
   const body = el("div", "assistant md");
   body.innerHTML = md(ev.md);
@@ -22213,10 +22170,7 @@ function transcriptSelection(): { text: string; uuid: string | null } | null {
   if (!a || !f) return null;                                // both endpoints must be transcript turns
   const text = r.toString().trim();
   if (!text) return null;
-  // a selection that starts in a run's caption (looks C and C2) anchors on the note's own record, not the run's first tool
-  const s0 = r.startContainer instanceof Element ? r.startContainer : r.startContainer.parentElement;
-  const note = s0?.closest?.("[data-note-uuid]")?.getAttribute("data-note-uuid");
-  return { text, uuid: note || a.getAttribute("data-uuid") };
+  return { text, uuid: a.getAttribute("data-uuid") };
 }
 document.addEventListener("selectionchange", () => {
   if (!activeId) return;
@@ -22248,7 +22202,8 @@ function threadSelection(): { text: string; uuid: string | null } | null {
   if (r.collapsed || !list.contains(r.startContainer) || !list.contains(r.endContainer)) return null;
   const text = r.toString().trim();
   if (!text) return null;
-  return { text, uuid: anchorUuidAt(r.startContainer) };
+  const start = r.startContainer instanceof Element ? r.startContainer : r.startContainer.parentElement;
+  return { text, uuid: start?.closest(".turn")?.getAttribute("data-uuid") || null };
 }
 
 // Dismiss a citation — via its chip's ✕ (that exact chip, by index) or Backspace at the very start of an

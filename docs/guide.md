@@ -33,9 +33,9 @@ text. A thought that follows a run of tool calls sits inside the run; one after
 a single call is a line of its own.
 
 The notes a session writes for you between tool calls, such as what it just
-found or its answer to a message you sent while it worked, show as its own
-words in the chat, the way a reply does. In compact view each note keeps its
-own row, and the tool calls after it fold into a short line beneath it.
+found or its answer to a message you sent while it worked, show as text in the
+chat, the way a reply does. In compact view the tool calls after each note fold
+into one line beneath it.
 
 The chat shows a session's live status. While it thinks, the foot of the chat
 reads **Thinking** with the seconds so far, its chip in the Sessions pane reads
