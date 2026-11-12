@@ -338,13 +338,22 @@ turn running or queued, no subagent, no background task), and while it waits
 the chat line says on what, as in "Applying high effort after 2 background
 tasks…". Restart session applies a waiting change at once, ending that work.
 
-A model the session's own Claude Code does not know yet, while a newer Claude
-Code is installed (a session keeps the binary it was started with across an
-update), is kept rather than refused: the model badge keeps its switching-dots,
+A model the session's own Claude Code does not know yet, or that the API says
+needs a newer Claude Code, while a newer Claude Code is installed (a session
+keeps the binary it was started with across an update; for the API's refusal,
+one at or above the version it names), is kept rather than refused: the model
+badge keeps its switching-dots,
 and the session reloads on the installed Claude Code with the new model (and
 fast mode, when the session runs fast), waiting in the same way so nothing is
-cut. If that Claude Code refuses the model too, the pick goes back and the
-error center says so, as for any refused model.
+cut. Meanwhile the badge's hover and the tab's say the model and what the
+reload waits for, as in "Fable 5.2 applies after 2 background tasks". The pick
+and its dots survive a kernel restart; until the reload, the session is not
+treated as fallen below its pick, so Retry upgrades after downgrades does not
+arm and no "Model back on" card follows the reload. If that Claude Code refuses
+the model too, the pick goes back and the error center says so, as for any
+refused model; when no installed Claude Code reaches the version the API named,
+the pick goes back at once and the error center's line ends with the version to
+update Claude Code to.
 
 Picking **Bypass permissions** from the mode dropdown reloads the session too,
 since Claude Code takes bypass only at launch, and that reload waits in the
@@ -6461,14 +6470,17 @@ dollars its transcript and the agent transcripts beside it (the subagents and
 workflow agents it fanned out) record over the last ten minutes, scaled to an
 hour. Each call is priced the way Claude Code prices it, from its own rates
 (`kernel/cli_prices.py`): a fast call at the model's fast rates, cache writes
-held for an hour at their own rate, the same table the cost view uses, so the
+held for an hour at their own rate, a Haiku 5.5 call whose prompt (input, cache
+reads and cache writes) is over 100,000 tokens at its long-prompt rates for
+every category, output included, the same table the cost view uses, so the
 rate reads beside the dollars the CLI records. A model the table lacks is
 priced as the newest model of its family, or the dearest row when no family
 matches, and named once per kernel life in the kernel log and the error center,
 with the row and rates it was priced at; only a date may follow a known id
-(`claude-sonnet-5-5` is not `claude-sonnet-5`). The table is kept by hand, so
+(`claude-sonnet-5-6` is not `claude-sonnet-5-5`). The table is kept by hand, so
 each result's per-model dollars from Claude Code are checked against what its
-rates can give that model's tokens at any speed and cache duration, the model
+rates can give that model's tokens at any speed, cache duration and prompt
+length, the model
 being the one Claude Code says it priced the entry as (`canonicalModel`, beside
 the raw model string the entry is keyed by): a model the
 table lacks, or a bill outside that reach by more than a percent, is raised in

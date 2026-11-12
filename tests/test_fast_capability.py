@@ -56,7 +56,7 @@ def _server_info(**over):
              {"value": "fable", "resolvedModel": "claude-fable-5-2", "displayName": "Fable 5.2", "supportsFastMode": True},
              {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5", "supportsFastMode": True},
              {"value": "claude-opus-4-8", "resolvedModel": "claude-opus-4-8", "displayName": "Opus 4.8"},
-             {"value": "sonnet", "resolvedModel": "claude-sonnet-5", "displayName": "Sonnet 5", "supportsFastMode": None},
+             {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", "displayName": "Sonnet 5.5", "supportsFastMode": None},
              "not an option", {"value": "", "resolvedModel": None}]}
     d.update(over)
     return d
@@ -214,7 +214,7 @@ class TheTable(unittest.TestCase):
     def test_support_from_a_payload_keys_alias_and_resolved_id(self):
         s = mf.support_from_payload(_server_info())
         self.assertEqual(s, {"default": True, "claude-fable-5-2": True, "fable": True, "opus": True, "claude-opus-5-5": True,
-                             "claude-opus-4-8": False, "sonnet": False, "claude-sonnet-5": False})
+                             "claude-opus-4-8": False, "sonnet": False, "claude-sonnet-5-5": False})
         self.assertEqual(mf.support_from_payload({"fast_mode_state": "on"}), {}, "a payload without the list says nothing")
         self.assertEqual(mf.support_from_payload(None), {})
 
@@ -260,7 +260,7 @@ class TheBackendWrites(unittest.TestCase):
         t = _table(be.state_dir)
         self.assertEqual({k: v["fast"] for k, v in t.items()},
                          {"default": True, "claude-fable-5-2": True, "fable": True, "opus": True, "claude-opus-5-5": True,
-                          "claude-opus-4-8": False, "sonnet": False, "claude-sonnet-5": False},
+                          "claude-opus-4-8": False, "sonnet": False, "claude-sonnet-5-5": False},
                          "every option by alias AND resolved id; true claims true, absent or None false")
         self.assertEqual(t["fable"]["cli"], "2.1.321", "stamped with the version the answer itself names")
         self.assertEqual(s._cli_version_seen, "2.1.321", "…which this session now remembers")
@@ -479,15 +479,34 @@ class _Sys:
 
 
 class _Query:
-    """The SDK client's control-request sender, recording what romp asks; `fail` makes the CLI refuse."""
-    def __init__(self, fail=None):
-        self.sent, self.fail = [], fail
+    """The SDK client's control-request sender, recording what romp asks. `fail` makes the CLI refuse, as the SDK reports
+    a CLI's error answer: a bare Exception carrying the CLI's text, no cause (claude_agent_sdk's reader). `lost` makes the
+    answer never come: the exception the SDK raises then (its timeout's `Control request timeout: <subtype>` from a
+    TimeoutError, or a typed one from a reader that died), and `before` runs as the request goes out (a reconnect's
+    teardown replacing the connection, say)."""
+    def __init__(self, fail=None, lost=None, before=None):
+        self.sent, self.fail, self.lost, self.before = [], fail, lost, before
 
     async def _send_control_request(self, req):
         self.sent.append(req)
+        if self.before:
+            self.before()
+        if self.lost is not None:
+            raise self.lost
         if self.fail:
-            raise RuntimeError(self.fail)
+            raise Exception(self.fail)
         return {}
+
+
+def _timed_out(subtype="apply_flag_settings"):
+    """The SDK's lost answer, constructed as claude_agent_sdk raises it: from a TimeoutError."""
+    try:
+        try:
+            raise TimeoutError()
+        except TimeoutError as t:
+            raise Exception("Control request timeout: " + subtype) from t
+    except Exception as e:
+        return e
 
 
 class TheDroppedFastIsAskedBack(unittest.TestCase):
@@ -499,7 +518,7 @@ class TheDroppedFastIsAskedBack(unittest.TestCase):
 
     FLAG_OFF = {"fast_mode_state": "off", "model": "claude-fable-5-2", "claude_code_version": "2.1.322"}
 
-    def _session(self, fail=None, **reg):
+    def _session(self, fail=None, lost=None, before=None, **reg):
         be = _backend()
         be._logs, be._problems_said, be._toasts = [], [], []
 
@@ -515,7 +534,7 @@ class TheDroppedFastIsAskedBack(unittest.TestCase):
         s = _sess(be, **r)
         s._fast_unlocked = True                  # launched with the fast-mode flag (the launch record's word)
         s.client = type("C", (), {})()
-        s.client._query = _Query(fail)
+        s.client._query = _Query(fail, lost=lost, before=before)
 
         async def _noop(): pass
         s._do_refresh_context = _noop
@@ -577,6 +596,48 @@ class TheDroppedFastIsAskedBack(unittest.TestCase):
         self.assertEqual(len(be._toasts), 1)
         self.assertIn("asking it back on failed", be._toasts[0]["text"])
 
+    def test_a_lost_answer_is_not_a_refusal_and_the_next_report_rules(self):
+        """The review of #455: the SDK's 60 s timeout, or a reconnect cutting the request, raised like a refusal and was said
+        as "asking it back on failed", a toast and a problem row for an ask the CLI may well have taken. A lost answer says
+        nothing and flips no badge; the CLI's next report of its fast mode rules."""
+        for lost in (_timed_out(), ConnectionError("the reader died")):
+            be, s = self._session(lost=lost)
+            self._run(s, self.FLAG_OFF)
+            self.assertEqual(len(s.client._query.sent), 1)
+            self.assertEqual((be._problems_said, be._toasts), ([], []), "%r: no refusal is claimed" % lost)
+            self.assertEqual(s.fast, "off", "no optimistic Fast on an answer that never came: the CLI's word stands")
+            self.assertEqual(s._fast_rearm["claude-fable-5-2"], "lost")
+            self.assertTrue(any("never came" in m and "next turn's report" in m for m in be._logs), be._logs)
+            # the next turn's init: fast mode on, so the CLI took it
+            self._run(s, dict(self.FLAG_OFF, fast_mode_state="on"))
+            self.assertEqual(len(s.client._query.sent), 1, "nothing asked again")
+            self.assertEqual((be._problems_said, be._toasts), ([], []))
+            self.assertEqual(s.fast, "on")
+            self.assertTrue(any("took the ask whose answer never came" in m for m in be._logs), be._logs)
+
+    def test_a_lost_answer_then_a_drop_that_holds_is_said_by_the_report_not_as_a_refusal(self):
+        be, s = self._session(lost=_timed_out())
+        self._run(s, self.FLAG_OFF, self.FLAG_OFF, self.FLAG_OFF)
+        self.assertEqual(len(s.client._query.sent), 1, "one ask per model per connection")
+        self.assertEqual(len(be._problems_said), 1, be._problems_said)
+        said = be._problems_said[0][0]
+        self.assertIn("kept it off after romp asked for it again (the answer to that ask never came)", said)
+        self.assertNotIn("refused", said)
+        self.assertNotIn("failed", said)
+        self.assertEqual(len(be._toasts), 1)
+
+    def test_an_answer_for_a_connection_since_replaced_writes_nothing(self):
+        # a reconnect's teardown strands the request (the SDK then reports it lost), and the new connection's CLI is asked,
+        # or not, on its own report: the stale answer neither says a failure nor marks the new connection's table
+        holder = {}
+        be, s = self._session(lost=_timed_out(), before=lambda: setattr(holder["s"], "_fast_rearm", {}))
+        holder["s"] = s
+        self._run(s, self.FLAG_OFF)
+        self.assertEqual(s._fast_rearm, {}, "the new connection's table is untouched")
+        self.assertEqual((be._problems_said, be._toasts), ([], []))
+        self.assertEqual(s.fast, "off")
+        self.assertTrue(any("connection since replaced" in m for m in be._logs), be._logs)
+
     def test_a_refusal_with_a_reason_is_answered_as_before_and_never_asked_back(self):
         be, s = self._session()
         self._run(s, dict(self.FLAG_OFF, fast_mode_disabled_reason="extra_usage_disabled"))
@@ -601,7 +662,7 @@ class TheDroppedFastIsAskedBack(unittest.TestCase):
 
     def test_only_where_the_cli_said_the_model_runs_fast(self):
         be, s = self._session()
-        self._run(s, dict(self.FLAG_OFF, model="claude-sonnet-5"))
+        self._run(s, dict(self.FLAG_OFF, model="claude-sonnet-5-5"))
         self.assertEqual(s.client._query.sent, [], "a model the CLI lists without fast mode: off is simply right")
         self._run(s, dict(self.FLAG_OFF, model="claude-opus-4-7"))
         self.assertEqual(s.client._query.sent, [], "a model no report named: the seed is no proof")
@@ -698,8 +759,12 @@ class ThePriceTableCoversWhatTheCliReports(unittest.TestCase):
     def test_every_resolved_model_has_a_price_row_and_every_fast_one_fast_rates(self):
         cp = sys.modules.get("romp_cli_prices") or load_source("romp_cli_prices", os.path.join(ROOT, "kernel", "cli_prices.py"))
         info = _server_info()
+        # …and the haiku alias, which 2.1.322 resolves to claude-haiku-5-5 (the fixture's world leaves it unnamed for the
+        # pickers' "never named" case)
+        info["models"] = info["models"] + [{"value": "haiku", "resolvedModel": "claude-haiku-5-5", "displayName": "Haiku 5.5"}]
         resolved = {str(o["resolvedModel"]) for o in info["models"] if isinstance(o, dict) and o.get("resolvedModel")}
         self.assertIn("claude-fable-5-2", resolved)
+        self.assertTrue({"claude-sonnet-5-5", "claude-haiku-5-5"} <= resolved, "the aliases as Claude Code 2.1.322 resolves them")
         missing = sorted(m for m in resolved if cp.model_id(m) is None)
         self.assertEqual(missing, [], "models the CLI reports that romp cannot price")
         fast = {str(o["resolvedModel"]) for o in info["models"]

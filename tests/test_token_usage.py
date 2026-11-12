@@ -779,27 +779,78 @@ class CostWeighting(unittest.TestCase):
         self.assertIn("priced as claude-opus-5-5", said[0])
 
     def test_an_unknown_version_of_a_known_model_is_a_family_guess_said_once_never_a_neighbours_row(self):
-        """Review of #170: the table's id match took any known id plus a dash, so claude-sonnet-5-5 priced silently as
-        claude-sonnet-5 (Claude Code bills it about three times that) and a Fable version the table lacked as Fable 5
-        (four times Fable 5.1's cache-read rate). Only a date may follow a known id; an unknown version is a family
-        guess, said."""
+        """Review of #170: the table's id match took any known id plus a dash, so a Sonnet version the table lacked priced
+        silently as claude-sonnet-5 and a Fable version the table lacked as Fable 5 (four times Fable 5.1's cache-read
+        rate). Only a date may follow a known id; an unknown version is a family guess, said. (The example was
+        claude-sonnet-5-5 until it got its own row, 2026-11-12; the version after it stands in.)"""
         import io
         cp = sys.modules["romp_cli_prices"]
-        for mid in ("claude-sonnet-5-5", "claude-fable-5-3", "claude-opus-5-6"):
+        for mid in ("claude-sonnet-5-6", "claude-fable-5-3", "claude-opus-5-6"):
             self.assertIsNone(cp.model_id(mid), mid)
         self.assertEqual(cp.model_id("claude-opus-5-5-20261001"), "claude-opus-5-5", "a dated id is the model")
         self.assertEqual(cp.model_id("claude-opus-5-5[1m]"), "claude-opus-5-5")
+        self.assertEqual(cp.model_id("claude-sonnet-5-5"), "claude-sonnet-5-5", "its own row, not claude-sonnet-5's")
         prices = km._model_prices()
-        km._PRICE_UNKNOWN_SAID.difference_update({"claude-sonnet-5-5", "claude-fable-5-3"})
+        km._PRICE_UNKNOWN_SAID.difference_update({"claude-sonnet-5-6", "claude-fable-5-3"})
         err = io.StringIO()
         with mock.patch.object(sys, "stderr", err):
-            self.assertIs(km._price_for("claude-sonnet-5-5", prices), prices["claude-sonnet-5"], "the newest Sonnet, guessed")
-            self.assertIs(km._price_for("claude-sonnet-5-5", prices), prices["claude-sonnet-5"])
+            self.assertIs(km._price_for("claude-sonnet-5-6", prices), prices["claude-sonnet-5-5"], "the newest Sonnet, guessed")
+            self.assertIs(km._price_for("claude-sonnet-5-6", prices), prices["claude-sonnet-5-5"])
             self.assertIs(km._price_for("claude-fable-5-3", prices), prices["claude-fable-5-2"], "the newest Fable, not Fable 5")
         said = err.getvalue().splitlines()
         self.assertEqual(len(said), 2, said)
-        self.assertIn("'claude-sonnet-5-5' is not in Claude Code's price table", said[0])
+        self.assertIn("'claude-sonnet-5-6' is not in Claude Code's price table", said[0])
         self.assertIn("'claude-fable-5-3' is not in Claude Code's price table", said[1])
+
+    def test_sonnet_and_haiku_5_5_have_their_own_rows_and_haiku_its_long_prompt_tier(self):
+        """Claude Code 2.1.322 resolves `sonnet` to claude-sonnet-5-5 and `haiku` to claude-haiku-5-5, and the table had
+        neither: Sonnet 5.5 fell to Sonnet 5's row (cache reads twice their price) and Haiku 5.5 to Haiku 4.5's (about ten
+        times too high). Anthropic's pricing page and 2.1.322's catalog: Sonnet 5.5 $2/$10, writes $2.50 and $4, cache
+        read $0.10; Haiku 5.5 $0.10/$0.50, writes $0.125 and $0.20, cache read $0.01, and five times that for a call whose
+        prompt (input, cache reads and cache writes) is over 100,000 tokens, output included, call by call. No fast rows."""
+        import io
+        cp = sys.modules["romp_cli_prices"]
+        prices = km._model_prices()
+        km._PRICE_UNKNOWN_SAID.difference_update({"claude-sonnet-5-5", "claude-haiku-5-5"})
+        err = io.StringIO()
+        keys = ("in", "out", "cache_w", "cache_w_1h", "cache_r")
+        with mock.patch.object(sys, "stderr", err):
+            for mid, rates in (("claude-sonnet-5-5", [2, 10, 2.5, 4, 0.1]), ("claude-haiku-5-5", [0.1, 0.5, 0.125, 0.2, 0.01])):
+                row = km._price_for(mid, prices)
+                self.assertIs(row, prices[mid], mid + " is priced from its own row, not a family guess")
+                self.assertEqual([round(row[k] * 1e6, 6) for k in keys], rates, mid)
+                self.assertNotIn("fast", row, mid + " has no fast rates")
+                self.assertIs(km._price_for(mid + "-20991231", prices), row, "a dated id")
+        self.assertEqual(err.getvalue(), "", "nothing to say about a model the table has")
+        self.assertEqual([round(prices["claude-haiku-5-5"]["long"][k] * 1e6, 6) for k in keys], [0.5, 2.5, 0.625, 1, 0.05])
+        self.assertNotIn("long", prices["claude-sonnet-5-5"], "Sonnet 5.5 bills every prompt length alike")
+        # the tier, call by call: a prompt of exactly 100,000 tokens is standard, one more is long, for every category
+        at = {"input_tokens": 40000, "cache_read_input_tokens": 50000, "cache_creation_input_tokens": 10000,
+              "output_tokens": 2000}
+        std = (40000 * 0.1 + 50000 * 0.01 + 10000 * 0.125 + 2000 * 0.5) / 1e6
+        self.assertAlmostEqual(cp.call_cost("claude-haiku-5-5", at), std, places=12)
+        over = dict(at, input_tokens=40001)
+        self.assertAlmostEqual(cp.call_cost("claude-haiku-5-5", over), (40001 * 0.5 + 50000 * 0.05 + 10000 * 0.625 + 2000 * 2.5) / 1e6,
+                               places=12, msg="over the line: the long rates, output included")
+        self.assertAlmostEqual(cp.call_cost("claude-haiku-5-5", dict(over, inference_geo="us")),
+                               1.1 * (40001 * 0.5 + 50000 * 0.05 + 10000 * 0.625 + 2000 * 2.5) / 1e6, places=12,
+                               msg="US inference multiplies the long rates too")
+        self.assertAlmostEqual(cp.call_cost("claude-haiku-5-5", dict(over, speed="fast")),
+                               cp.call_cost("claude-haiku-5-5", over), places=12, msg="no fast rates: a fast call at its tier")
+        big = {"input_tokens": 1e6, "output_tokens": 1e6}
+        self.assertAlmostEqual(cp.call_cost("claude-sonnet-5-5", big), 12.0, msg="Sonnet 5.5: no long tier")
+        # the session cost view prices each call on its own: two calls under the line stay standard though they sum over it
+        path = pathlib.Path(self.td.name) / "haiku55.jsonl"
+        path.write_text(_asst({"input_tokens": 60000, "output_tokens": 1000}, iso(NOW - 300), model="claude-haiku-5-5", mid="m1") + "\n"
+                        + _asst({"input_tokens": 60000, "output_tokens": 1000}, iso(NOW - 200), model="claude-haiku-5-5", mid="m2") + "\n"
+                        + _asst({"input_tokens": 150000, "output_tokens": 1000}, iso(NOW - 100), model="claude-haiku-5-5", mid="m3") + "\n")
+        expect = (2 * (60000 * 0.1 + 1000 * 0.5) + (150000 * 0.5 + 1000 * 2.5)) / 1e6
+        self.assertAlmostEqual(km._session_cost(str(path), NOW - 3600, km._model_prices()), expect, places=12)
+        # the drift check's bounds over a turn's totals: the low figure every call standard, the high one every call long
+        lo, hi = cp.cost_bounds("claude-haiku-5-5", 270000, 3000, 0, 0)
+        self.assertAlmostEqual(lo, (270000 * 0.1 + 3000 * 0.5) / 1e6, places=12)
+        self.assertAlmostEqual(hi, 1.1 * (270000 * 0.5 + 3000 * 2.5) / 1e6, places=12)
+        self.assertTrue(lo <= expect <= hi, "what Claude Code bills those calls lies within the bounds")
 
     def test_fable_and_mythos_5_2_have_their_own_rows_standard_and_fast(self):
         """Fable 5.2 had no row (2026-11-12, the review of #453): the family guess read it at Fable 5.1's rates ($10/$50,
@@ -849,7 +900,7 @@ class CostWeighting(unittest.TestCase):
         self.assertEqual(len(rows), 3, rows)
         self.assertIn("'claude-fable-5-3' is not in Claude Code's price table", rows[0])
         self.assertIn("priced as claude-fable-5-2 ($8/$40 per MTok in/out, fast $16/$80)", rows[0])
-        self.assertIn("priced as claude-sonnet-5 ($2/$10 per MTok in/out, no fast rates, so a fast call is priced at the "
+        self.assertIn("priced as claude-sonnet-5-5 ($2/$10 per MTok in/out, no fast rates, so a fast call is priced at the "
                       "standard rates)", rows[1])
         self.assertIn("'claude-house-ghost'", rows[2])
         self.assertIn("dearest row", rows[2])

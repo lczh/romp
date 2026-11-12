@@ -951,8 +951,11 @@ class RestoredCostState(unittest.TestCase):
 
     def test_call_cost_prices_no_unknown_version_by_a_neighbours_row(self):
         """Review of #170: a known id plus any dash matched, so claude-sonnet-5-5 was priced as claude-sonnet-5. Only a
-        date may follow a known id; anything else has no price here, and the rule's match never runs on a guess."""
-        self.assertIsNone(rp.call_cost("claude-sonnet-5-5", {"input_tokens": 1e6}))
+        date may follow a known id; anything else has no price here, and the rule's match never runs on a guess.
+        (claude-sonnet-5-5 has its own row since 2026-11-12; the version after it stands in.)"""
+        self.assertIsNone(rp.call_cost("claude-sonnet-5-6", {"input_tokens": 1e6}))
+        self.assertAlmostEqual(rp.call_cost("claude-sonnet-5-5", {"cache_read_input_tokens": 1e6}), 0.1,
+                               msg="its own row's cache read, not Sonnet 5's $0.20")
         self.assertIsNone(rp.call_cost("claude-fable-5-3", {"cache_read_input_tokens": 1e6}))
         self.assertAlmostEqual(rp.call_cost("claude-fable-5-2-20261201", {"cache_read_input_tokens": 1e6}), 0.2)
         self.assertAlmostEqual(rp.call_cost("claude-fable-5-1-20261201", {"cache_read_input_tokens": 1e6}), 0.25)

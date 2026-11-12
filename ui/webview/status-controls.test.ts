@@ -154,6 +154,42 @@ test("a waiting bypass pick: the mode badge wears dots for the server's modePend
   assert.equal(mode.querySelector(".meta-label").textContent, SC.prettyMode("acceptEdits"));
 });
 
+test("a model pick waiting for its relaunch: the badge's dots, and its hover says the pick and what the relaunch waits for (the review of #455)", () => {
+  // A pick the session's older Claude Code did not know waits for the quiet relaunch onto the installed one, behind whatever the session
+  // runs (13 sessions had live monitors or dev servers when Fable 5.2 shipped); the badge showed only its dots. The kernel names the
+  // pick (modelWait) beside relaunchWaits, and the badge's hover says both in the bypass row's words, above what the badge does.
+  const meta = mk("span");
+  const hooks = { onPress: () => { /* the picker */ } };
+  const st: any = { mode: "auto", model: "Opus 5.5", effort: "high", modelPending: true, modelWait: "Fable 5.2", relaunchWaits: "2 background tasks" };
+  SC.syncMetaControls(meta, st, "s-1", hooks);
+  let model = meta.querySelectorAll(".meta-btn")[1];
+  assert.equal(model.dataset.kind, "model");
+  assert.ok(model.querySelector(".meta-label .meta-dots"), "the switching dots, as before");
+  assert.equal(SC.modelWaitText(st), "Fable 5.2 applies after 2 background tasks");
+  assert.equal(model._tipText, "Fable 5.2 applies after 2 background tasks\nchange model (sends /model)", "the hover: the wait, then the badge's own words");
+  for (const [w, words] of [["the running turn", "the running turn"], ["1 subagent and your answer to its question", "1 subagent and your answer to its question"]]) {
+    SC.syncMetaControls(meta, { ...st, relaunchWaits: w }, "s-1", hooks);
+    assert.equal(meta.querySelectorAll(".meta-btn")[1]._tipText.split("\n")[0], "Fable 5.2 applies after " + words, "a turn, a subagent, a question: the kernel's words");
+  }
+  SC.syncMetaControls(meta, { ...st, relaunchWaits: "" }, "s-1", hooks);
+  assert.equal(meta.querySelectorAll(".meta-btn")[1]._tipText.split("\n")[0], "Fable 5.2 applying…", "nothing holds it: the relaunch is on its way");
+  // an ordinary live pick resolves at once: dots, and the plain hover
+  SC.syncMetaControls(meta, { ...st, modelWait: "" }, "s-1", hooks);
+  model = meta.querySelectorAll(".meta-btn")[1];
+  assert.ok(model.querySelector(".meta-dots"));
+  assert.equal(model._tipText, "change model (sends /model)");
+  // the pick lands: the name, the plain hover
+  SC.syncMetaControls(meta, { ...st, model: "Fable 5.2", modelPending: false, modelWait: "", relaunchWaits: "" }, "s-1", hooks);
+  model = meta.querySelectorAll(".meta-btn")[1];
+  assert.equal(model.querySelector(".meta-label").textContent, "Fable 5.2");
+  assert.equal(model._tipText, "change model (sends /model)");
+  assert.equal(SC.modelWaitText({ ...st, modelPending: false }), "", "no dots, no words: a stale name is never explained");
+  // a preview's badge (no hooks) wears no tip at all
+  const preview = mk("span");
+  SC.syncMetaControls(preview, st, null, {});
+  assert.equal(preview.querySelectorAll(".meta-btn")[1]._tipText, undefined);
+});
+
 test("a Codex session with no effort picked yet gets the effort badge, reading the bare kind until a level lands; an SDK session without one gets none", () => {
   // A Codex session is born with no effort of its own (the registry holds "" and the engine applies its default), and the
   // badge appeared only once a level was set, so the menu that would set one had no button to open it (2026-09-16).

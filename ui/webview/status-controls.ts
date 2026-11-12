@@ -24,6 +24,9 @@ export interface MetaStatus {
   modePending?: boolean;   // a bypass pick waiting for its relaunch (2026-10-01): the mode badge's dots; `mode` stays the mode the
   //   running CLI confirmed (after a kernel restart that keeps the CLI, see the backend's _mode_pending)
   relaunchWaits?: string;  // what that relaunch waits for ("2 background tasks"; "" when nothing holds it): the wait's words
+  modelWait?: string;      // the model pick the model badge's dots stand for when it waits for a relaunch ("Fable 5.2"; "" when
+  //   none does): a pick the session's older Claude Code did not know, applied by the relaunch onto the installed one (the
+  //   review of #455); it waits for what relaunchWaits names
   modelColor?: number[] | null; effortColor?: number[] | null;   // the kernel's classic colormap RGB by rank
   modelTone?: number[] | null; effortTone?: number[] | null;     // the single-hue tones the yatharth themes pick instead
   backend?: string;
@@ -144,6 +147,19 @@ export function modeWaitText(st: MetaStatus): string {
   if (!st.modePending) return "";
   return st.relaunchWaits ? `applies after ${st.relaunchWaits}` : "applying…";
 }
+/** A model pick waiting for its relaunch (the review of #455): what the model badge's dots stand for, said in the badge's
+ *  hover and the tab's. A pick the session's older Claude Code did not know waits for the relaunch onto the installed one,
+ *  and that relaunch waits until nothing the session runs would be cut, as a bypass pick's does; the pick, then the words
+ *  modeWaitText says ("Fable 5.2 applies after 2 background tasks"). "" when no model pick waits for a relaunch. */
+export function modelWaitText(st: MetaStatus): string {
+  if (!st.modelPending || !st.modelWait) return "";
+  return `${st.modelWait} ${st.relaunchWaits ? `applies after ${st.relaunchWaits}` : "applying…"}`;
+}
+/** The model badge's hover: what it does (metaButton's words), under the waiting pick's words while one waits. */
+export function modelBadgeTip(st: MetaStatus): string {
+  const wait = modelWaitText(st);
+  return (wait ? wait + "\n" : "") + "change model (sends /model)";
+}
 /** the effort badge's word: the session's effort, or the bare kind for a Codex session that has picked none yet.
  * A Codex session is born with no effort of its own (the registry holds "" and the engine applies its default; the
  * kernel reports no level for it), and the badge used to appear only once a level was set, so the menu that sets
@@ -252,6 +268,9 @@ export function syncMetaControls(meta: HTMLElement, st: MetaStatus, forSid: stri
       label.style.color = showDots ? "" : metaColor(kind, st);   // tint the model name / effort by the colormap rank
     }
     b.classList.toggle("meta-pending", pending);
+    // the chat's model badge (the hooks mark it; a preview's carries no tip) says what its dots wait for, when they wait
+    // for a relaunch: the pick and what holds the relaunch back (modelBadgeTip), refreshed with every status
+    if (kind === "model" && hooks.onPress) setTip(b, modelBadgeTip(st));
   }
 }
 // Context "battery": a small bar that FILLS with the context-used %, recolors as it

@@ -6329,6 +6329,42 @@ def _bin_ident(path):
 # A CLI's refusal of a model id it does not know (its set_model answer): "Model "claude-fable-5-2" is not a recognized model
 # id." on 2.1.305 and 2.1.322 (the latter's catalog_unknown code rides beside it), "Unknown model: …" on older ones.
 _UNRECOGNIZED_MODEL_RE = re.compile(r"not a recognized model|unknown model|catalog_unknown", re.I)
+# …and the API's refusal of a model the session's Claude Code is too old for, which an older CLI passes on as its set_model
+# answer (2026-11-12, a session on 2.1.280 picking claude-fable-5-2): 'API error: 400 {"type":"error","error":{"type":
+# "invalid_request_error","message":"Claude Code 2.1.280 does not support this model; version 2.1.290 or newer is required.
+# Run 'claude update', or …'. It names the CLI's own version and the minimum the model needs (_cli_too_old).
+_CLI_TOO_OLD_RE = re.compile(r"(?:Claude Code (\d+(?:\.\d+)+) )?does not support this model\W+version (\d+(?:\.\d+)+) or "
+                             r"newer is required", re.I)
+
+
+def _cli_too_old(e):
+    """(the refusing CLI's version, "" when the message names none; the minimum version the model needs) when `e` is the
+    API's refusal of a model this Claude Code is too old for (_CLI_TOO_OLD_RE), else None."""
+    m = _CLI_TOO_OLD_RE.search(str(e))
+    return (m.group(1) or "", m.group(2)) if m else None
+
+
+def _cli_update_hint(need, installed=""):
+    """The remedy for a model no installed Claude Code runs: the minimum the API named, and the installed version when
+    known ("Claude Code 2.1.285 is installed; update Claude Code to ≥2.1.290")."""
+    return "%supdate Claude Code to ≥%s" % (("Claude Code %s is installed; " % installed) if installed else "", need)
+
+
+def _vtuple(v):
+    """A dotted version ("2.1.322") as a tuple of ints for comparing, or None when `v` is not one."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)*)\s*", str(v or ""))
+    return tuple(int(x) for x in m.group(1).split(".")) if m else None
+
+
+def _stale_pick_of(reg):
+    """The registry's saved pick an older Claude Code did not know (`stalePick`, SdkSession._keep_pick_for_newer_cli), while
+    it still stands: it names the session's pick (`model`). None otherwise. Such a pick is WAITING for the relaunch that
+    hands it to the installed Claude Code, not landed and not refused, so whatever reads the registry at a kernel start
+    keeps its pending mark (the switching dots) with it, and nothing reads the session as fallen below it."""
+    sp = reg.get("stalePick") if isinstance(reg, dict) else None
+    if isinstance(sp, dict) and sp.get("pick") and sp.get("pick") == reg.get("model"):
+        return sp
+    return None
 
 
 def _cli_refusal(e: BaseException) -> bool:
@@ -6918,10 +6954,20 @@ class SdkSession:
         _wait = reg.get("relaunchWait") if isinstance(reg.get("relaunchWait"), dict) else {}
         _waiting = [p for p in (_wait.get("picks") or {}) if p in PICK_LAUNCH_KEYS and p != "billing"] \
             if isinstance(_wait.get("picks"), dict) and backend._lease_survives(self.sid, if_unreadable=True) else []
-        if reg.get("effortPending") or reg.get("modelPending") or reg.get("authPending"):
-            _heal = dict({"modelPending": False, "authPending": False},
+        # …and a model pick an older Claude Code did not know (the registry's stalePick, _keep_pick_for_newer_cli) is not
+        # moot either, attach or launch: it waits for a CLI that rules on it (_send_stale_pick hands it over at the first
+        # launch). Its dots are restored with it below (the review of #455: healed here, before the record was read, the
+        # dots went, the label stayed on the model before the pick, the reattach armed Retry upgrades from that, and the
+        # relaunch's first reply minted a "Model back on" card for a fallback that never happened). A record whose flag an
+        # earlier kernel healed gets the flag back.
+        _sp = _stale_pick_of(reg)
+        if _sp and not reg.get("modelPending"):
+            backend._update_reg(self.sid, modelPending=True)
+            reg = dict(reg, modelPending=True)
+        if reg.get("effortPending") or (reg.get("modelPending") and not _sp) or reg.get("authPending"):
+            _heal = dict({"authPending": False}, **({} if _sp else {"modelPending": False}),
                          **({} if "effort" in _waiting else {"effortPending": False}))
-            if reg.get("modelPending") and "model" in reg:
+            if reg.get("modelPending") and "model" in reg and not _sp:
                 # …and a model pick that never landed starts from the PICK's label, as _on_session_gone leaves it
                 # (2026-09-30, the #33 follow-up): a thread that dies mid-turn is rebuilt here (its heal's _ensure)
                 # BEFORE that reset runs, a hard kernel death skips it, and the old label read the pick's first report
@@ -7083,12 +7129,8 @@ class SdkSession:
         self._stale_pick = None   # a pick the serving CLI did not know while a newer Claude Code is installed: {"pick",
         #   "back" (the accepted model before it), "prev" (set_model's), "phase": "waiting" | "relaunched", "from", "to"};
         #   kept, not reverted, until the quiet relaunch's CLI rules on it (_keep_pick_for_newer_cli, _send_stale_pick).
-        #   The registry keeps {pick, back} as `stalePick`, so a kernel restart before the relaunch still relaunches
-        _sp = reg.get("stalePick")
-        if isinstance(_sp, dict) and _sp.get("pick") and _sp.get("pick") == reg.get("model"):
-            self._stale_pick = {"pick": _sp["pick"], "back": _sp.get("back"), "phase": "waiting",
-                                "prev": {"picked": _sp["pick"], "tok": None, "seq": 0, "chain": ()}}
-            self._model_accepted = _sp.get("back")   # the attached CLI never took the pick
+        #   The registry keeps {pick, back} as `stalePick`, so a kernel restart before the relaunch still relaunches;
+        #   restored below, with its dots
         self._pick_seq = 0                           # bumped by every live pick (SdkBackend.set_model), at the pick
         self._pick_taken = 0                         # the latest pick the CLI has had: its set_model answered (taken or
         #   refused), or a spawn's --model carried it (never an attach, which tells the CLI nothing). A context refresh
@@ -7103,6 +7145,15 @@ class SdkSession:
         self._pick_unlanded = ()                     # the versioned picks whose dots a report of their family on ANOTHER
         #   version ended, one entry per pick, each kept until a report lands on its version (_resolve_model_pending): a
         #   refusal that puts one back skips the re-arm, the live name being the world before it (_do_set_model)
+        if _sp:
+            # the saved pick an older Claude Code did not know (_stale_pick_of read it before the heal above, which kept its
+            # flag): restored WITH its switching dots, one world. It waits for the relaunch, so the session is not below its
+            # pick (_pick_waits_for_relaunch: no Retry upgrades arm, no fallback card), and the CLI it attaches to never took
+            # the pick, so the accepted model is the one before it
+            self._stale_pick = {"pick": _sp["pick"], "back": _sp.get("back"), "phase": "waiting",
+                                "prev": {"picked": _sp["pick"], "tok": None, "seq": 0, "chain": ()}}
+            self._model_accepted = _sp.get("back")
+            self._model_pending = _sp["pick"]
         self.effort = reg.get("effort") or DEFAULT_EFFORT   # connect-time --effort; tracked since the init msg doesn't echo it
         self.env_vars = dict(reg.get("env") or {})   # per-session env vars (the reg's `env`, the user 2026-08-17):
         #   _options folds them into the per-sid flag-settings file at EVERY connect, so two sessions in the
@@ -7177,8 +7228,9 @@ class SdkSession:
         self._fast_guess_asked = False   # a relaunch was asked for this connection's guessed refusal (_adopt_fast_state)
         self._fast_off_sent = False      # a literal '/fast off' went to this connection's CLI, which takes its opt-in away
         #   (_ask_missing_opt_in: such a CLI lacks the opt-in although its launch carried it); per connection
-        self._fast_rearm = {}            # model id -> "sent" | "done" | "said": fast mode this connection's CLI dropped on that
-        #   model without a reason and romp asked back (_rearm_dropped_fast); per connection, one ask per model, never a loop
+        self._fast_rearm = {}            # model id -> "sent" | "lost" | "done" | "said": fast mode this connection's CLI dropped
+        #   on that model without a reason and romp asked back (_rearm_dropped_fast; "lost": the ask's answer never came,
+        #   _do_rearm_fast); per connection, one ask per model, never a loop
         self._fast_opt_in_said = False   # a CLI launched here with the opt-in still lacks it: said once (_ask_missing_opt_in)
         self._upgrade_retry = None   # Retry upgrades after downgrades (the user 2026-09-17): while set, {"from", "to",
         #   "pick", "since", "next", "attempts"} — this session's model fell from `from` to `to` without a pick and the
@@ -8690,7 +8742,8 @@ class SdkSession:
                 self._pick_answered(prev)   # a refusal is the CLI's answer too: it runs what it ran before the pick
             with self._lock:
                 superseded = prev is not None and self.chosen_model != picked
-            if refusal and not superseded and prev is not None and await self._keep_pick_for_newer_cli(e, picked, prev):
+            kept_out = {}
+            if refusal and not superseded and prev is not None and await self._keep_pick_for_newer_cli(e, picked, prev, kept_out):
                 await self._do_refresh_context()
                 self.backend._poke()
                 return
@@ -8778,8 +8831,13 @@ class SdkSession:
                         if newer:
                             self.backend._log("retry upgrade (%s): a newer pick (%s) went in while the refusal was put "
                                               "back; the retry just armed stands down" % (self.name, newer), problem=False)
+                # a model the session's Claude Code is too old for, which no installed one runs either: the line says the
+                # remedy (_keep_pick_for_newer_cli's hint, with the installed version; from the message alone otherwise)
+                _old = _cli_too_old(e)
+                hint = kept_out.get("hint") or (_cli_update_hint(_old[1]) if _old else "")
                 self.backend._log("set_model (%s -> %s) refused by the SDK: %s: %s — the switch did NOT apply; "
-                                  "the model reverted to %s" % (self.name, model, type(e).__name__, e, back),
+                                  "the model reverted to %s%s" % (self.name, model, type(e).__name__, e, back,
+                                                                  "; " + hint if hint else ""),
                                   problem=True)
                 if resend is not None:
                     asyncio.ensure_future(self._do_set_model(resend[0], None))
@@ -8814,7 +8872,7 @@ class SdkSession:
         await self._do_refresh_context()
         self.backend._poke()
 
-    async def _keep_pick_for_newer_cli(self, e, picked, prev) -> bool:
+    async def _keep_pick_for_newer_cli(self, e, picked, prev, out=None) -> bool:
         """A live pick the CLI refused because it does not know the id, while the Claude Code installed now is not the one
         this session's CLI reported: the CLI is old, not the pick wrong (2026-11-12, the switch to Fable 5.2: every live
         session ran a Claude Code from before the model, 2.1.280 or 2.1.305, while the installed binary was 2.1.322, and
@@ -8832,17 +8890,32 @@ class SdkSession:
         the CLI reported no version but this connect launched it from the installed binary unchanged since (_launched_bin),
         when a newer pick landed meanwhile, or when this pick already had its relaunch. A CLI an earlier launch made that
         has not reported its version (a reattach after a kernel restart, with no turn since) reads as older, so the worst
-        case of that guess is one quiet relaunch before the same loud revert."""
-        if not _UNRECOGNIZED_MODEL_RE.search(str(e)):
+        case of that guess is one quiet relaunch before the same loud revert.
+
+        The API's refusal of a model the session's CLI is too old for (_cli_too_old: "Claude Code 2.1.280 does not support
+        this model; version 2.1.290 or newer is required", which a 2.1.280 CLI answered set_model claude-fable-5-2 with on
+        the rollout of 2026-11-12) is the same case said by the API, and names both versions: the pick is kept when the
+        installed Claude Code is at or above that minimum and is not the refusing one. Below it, or unreadable, the revert
+        stands, and `out["hint"]` carries the remedy for its line in the error center (update Claude Code to the minimum)."""
+        too_old = _cli_too_old(e)
+        if not too_old and not _UNRECOGNIZED_MODEL_RE.search(str(e)):
             return False
         st = getattr(self, "_stale_pick", None)
-        if st and st.get("pick") == picked and st.get("phase") == "relaunched":
+        relaunched = bool(st) and st.get("pick") == picked and st.get("phase") == "relaunched"
+        if relaunched and not too_old:
             return False                  # the Claude Code it relaunched on refused it too: today's revert
         try:
             installed = await asyncio.get_running_loop().run_in_executor(None, self.backend.cli_version)
         except Exception:
             installed = ""
-        seen = str(getattr(self, "_cli_version_seen", "") or "")
+        if too_old:
+            need, have = _vtuple(too_old[1]), _vtuple(installed)
+            if relaunched or need is None or have is None or have < need:
+                if out is not None:
+                    out["hint"] = _cli_update_hint(too_old[1], installed)
+                return False              # no installed Claude Code runs it: the revert, saying what would
+        # the refusing CLI's version: the API's message names it; else what its last report said
+        seen = (too_old[0] if too_old else "") or str(getattr(self, "_cli_version_seen", "") or "")
         if not installed or installed == seen:
             return False
         if not seen and getattr(self, "_launched_bin", None) is not None \
@@ -8858,9 +8931,10 @@ class SdkSession:
             self.backend._update_reg(self.sid, stalePick={"pick": picked, "back": back})
         except Exception as e2:
             self.backend._log("model (%s): registry write failed: %s" % (self.name, e2), problem=False)
-        self.backend._log("model (%s): Claude Code%s does not know %s (%s); Claude Code %s is installed, so the session "
+        self.backend._log("model (%s): Claude Code%s %s %s (%s); Claude Code %s is installed, so the session "
                           "relaunches on it with the pick kept%s"
-                          % (self.name, " " + seen if seen else "", picked, e, installed,
+                          % (self.name, " " + seen if seen else "",
+                             "is too old for" if too_old else "does not know", picked, e, installed,
                              "" if self.quiet() else " once it is quiet"), problem=False)
         self.want_switch_reconnect("model")
         return True
@@ -8884,6 +8958,25 @@ class SdkSession:
         st["phase"] = "relaunched"
         asyncio.ensure_future(self._do_set_model(st["pick"], st["prev"]))
         return True
+
+    def _pick_waits_for_relaunch(self) -> bool:
+        """The session's pick is one an older Claude Code did not know, still waiting for the relaunch onto the installed one
+        (_stale_pick in its "waiting" phase, the pick still the session's): the session runs the model from before the pick
+        because its CLI cannot run the pick, not because the API fell back. So it is not below its pick: Retry upgrades
+        arms nothing from it (_arm_if_below_pick), the downgrade branch of _learn_model mints no card, and its dots stay up
+        across a thread's death and a kernel restart (the review of #455). Once the relaunch's CLI has the pick to rule on
+        ("relaunched"), it is a pick in flight like any other, its dots the guard."""
+        st = getattr(self, "_stale_pick", None)
+        return bool(st) and bool(st.get("pick")) and st.get("phase") == "waiting" \
+            and st.get("pick") == (getattr(self, "chosen_model", "") or "")
+
+    def _model_wait_label(self) -> str:
+        """The display name of a model pick waiting for its relaunch (_stale_pick in its "waiting" phase, the pick still the
+        session's), for the snapshot's modelWait; "" when none waits, or once the relaunch's CLI has it to rule on."""
+        if not self._pick_waits_for_relaunch():
+            return ""
+        pick = str(self._stale_pick.get("pick") or "")
+        return _alias_label(pick) or pick
 
     def _forget_stale_pick(self) -> None:
         """The pick an older CLI did not know is settled (taken, refused by the relaunch's CLI, or replaced by a newer
@@ -9971,7 +10064,10 @@ class SdkSession:
         tooltip otherwise says the requested model is not answering without saying why until the next fallback."""
         try:
             live = getattr(self, "_served_model", "") or getattr(self, "model", "")
-            if getattr(self, "_fallback_cause", "") or not model_fallback_row(self.chosen_model, live):
+            # a pick still resolving is no fallback (model_fallback_row's own rule), a pick waiting for its relaunch included
+            if getattr(self, "_fallback_cause", "") or not model_fallback_row(
+                    self.chosen_model, live, pending=bool(getattr(self, "_model_pending", ""))
+                    or self._pick_waits_for_relaunch()):
                 return
             path = transcript_path(self.cwd, getattr(self, "resume_sid", None) or self.sid)
             threading.Thread(target=self._seed_fallback_cause_from_transcript, args=(path, live),
@@ -10040,12 +10136,15 @@ class SdkSession:
         fallback lost its retry — and the picker's tooltip promised a cadence nothing was running), and a pick the CLI
         refuses (_do_set_model: the pick it puts back is judged afresh, 2026-10-01). The flip and the refusal skip a
         pick still in flight, and the refusal a versioned pick put back that has not landed (_pick_unlanded).
-        Off: the switch going off ends any arm (_retry_armed). Returns True when it armed."""
+        Off: the switch going off ends any arm (_retry_armed). Returns True when it armed. Never for a pick an older Claude
+        Code did not know (_pick_waits_for_relaunch): the session waits for its relaunch, it did not fall, and an arm
+        from it logged a fallback that never happened and ended at the relaunch's first reply with a false "Model back
+        on" card (the review of #455, through the attach after a kernel restart)."""
         pick = getattr(self, "chosen_model", "") or ""
         if not retry_upgrade_on(getattr(self.backend, "state_dir", None)):
             self._retry_armed()
             return False
-        if not pick or pick == "default" or getattr(self, "_upgrade_retry", None):
+        if not pick or pick == "default" or getattr(self, "_upgrade_retry", None) or self._pick_waits_for_relaunch():
             return False
         live = getattr(self, "_served_model", "") or getattr(self, "model", "")
         if _model_downgrade(pick, live):
@@ -10398,9 +10497,12 @@ class SdkSession:
             if rearm is None:
                 rearm = self._fast_rearm = {}
             if fast == "on":
-                if rearm.get(key) == "sent":
-                    rearm[key] = "done"   # the ask took before its answer was read: a later drop is said, not asked again
-                return
+                if rearm.get(key) == "lost":
+                    self.backend._log("fast mode (%s): Claude Code reports fast mode on for %s, so it took the ask whose "
+                                      "answer never came" % (self.name, pretty_model(mid) or mid))
+                if rearm.get(key) in ("sent", "lost"):
+                    rearm[key] = "done"   # the ask took before its answer was read (or its answer was lost): a later drop
+                return                    # is said, not asked again
             if fast != "off" or raw_reason or not getattr(self, "_fast_unlocked", False):
                 return
             if not self.fast_effective() or _mf.fast_known(mid, sd) is not True:
@@ -10408,10 +10510,12 @@ class SdkSession:
             phase = rearm.get(key)
             if phase == "sent" or phase == "said":
                 return                    # an ask in flight, or a drop already said: nothing more on this model
-            if phase == "done":
+            if phase in ("done", "lost"):
                 rearm[key] = "said"
                 self._say_fast_dropped(mid, "Claude Code turned it off on %s without a reason and kept it off after romp "
-                                            "asked for it again" % (pretty_model(mid) or mid))
+                                            "asked for it again%s" % (pretty_model(mid) or mid,
+                                                                      " (the answer to that ask never came)"
+                                                                      if phase == "lost" else ""))
                 return
             rearm[key] = "sent"
             loop = getattr(self, "loop", None)
@@ -10430,21 +10534,43 @@ class SdkSession:
         """Send _rearm_dropped_fast's ask: apply_flag_settings with fastMode true, through the SDK's control-request
         sender (no public wrapper in the Python SDK; _set_cwd_request's idiom). Answered: the badge reads Fast at once,
         as set_fast's flip does, and the next init re-asserts the truth (a drop it still reports is said then).
-        Refused, or no sender to ask with: said now."""
+        Refused, or no sender to ask with: said now.
+
+        A LOST answer is neither (the review of #455): the SDK's 60 s timeout, or a reconnect's teardown stranding the
+        request, raises too, and was said as "asking it back on failed", a toast and a problem row for a request the CLI
+        may well have taken. _cli_refusal tells them apart by the exception's construction. A lost answer says nothing
+        to the user and flips no badge: the ask is marked `lost`, and the next turn's init, the CLI's own report of the
+        fast mode it runs, rules (_rearm_dropped_fast: on, it took; still off with no reason, said then, as a drop that
+        held after the ask). An answer that lands after the connection it was asked on was replaced writes nothing: the
+        new connection's CLI is asked, or not, on its own report."""
         key = mid.lower()
+        rearm = getattr(self, "_fast_rearm", None)
+        if rearm is None:
+            rearm = self._fast_rearm = {}
         q = getattr(getattr(self, "client", None), "_query", None)
         send = getattr(q, "_send_control_request", None)
-        err = ""
+        err = lost = ""
         if not callable(send):
             err = "this Claude Agent SDK has no control channel to ask with"
         else:
             try:
                 await send({"subtype": "apply_flag_settings", "settings": {"fastMode": True}})
             except Exception as e:
-                err = "Claude Code refused the request (%s: %s)" % (type(e).__name__, e)
-        rearm = getattr(self, "_fast_rearm", None)
-        if rearm is None:
-            rearm = self._fast_rearm = {}
+                if _cli_refusal(e):
+                    err = "Claude Code refused the request (%s: %s)" % (type(e).__name__, e)
+                else:
+                    lost = "%s: %s" % (type(e).__name__, e)
+        if getattr(self, "_fast_rearm", None) is not rearm:
+            # a new connection since the ask (_fast_rearm is per connection): the CLI it went to is gone
+            self.backend._log("fast mode (%s): the ask for fast mode on %s belonged to a connection since replaced; the "
+                              "new one's own report decides" % (self.name, pretty_model(mid) or mid))
+            return
+        if lost:
+            if rearm.get(key) == "sent":
+                rearm[key] = "lost"
+            self.backend._log("fast mode (%s): the answer to romp's ask for fast mode on %s never came (%s); the next "
+                              "turn's report says whether Claude Code took it" % (self.name, pretty_model(mid) or mid, lost))
+            return
         if err:
             rearm[key] = "said"
             self._say_fast_dropped(mid, "Claude Code turned it off on %s without a reason, and asking it back on failed: %s"
@@ -11655,6 +11781,7 @@ class SdkSession:
             return
         if self.model and not self._model_pending and not cleared \
                 and not _lands_on_pick(pm, getattr(self, "chosen_model", "")) \
+                and not self._pick_waits_for_relaunch() \
                 and _model_downgrade(self.model, pm):
             # A DOWN-TIER transition nobody asked for (no /model pick pending): the API fell back
             # mid-turn. Surface it as a completed card via the kernel-wired hook (the user
@@ -12097,9 +12224,10 @@ class SdkSession:
                 else:
                     ratio = d[0] / b[0] if d[0] < b[0] else d[0] / b[1]
                     text = ("prices: Claude Code billed $%.2f for %s on %s's last turn, %.2fx the nearest figure romp's "
-                            "price table gives those tokens ($%.2f to $%.2f at any speed and cache duration). The table "
-                            "(kernel/cli_prices.py) no longer matches Claude Code's rates for this model, so the spend "
-                            "guard and the cost view misprice it." % (d[0], who, self.name, ratio, b[0], b[1]))
+                            "price table gives those tokens ($%.2f to $%.2f at any speed, cache duration and prompt "
+                            "length). The table (kernel/cli_prices.py) no longer matches Claude Code's rates for this "
+                            "model, so the spend guard and the cost view misprice it."
+                            % (d[0], who, self.name, ratio, b[0], b[1]))
                 be._log(text, problem=True, key=("price-drift", priced))
         except Exception:
             pass
@@ -15005,6 +15133,11 @@ class SdkSession:
                 # what a standing relaunch ask waits for ("2 background tasks"; "" when none stands): the pending marks
                 # above say a pick is waiting, this says on what (relaunch_waits)
                 "relaunchWaits": self.relaunch_waits(),
+                # the model pick the badge's dots stand for when it waits for a relaunch ("Fable 5.2"; "" otherwise): a pick
+                # an older Claude Code did not know, applied by the relaunch onto the installed one (_keep_pick_for_newer_cli),
+                # which waits like any pick's for what relaunchWaits names. The badge's hover and the tab's say the pick and
+                # that wait (the review of #455: a relaunch behind a long monitor read as a switch stuck on its dots)
+                "modelWait": self._model_wait_label(),
                 # …and what pushing it through now would end ("2 background tasks"): the Apply now row's sub-line and
                 # confirm (relaunch_cuts)
                 "relaunchCuts": self.relaunch_cuts(),
@@ -17173,9 +17306,15 @@ class SdkBackend:
                     _w = r.get("relaunchWait") if isinstance(r.get("relaunchWait"), dict) else {}
                     _keep = isinstance(_w.get("picks"), dict) and "effort" in _w["picks"] and \
                         self._lease_survives(sid, if_unreadable=True)    # unreadable: kept, the connect decides (SdkSession.__init__)
-                    if r.get("modelPending") or (r.get("effortPending") and not _keep):
-                        _heal = dict({"modelPending": False}, **({} if _keep else {"effortPending": False}))
-                        if r.get("modelPending") and "model" in r:
+                    # …and a model pick an older Claude Code did not know (stalePick), which waits for the relaunch onto the
+                    # installed one whether the next connect attaches or launches: its dots stay with it, and a flag an
+                    # earlier kernel healed comes back (_stale_pick_of; the review of #455)
+                    _sp = _stale_pick_of(r)
+                    if _sp and not r.get("modelPending"):
+                        self._update_reg(sid, modelPending=True)
+                    if (r.get("modelPending") and not _sp) or (r.get("effortPending") and not _keep):
+                        _heal = dict({} if _sp else {"modelPending": False}, **({} if _keep else {"effortPending": False}))
+                        if r.get("modelPending") and "model" in r and not _sp:
                             # a pick in flight at a hard kernel death starts from its own label, as SdkSession.__init__
                             # heals it, or keeps the old one when the pick is above it: a session that ATTACHES to a CLI
                             # that survived tells it nothing, so its first report can be the old model (_heal_pick_label;
@@ -24490,8 +24629,11 @@ class SdkBackend:
         # awaiting overlay so the session doesn't read working/awaiting forever (reorder_bug 2026-06-24).
         self._heal_stale_awaiting(sess.sid)
         self.retire_live_work(sess.sid)   # no stream left → unlanded work atoms must not hold the turn open
-        if sess._model_pending:           # a switch that never resolved before the thread died → don't trap the dots
-            sess._model_pending = ""      # (the pick's label, or the old one for a pick above it: _heal_pick_label)
+        # a switch that never resolved before the thread died → don't trap the dots (the pick's label, or the old one for a
+        # pick above it: _heal_pick_label). Not a pick an older Claude Code did not know (_pick_waits_for_relaunch): it
+        # waits for a launch, which this death brings sooner, and that launch's CLI rules on it (_send_stale_pick)
+        if sess._model_pending and not sess._pick_waits_for_relaunch():
+            sess._model_pending = ""
             try:
                 self._update_reg(sess.sid, liveModel=_heal_pick_label(sess.chosen_model, sess.model), modelPending=False)
             except Exception as e:
