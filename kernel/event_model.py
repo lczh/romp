@@ -9480,7 +9480,7 @@ def asm_document_job(leaf_path, rompuuid, sdk_human=False):
             "mono": time.monotonic()}
 
 
-def asm_document_handback(job, rebuild, res, external=False, final=False):
+def asm_document_handback(job, rebuild, res, external=False):
     """A document job is over (`job`: asm_document_job's ticket; `res`: asm_build_document's result, None when the job never
     produced one, which reads as failed): the entry's refresh baseline moves (a refresh; see asm_refresh_document), the shared
     claim is released, the outcome is counted (a refresh under asmCheckpoint.refresh, a rebuild through _asm_rebuild_done,
@@ -9495,8 +9495,7 @@ def asm_document_handback(job, rebuild, res, external=False, final=False):
     the job BEGAN: the worker's replace happened at some moment of the job this process cannot place, and a refusal that
     stays one job too long costs a label on /perf, never a parse. asmCheckpoint.written stays this process's writer's own
     count (the worker's writes are under docWorker and rebuild.written). The restore is not done here: the next parse of
-    the leaf finds the document and restores from it, as after any writer. `final`: a failed rebuild that is not tried
-    again (_asm_rebuild_done), the caller having ruled on the leaf (the worker failed for memory: its verdict holds)."""
+    the leaf finds the document and restores from it, as after any writer."""
     res = res if isinstance(res, dict) else {}
     key, live, st0 = job["key"], job["live"], job["st0"]
     outcome, new_pre = str(res.get("outcome") or "failed"), res.get("newPre")
@@ -9525,8 +9524,7 @@ def asm_document_handback(job, rebuild, res, external=False, final=False):
             _ASM_REFRESH_STATS[outcome] = _ASM_REFRESH_STATS.get(outcome, 0) + 1
             _ASM_REFRESH_STATS["ms"] += ms
     else:
-        _asm_rebuild_done(job["leaf"], job["rompuuid"], rebuild, outcome, st0, ms, res.get("reason"), tb=res.get("tb"),
-                          final=final)
+        _asm_rebuild_done(job["leaf"], job["rompuuid"], rebuild, outcome, st0, ms, res.get("reason"), tb=res.get("tb"))
     _asm_bg_wake()                                        # the claim is back: a waiting rebuild takes it (a refresh ran on its lent
     #                                                       claim), and the rebuild starter starts the next one, a retry the outcome
     #                                                       above put back on the table included (2026-11-12)
@@ -9795,71 +9793,59 @@ def asm_rebuild_note(leaf_path, rompuuid, why):
             _ASM_REBUILD_STATS["oversize"] = _ASM_REBUILD_STATS.get("oversize", 0) + 1   # live session moves at every turn)
             _ASM_CKPT_STATS["oversizeHeld"] = _ASM_CKPT_STATS.get("oversizeHeld", 0) + 1
         return False
-    counted = _reader_record_count(leaf_path)            # the records the parse that noted it read (transcript_records)
     with _ASM_CKPT_LOCK:
         if k in _ASM_REBUILD:
             return False
-        _ASM_REBUILD[k] = {"path": str(leaf_path), "why": str(why), "records": counted}
+        _ASM_REBUILD[k] = {"path": str(leaf_path), "why": str(why)}
         _ASM_REBUILD_STATS["noted"] += 1
     _asm_bg_wake()                                        # the rebuild starter looks now, if the gate is open (2026-11-12)
     return True
 
 
-def _reader_record_count(path):
-    """(records, bytes): how many records the reader holds for `path` up to the byte offset its entry reached (a tail
-    entry's `base` counts the records before it), or None when it holds no entry for the file."""
-    with _JSONL_CACHE_LOCK:
-        ent = _JSONL_CACHE.get(str(path))
-    if ent is None:
-        return None
-    try:
-        return int(ent[5]) + len(ent[4] or ()), int(ent[2])
-    except (IndexError, TypeError, ValueError):
-        return None
+_RECORD_COUNTS = {}              # realpath -> ((dev, ino), bytes counted, newlines in them, whether they end on one): the memo of
+_RECORD_COUNTS_LOCK = threading.Lock()   # transcript_records, oldest first
+_RECORD_COUNTS_MAX = 4096
+_RECORD_COUNT_CHUNK = 1 << 20
 
 
-_RECORDS_SAMPLE_WINDOWS = 8      # transcript_records: windows read across a file no parse counted, and each one's bytes
-_RECORDS_SAMPLE_BYTES = 64 << 10
-
-
-def transcript_records(path, size=None):
-    """About how many records `path` holds now, for sizing a whole parse's memory before it starts (the kernel's document
-    worker, 2026-11-12: a parse costs memory per record as well as per byte, so two transcripts of one size can want several
-    times apart). (records, source), where source says where the count came from: "reader" (the reader's entry for the
-    file), "noted" (the count the parse that noted the leaf for a rebuild saw: asm_rebuild_note), either scaled to the file's
-    size now when it covered fewer bytes; else "sampled", the newline density of _RECORDS_SAMPLE_WINDOWS windows read evenly
-    across the file (the whole file when it is that small), times its size; "empty" for an empty file; (0, "unread") when
-    it cannot be read. A count taken over more bytes than the file holds now (a transcript replaced) is not used."""
-    try:
-        size = int(os.stat(path).st_size) if size is None else int(size)
-    except OSError:
-        return 0, "unread"
-    if size <= 0:
-        return 0, "empty"
+def transcript_records(path):
+    """How many records (lines) `path` holds now, counted exactly, or None when it cannot be read: for sizing a whole parse's
+    memory before it starts (the kernel's document worker, 2026-11-12). A parse holds memory per record as well as per byte,
+    and an estimate of the count will not do: a sample of windows across a file missed a run of small records between them
+    and counted 0.15 of them (the review of PR #465). The file is read in chunks and nothing is decoded. Memoized per file:
+    the same file at the same size is a stat; one that only grew (the same device and inode, longer) has its new bytes
+    counted from where the last count stopped, as a transcript is appended to; anything else is counted from the start. A
+    last line with no newline yet counts as a record."""
     rp = os.path.realpath(str(path))
-    got = [("reader", _reader_record_count(path))]
-    with _ASM_CKPT_LOCK:
-        got += [("noted", v.get("records")) for k, v in _ASM_REBUILD.items() if k[0] == rp]
-    for source, rc in got:
-        if rc is None:
-            continue
-        n, covered = int(rc[0]), int(rc[1])
-        if n > 0 and 0 < covered <= size:
-            return -(-n * size // covered), source        # (a ceiling: the count scaled to the file's size now)
     try:
-        with open(path, "rb") as fh:
-            if size <= _RECORDS_SAMPLE_WINDOWS * _RECORDS_SAMPLE_BYTES:
-                return max(1, fh.read().count(b"\n")), "sampled"
-            step = (size - _RECORDS_SAMPLE_BYTES) // (_RECORDS_SAMPLE_WINDOWS - 1)
-            lines = read = 0
-            for i in range(_RECORDS_SAMPLE_WINDOWS):
-                fh.seek(i * step)
-                chunk = fh.read(_RECORDS_SAMPLE_BYTES)
-                lines += chunk.count(b"\n")
-                read += len(chunk)
+        st_ = os.stat(rp)
     except OSError:
-        return 0, "unread"
-    return max(1, -(-size * lines // max(1, read))), "sampled"
+        return None
+    ident, size = (int(st_.st_dev), int(st_.st_ino)), int(st_.st_size)
+    with _RECORD_COUNTS_LOCK:
+        m = _RECORD_COUNTS.get(rp)
+    pos, lines, ends = 0, 0, True
+    if m is not None and m[0] == ident and m[1] <= size:
+        pos, lines, ends = m[1], m[2], m[3]
+    if pos < size:
+        try:
+            with open(rp, "rb") as fh:
+                fh.seek(pos)
+                while True:
+                    chunk = fh.read(_RECORD_COUNT_CHUNK)
+                    if not chunk:
+                        break
+                    lines += chunk.count(b"\n")
+                    pos += len(chunk)
+                    ends = chunk.endswith(b"\n")
+        except OSError:
+            return None
+    with _RECORD_COUNTS_LOCK:
+        _RECORD_COUNTS.pop(rp, None)
+        _RECORD_COUNTS[rp] = (ident, pos, lines, ends)
+        while len(_RECORD_COUNTS) > _RECORD_COUNTS_MAX:
+            _RECORD_COUNTS.pop(next(iter(_RECORD_COUNTS)))
+    return lines + (0 if ends or pos == 0 else 1)
 
 
 def asm_rebuild_drop(leaf_path, rompuuid=None, why="released"):
@@ -9985,15 +9971,14 @@ def asm_rebuild_abandon(leaf_path, rompuuid, sdk_human, why, err=None):
     return True
 
 
-def _asm_rebuild_done(leaf_path, rompuuid, why, outcome, st0, ms, reason, tb=None, final=False):
+def _asm_rebuild_done(leaf_path, rompuuid, why, outcome, st0, ms, reason, tb=None):
     """A rebuild's outcome: counted, said once for the leaf (written, declined with the writer's reason, failed), and a decline
     or a failure memoized at the stat the rebuild read, so the next parse of the unchanged leaf does not note it again. A decline
     of the moment (_ASM_SKIP_BLIP: the reader's offsets evicted while the parse ran, a stat or a write refused) says nothing about
     the cut, so the leaf goes back on the table for one more try at the pusher's next cycle end before it is memoized (`retry`).
     So does a rebuild that RAISED (2026-10-23, the review of PR #367: it was memoized at once, so an idle session was not tried
     again until it changed or the kernel restarted): the first raise is said and retried once, a second is final for the leaf's
-    stat and said loudly, with both errors and the second one's traceback (`tb`). `final`: a failure the caller has ruled
-    on (the document worker's memory failure, whose verdict keeps the leaf from a worker): memoized at once, no retry."""
+    stat and said loudly, with both errors and the second one's traceback (`tb`)."""
     k = (os.path.realpath(str(leaf_path)), str(rompuuid))
     size = st0[0] if st0 is not None else 0
     first_raise = raised_before = None
@@ -10004,13 +9989,13 @@ def _asm_rebuild_done(leaf_path, rompuuid, why, outcome, st0, ms, reason, tb=Non
             if len(_ASM_REBUILD_BLIPPED) > 4096:
                 _ASM_REBUILD_BLIPPED.clear()
             _ASM_REBUILD.setdefault(k, {"path": str(leaf_path), "why": why})
-        elif outcome == "failed" and k not in _ASM_REBUILD_RAISED and not final:
+        elif outcome == "failed" and k not in _ASM_REBUILD_RAISED:
             outcome, first_raise = "retry", reason or "no error"
             _ASM_REBUILD_RAISED[k] = first_raise
             while len(_ASM_REBUILD_RAISED) > 4096:
                 _ASM_REBUILD_RAISED.pop(next(iter(_ASM_REBUILD_RAISED)))
             _ASM_REBUILD.setdefault(k, {"path": str(leaf_path), "why": why})
-        elif outcome == "failed" and not final:
+        elif outcome == "failed":
             raised_before = _ASM_REBUILD_RAISED.get(k)
         if outcome != "retry":
             _ASM_REBUILD_RAISED.pop(k, None)              # the leaf's one retry after a raise is spent (or never needed)

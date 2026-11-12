@@ -118,6 +118,8 @@ def _reset_worker():
         km._DOC_WORKER_STATS.update(spawned=0, done={}, fallbacks={}, refused=0, cancelled=0, stopped=0, memory=0, verdicts=0,
                                     verdictHeld=0, seconds=0.0, peak=None)
         km._DOC_WORKER_VERDICTS.clear()
+    with em._RECORD_COUNTS_LOCK:
+        em._RECORD_COUNTS.clear()                         # (a fixture rewritten in place keeps its inode: count it afresh)
 
 
 def _gone(pid):
@@ -246,6 +248,18 @@ class Harness(T.Harness):
             return _plain(tree)
         finally:
             em._CKPT_DIR_FN = saved
+
+    def _next_life(self):
+        """The next kernel life, after a version bump refused the document: nothing in memory, the boot parses the leaf whole
+        and notes it, its read gone (the converge pass cannot write it), the verdict file standing."""
+        for f in (self.doc_file(), Path(str(self.doc_file()) + ".meta")):
+            with contextlib.suppress(FileNotFoundError):
+                f.unlink()
+        _reset_worker()
+        self.fresh()
+        self.assertEqual(self.boot_parse(), ["full"])
+        self.evict_read()
+        self.assertEqual(self.rebuild_stats()["pending"], 1)
 
     def rebuild_stats(self):
         return em.asm_checkpoint_stats()["rebuild"]
@@ -455,7 +469,7 @@ class LostWorkers(Harness):
             out += self.cycle(NOW + 600 + i)
         st = km._doc_worker_stats()
         self.assertEqual((st["spawned"], st["fallbacks"], st["latched"]), (0, {"spawn": 3}, True), st)
-        self.assertEqual(len([p for p in self.problems if "3 jobs in a row were lost" in p]), 1, self.problems)
+        self.assertEqual(len([p for p in self.problems if "failed 3 rebuilds in a row" in p]), 1, self.problems)
         self.assertEqual(out.count("3 jobs in a row were lost"), 1, out)
         self.assertEqual(len([lf for lf in leaves if self.doc_file(lf).exists()]), 3, "each lost job was built here")
         self.stand_in("crash")                                     # a worker that WOULD start, were one asked for
@@ -491,7 +505,8 @@ class LostWorkers(Harness):
         self.assertEqual((st["spawned"], st["done"], st["fallbacks"], st["latched"]), (3, {"failed": 3}, {"failed": 3}, True), st)
         self.assertEqual(len([lf for lf in leaves if self.doc_file(lf).exists()]), 3, "each failed job was built here: %s" % out)
         self.assertIn("gave no outcome (failed: ValueError('a fault only the worker has')); the rebuild runs in this kernel", out)
-        self.assertEqual(len([p for p in self.problems if "3 jobs in a row were lost (the last: failed)" in p]), 1, self.problems)
+        self.assertEqual(len([p for p in self.problems if "failed 3 rebuilds in a row" in p]), 1, self.problems)
+        self.assertIn("3 jobs in a row were lost (the last: failed)", out)
         self.cycle(NOW + 610)
         self.assertEqual(len(self.starts()), 3, "latched: no fourth worker")
         self.assertEqual(len([lf for lf in leaves if self.doc_file(lf).exists()]), 4)
@@ -525,7 +540,8 @@ class LostWorkers(Harness):
         self.assertEqual((st["spawned"], st["fallbacks"], st["lostInARow"], st["memory"], st["running"]),
                          (1, {"timeout": 1}, 1, 0, None), st)
         self.assertTrue(self.doc_file().exists(), "the job ran here: %s" % out)
-        self.assertEqual(len([p for p in self.problems if "within its bound" in p]), 1, self.problems)
+        self.assertEqual(len([p for p in self.problems if "stopped answering" in p]), 1, self.problems)
+        self.assertIn("none within its bound", out)
         self.assertIsNone(em._ASM_REFRESH["inflight"], "the claim is back")
         return out
 
@@ -621,7 +637,7 @@ class Memory(Harness):
         st = km._doc_worker_stats()
         self.assertEqual((st["spawned"], st["refused"], st["heldForMemory"], st["fallbacks"]), (0, 2, 1, {}), st)
         self.assertEqual(out.count("waits for memory"), 1, "said once while it waits: %s" % out)
-        self.assertEqual(len([p for p in self.problems if "waits for memory" in p]), 1, "and filed in the error center once: %s"
+        self.assertEqual(len([p for p in self.problems if "free memory" in p]), 1, "and filed in the error center once: %s"
                          % self.problems)
         rb = self.rebuild_stats()
         self.assertEqual((rb["pending"], rb["claimed"]), (1, 0), "still noted, never claimed: %s" % rb)
@@ -666,47 +682,61 @@ class Memory(Harness):
         self.assertGreater(got, 1 << 20)
 
     def _memory_shaped(self, mode):
-        """A memory failure keeps a verdict beside the leaf's document, as the writer keeps an oversize one: the rebuild is not
-        tried again in this kernel, nor started in a worker in the next one, so no kernel life spends the shared claim on two
-        more whole parses that end the same way."""
+        """A worker that ran past its OWN memory bound on an exact count keeps a verdict beside the leaf's document, as the
+        writer keeps an oversize one, and the job runs in this kernel now: the session is never worse off than with the
+        switch off. In the next kernel life the verdict sends the leaf's rebuild to the kernel without starting a worker."""
         self.session()
         self.switch("on")
         self.stand_in(mode)
         out = self.cycle()
         st = km._doc_worker_stats()
         self.assertEqual((st["spawned"], st["memory"], st["verdicts"], st["fallbacks"], st["lostInARow"]),
-                         (1, 1, 1, {}, 0), st)
-        self.assertFalse(self.doc_file().exists(), "the same parse is not repeated inside the kernel")
-        self.assertEqual(em.asm_checkpoint_stats()["written"], 0)
+                         (1, 1, 1, {"memory": 1}, 0), st)
+        self.assertTrue(self.doc_file().exists(), "rebuilt in this kernel, as with the switch off: %s" % out)
+        self.assertEqual(em.asm_checkpoint_stats()["written"], 1)
         rb = self.rebuild_stats()
-        self.assertEqual((rb["failed"], rb["retry"], rb["pending"]), (1, 0, 0), "a failed rebuild, not tried again: %s" % rb)
-        self.assertIn("failed for memory", out)
-        self.assertNotIn("tried once more", out)
-        self.assertEqual(len([p for p in self.problems if "failed for memory" in p]), 1, self.problems)
+        self.assertEqual((rb["claimed"], rb["written"], rb["retry"]), (1, 1, 0), "one claim, one outcome: %s" % rb)
+        self.assertIn("ran past its memory bound", out)
+        self.assertEqual(len([p for p in self.problems if "ran out of memory" in p]), 1, self.problems)
         self.assertTrue(km._doc_worker_verdict_file(self.leaf).exists(), "the verdict is on disk")
         self.assertIsNone(em._ASM_REFRESH["inflight"])
-        _reset_worker()                                            # the next kernel life: nothing in memory, the file stands
-        self.fresh()
-        self.assertEqual(self.boot_parse(), ["full"])              # its boot parses the leaf whole and notes it again
-        self.evict_read()                                          # (and its read is gone: the converge pass cannot write it)
-        self.assertEqual(self.rebuild_stats()["pending"], 1)
+        self._next_life()
         out = self.cycle(NOW + 601)
         self.assertEqual(len(self.starts()), 1, "no worker is started for it again")
         st = km._doc_worker_stats()
-        self.assertEqual((st["spawned"], st["verdictHeld"], st["fallbacks"]), (0, 1, {}), st)
-        rb = self.rebuild_stats()
-        self.assertEqual((rb["claimed"], rb["pending"], rb.get("memoryVerdict")), (0, 0, 1), "off the table, counted: %s" % rb)
-        self.assertFalse(self.doc_file().exists())
-        self.assertEqual(len([p for p in self.problems if "gets no worker" in p]), 1, "in the error center: %s" % self.problems)
+        self.assertEqual((st["spawned"], st["verdictHeld"], st["fallbacks"]), (0, 1, {"verdict": 1}), st)
+        self.assertTrue(self.doc_file().exists(), "and it is rebuilt here, never dropped: %s" % out)
+        self.assertEqual(self.rebuild_stats()["written"], 1)
 
-    def test_a_worker_that_leaves_with_the_memory_exit_code_is_not_repeated_in_the_kernel(self):
+    def test_a_worker_that_leaves_with_the_memory_exit_code_keeps_a_verdict_and_the_job_runs_here(self):
         self._memory_shaped("memory-exit")
 
-    def test_a_worker_the_os_killed_is_not_repeated_in_the_kernel(self):
-        self._memory_shaped("killed")
-
-    def test_a_done_line_that_says_memory_is_not_repeated_in_the_kernel(self):
+    def test_a_done_line_that_says_memory_keeps_a_verdict_and_the_job_runs_here(self):
         self._memory_shaped("memory-line")
+
+    def test_a_kill_from_outside_is_a_lost_job_and_keeps_no_verdict(self):
+        """The OS's memory killer picks the worker (it asks to be picked first) when something else on the machine grows: that
+        says nothing about this transcript, so it is a lost job, run here, and no verdict is kept."""
+        self.session()
+        self.switch("on")
+        self.stand_in("killed")
+        out = self.cycle()
+        st = km._doc_worker_stats()
+        self.assertEqual((st["memory"], st["verdicts"], st["fallbacks"], st["lostInARow"]), (0, 0, {"killed": 1}, 1), st)
+        self.assertFalse(km._doc_worker_verdict_file(self.leaf).exists())
+        self.assertTrue(self.doc_file().exists(), out)
+
+    def test_no_verdict_is_kept_when_a_file_could_not_be_counted(self):
+        self.session()
+        self.switch("on")
+        self.stand_in("memory-exit")
+        with mock.patch.object(em, "transcript_records", lambda path: None):
+            out = self.cycle()
+        st = km._doc_worker_stats()
+        self.assertEqual((st["memory"], st["verdicts"], st["fallbacks"]), (1, 0, {"memory": 1}), st)
+        self.assertIn("no verdict is kept, since a file it reads could not be counted", out)
+        self.assertFalse(km._doc_worker_verdict_file(self.leaf).exists())
+        self.assertTrue(self.doc_file().exists())
 
     @unittest.skipUnless(LINUX, "the worker's peak address space is read from /proc")
     def test_the_real_worker_publishes_nothing_once_its_address_space_passed_its_soft_bound(self):
@@ -718,11 +748,12 @@ class Memory(Harness):
         with mock.patch.object(km, "_doc_worker_bounds", lambda est: (8 << 30, 1)):   # a soft bound the interpreter is over
             out = self.cycle()
         st = km._doc_worker_stats()
-        self.assertEqual((st["spawned"], st["done"], st["memory"], st["fallbacks"]), (1, {"failed": 1}, 1, {}), "%s\n%s" % (st, out))
+        self.assertEqual((st["spawned"], st["done"], st["memory"], st["fallbacks"], st["verdicts"]),
+                         (1, {"failed": 1}, 1, {"memory": 1}, 1), "%s\n%s" % (st, out))
         self.assertIn("past its bound", out)
-        self.assertEqual([p.name for p in ck.iterdir() if (".asm." in p.name and not p.name.endswith(".asm.memory"))
-                          or p.name.endswith(".tmp")], [], "nothing published, nothing left behind")
-        self.assertEqual((self.rebuild_stats()["retry"], st["verdicts"]), (0, 1))
+        self.assertEqual([p.name for p in ck.iterdir() if p.name.endswith(".tmp")], [], "nothing left behind")
+        self.assertEqual(em.asm_checkpoint_stats()["written"], 1, "the document is this kernel's: the worker published none")
+        self.assertEqual(self.rebuild_stats()["written"], 1)
 
 
 class Sizing(Harness):
@@ -733,30 +764,57 @@ class Sizing(Harness):
         with open(leaf or self.leaf, "rb") as f:
             return f.read().count(b"\n")
 
-    def test_the_record_count_is_the_noting_parse_s_then_the_reader_s_then_a_sample(self):
+    def test_records_are_counted_exactly_even_where_a_sample_would_miss_them(self):
+        """A run of tiny records between long ones, placed where windows read across the file would fall on either side of
+        it (the review's case, scaled down: a sample counted 0.15 of the records): the count is exact."""
+        f = str(self.proj / "uneven.jsonl")
+        big = json.dumps({"type": "user", "pad": "x" * (32 << 10)}) + "\n"
+        tiny = json.dumps({"t": 1}) + "\n"
+        with open(f, "w") as fh:
+            fh.write(big * 2 + tiny * 9000 + big * 60)
+        want = self._lines(f)
+        self.assertEqual(em.transcript_records(f), want)
+        step = (os.path.getsize(f) - (64 << 10)) // 7               # where eight 64 KiB windows across it would read
+        windows = b""
+        with open(f, "rb") as fh:
+            for i in range(8):
+                fh.seek(i * step)
+                windows += fh.read(64 << 10)
+        self.assertLess(windows.count(b"\n") * os.path.getsize(f) // len(windows), want // 2,
+                        "the premise: a sample of that shape would count under half")
+
+    def test_a_file_is_counted_once_per_state_and_a_grown_one_from_where_the_count_stopped(self):
         self.session()
         n = self._lines()
-        self.assertEqual(em.transcript_records(self.leaf), (n, "noted"), "the boot's parse counted what it read")
-        self.fresh()
-        self.boot_parse()                                          # a new process's parse: the reader holds the file
-        self.assertEqual(em.transcript_records(self.leaf), (n, "reader"))
-        with open(self.leaf, "a") as f:                            # grown past what either counted: scaled to the size now
+        self.assertEqual(em.transcript_records(self.leaf), n)
+        with mock.patch.object(em, "open", create=True, side_effect=AssertionError("counted again")):
+            self.assertEqual(em.transcript_records(self.leaf), n, "the same file at the same size: a stat")
+        size0 = os.path.getsize(self.leaf)
+        with open(self.leaf, "a") as f:
             f.writelines(json.dumps(r) + "\n" for r in T.transcript(300)[-60:])
-        got, source = em.transcript_records(self.leaf)
-        self.assertEqual(source, "reader")
-        self.assertLess(abs(got - self._lines()) / float(self._lines()), 0.1, (got, self._lines()))
-        other = str(self.proj / "never-parsed.jsonl")              # nobody parsed this one: a few windows read across it
-        self.write(T.transcript(700, tag="z"), leaf=other)
-        self.assertGreater(os.path.getsize(other), em._RECORDS_SAMPLE_WINDOWS * em._RECORDS_SAMPLE_BYTES, "the premise")
-        got, source = em.transcript_records(other)
-        self.assertEqual(source, "sampled")
-        self.assertLess(abs(got - self._lines(other)) / float(self._lines(other)), 0.1, (got, self._lines(other)))
+            f.write('{"partial": ')                                   # a last line still being written counts too
+        seeks = []
+        real_open = open
+
+        def spy(path, mode="r", *a, **k):
+            fh = real_open(path, mode, *a, **k)
+            real_seek = fh.seek
+            fh.seek = lambda off, *w: (seeks.append(off), real_seek(off, *w))[1]
+            return fh
+        with mock.patch.object(em, "open", create=True, side_effect=spy):
+            self.assertEqual(em.transcript_records(self.leaf), self._lines() + 1)
+        self.assertEqual(seeks, [size0], "the new bytes alone")
+        tmp = self.leaf + ".new"
+        Path(tmp).write_text("".join(json.dumps(r) + "\n" for r in T.transcript(100)))
+        os.replace(tmp, self.leaf)                                 # replaced: another inode, counted from the start
+        self.assertEqual(em.transcript_records(self.leaf), self._lines())
+        self.assertIsNone(em.transcript_records(str(self.proj / "no-such.jsonl")))
 
     def test_the_estimate_and_the_admitted_figure(self):
         self.session()
         plan = self.plan()
         size, n = os.path.getsize(self.leaf), self._lines()
-        self.assertEqual((plan["bytes"], plan["records"], plan["files"]), (size, n, [self.leaf]))
+        self.assertEqual((plan["bytes"], plan["records"], plan["files"], plan["exact"]), (size, n, [self.leaf], True))
         self.assertEqual(plan["estimate"], (64 << 20) + size + (8 << 10) * n)
         self.assertEqual(plan["limit"], int(1.5 * plan["estimate"]))
         self.assertEqual(plan["soft"], plan["limit"] - min(256 << 20, plan["limit"] // 3))
@@ -791,8 +849,7 @@ class Sizing(Harness):
         with mock.patch.object(jd, "asm_refresh_inputs", inputs):
             plan = self.plan()
             self.assertEqual(plan["bytes"], os.path.getsize(self.leaf) + os.path.getsize(anchor))
-            self.assertEqual(em.transcript_records(anchor)[1], "sampled", "the anchor: nobody counted it")
-            self.assertEqual(plan["records"], self._lines() + em.transcript_records(anchor)[0])
+            self.assertEqual((plan["records"], plan["exact"]), (self._lines() + self._lines(anchor), True))
             self.mem = plan["limit"] - 1
             self.cycle()
             self.assertEqual(self.starts(), [], "a byte short of the figure over both files: refused")
@@ -838,12 +895,41 @@ class MemoryVerdicts(Harness):
     def test_with_the_switch_off_a_verdict_changes_nothing(self):
         self._verdict()
         self.switch("off")
-        _reset_worker()
-        self.fresh()
-        self.boot_parse()
-        self.evict_read()
+        self._next_life()
         self.cycle(NOW + 601)
         self.assertTrue(self.doc_file().exists(), "the kernel's own road rebuilds it as it always did")
+        self.assertEqual(km._doc_worker_stats()["verdictHeld"], 0, "the verdict is never read")
+
+    def test_deleting_the_verdict_lets_a_worker_try_again_at_once(self):
+        """No restart: the file is the verdict, statted at every question."""
+        self._verdict()
+        km._doc_worker_verdict_file(self.leaf).unlink()
+        self.assertIsNone(km._doc_worker_verdict(self.leaf))
+        self._next_life()
+        self.stand_in("crash")
+        self.cycle(NOW + 601)
+        self.assertEqual(len(self.starts()), 2, "a worker was started for it again")
+
+    def test_the_error_center_says_what_happened_in_plain_words_and_the_log_has_the_path(self):
+        self.session()
+        self.switch("on")
+        self.stand_in("memory-exit")
+        out = self.cycle()
+        f = str(km._doc_worker_verdict_file(self.leaf))
+        rows = [p for p in self.problems if "ran out of memory" in p]
+        self.assertEqual(len(rows), 1, self.problems)
+        self.assertIn("session %s" % SID[:8], rows[0], "it names the session")
+        self.assertIn("nothing needs doing", rows[0])
+        for raw in (f, self.leaf, ".asm.memory", str(self.root)):
+            self.assertNotIn(raw, rows[0], "no path in the error center")
+        self.assertIn("delete %s to let a worker try it again" % f, out, "the log carries it")
+        self.mem = 0
+        self._next_life()
+        km._doc_worker_verdict_file(self.leaf).unlink()
+        self.cycle(NOW + 601)
+        rows = [p for p in self.problems if "free memory" in p]
+        self.assertEqual(len(rows), 1, self.problems)
+        self.assertNotIn(str(self.root), rows[0])
 
 
 class Drift(Harness):
