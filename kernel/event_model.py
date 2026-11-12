@@ -6391,7 +6391,7 @@ _TS_REPAIRED_SEEN = set()    # record uuids already counted in ts-repair — dis
 
 
 _ASM_DEMOTE_TL = threading.local()   # the calling thread's last demotion reason: what _assemble reads to pick the road after it
-_ASM_RESTORE_AFTER_DEMOTE = ("descent", "rewrite", "nonleaf", "reseat", "boundary", "summary")   # the demotions the document
+_ASM_RESTORE_AFTER_DEMOTE = ("descent", "rewrite", "nonleaf", "reseat", "boundary", "summary", "late-parent")   # the demotions the document
 #                                   still stands for (T402): the tail moved (a spur, a rewind, a fork), the leaf's record entry was
 #                                   replaced, a lineage file moved, or a compaction landed in the tail (its boundary or its summary,
 #                                   2026-09-24: the fold cannot carry one, but the restore parses the tail whole from the cut,
@@ -6400,8 +6400,10 @@ _ASM_RESTORE_AFTER_DEMOTE = ("descent", "rewrite", "nonleaf", "reseat", "boundar
 #                                   rewrote the document for 2.3 to 2.7 s more, and the next parse re-seated the new whole entry on
 #                                   it). `reseat` (2026-09-24) is a
 #                                   whole entry whose own document now stands (asm_checkpoint_write): re-seated on it, the folds after
-#                                   walk the tail alone. The load's own checks and the chain proof refuse a document that no longer
-#                                   fits (a boundary anchored before the cut, say). Every other reason (a prompt id, a skill link, a
+#                                   walk the tail alone. `late-parent` (2026-11-12) is a record landing as the parent an earlier
+#                                   record named: the restore reads the tail from the cut with the parent in hand, and its proof
+#                                   refuses when the earlier record lies before the cut. The load's own checks and the chain proof
+#                                   refuse a document that no longer fits (a boundary anchored before the cut, say). Every other reason (a prompt id, a skill link, a
 #                                   stamp out of order, ...) keeps the whole parse, and the gates file a compaction's reason only
 #                                   after every record in the delta has met them, so a compaction never carries such a record onto
 #                                   the restore road. A compaction restores only while the tail past the standing cut is under the
@@ -6632,10 +6634,23 @@ def _asm_doc_compact_pids(ad, all_recs, cut_seq):
     return out
 
 
+def _asm_doc_measure(entry):
+    """(the pre-cut bytes over the lineage, the leaf's cut offset) of the document standing for `entry`: a restored entry's
+    (docPre, docCutOff), the one a whole entry wrote (docCut), or, for a whole entry built after a restore refused the
+    document for a parent not written yet and left it standing, the one the entry it replaced knew (docStands, 2026-11-12:
+    a compaction whose summary lands with the late parent restores from it). None when the entry knows of none."""
+    if entry.get("docPre") is not None:
+        return entry["docPre"], entry.get("docCutOff")
+    if entry.get("docCut") is not None:
+        return entry["docCut"][1], entry["docCut"][4]
+    return entry.get("docStands")
+
+
 def _asm_compaction_under_share(entry, leaf_path):
     """Whether a compaction's demotion may take the restore road: True while the leaf's bytes past the standing document's cut,
     times _ASM_TAIL_SHARE, are still under that document's pre-cut bytes, False once they have reached them. A restored entry
-    carries the cut it came from (docPre, docCutOff), a whole entry the one it wrote (docCut). None when there is nothing to
+    carries the cut it came from (docPre, docCutOff), a whole entry the one it wrote (docCut) or the one a refusal for a parent
+    not written yet left standing (docStands, _asm_doc_measure). None when there is nothing to
     measure: a whole entry that wrote no document (a session under the first document's floor, a settle that declined its
     write, a compaction before the settle ran) or a leaf the stat cannot read. The caller parses whole on None as on False, but
     counts only False as past the share, so the counter holds only compactions that had a document to restore from. The churn
@@ -6644,12 +6659,10 @@ def _asm_compaction_under_share(entry, leaf_path):
     lazy-index entry a boot restores, and the tail every later restore and boot reads grew for the session's life (34 MB
     past the cut after four compactions at 150 to 184 MB, the boot's restore doubled); a compaction past the share now
     parses whole, as every compaction did before, and the settle after it writes a later cut."""
-    if entry.get("docPre") is not None:
-        pre, cut_off = entry["docPre"], entry.get("docCutOff")
-    elif entry.get("docCut") is not None:
-        pre, cut_off = entry["docCut"][1], entry["docCut"][4]
-    else:
+    measure = _asm_doc_measure(entry)
+    if measure is None:
         return None
+    pre, cut_off = measure
     try:
         tail = os.stat(leaf_path).st_size - int(cut_off or 0)
     except OSError:
@@ -6699,14 +6712,21 @@ def _asm_serve(entry):
             dict(entry["st"].get("skill_loads") or {}), list(entry.get("preTurns") or []))
 
 
-def _asm_full(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, keep_whole=False, installed_out=None):
+def _asm_full(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, keep_whole=False, installed_out=None,
+              stands=None):
     """Full parse + a fresh cache entry — the same steps atoms() runs, inlined so the entry keeps
     the carry (st) the emit actually used; later folds continue from it. `keep_whole`: a restore just
     refused this leaf's document, so the entry is never re-seated on the one written from it (keepWhole). `installed_out`,
-    when a list, takes the entry installed (parse_session hands it with a rewrite after a refused document)."""
+    when a list, takes the entry installed (parse_session hands it with a rewrite after a refused document). `stands`: the
+    document a refusal for a parent not written yet left standing, as the demoted entry knew it ((pre, cut offset), whether
+    it was written while a postal author waited), kept on the entry for the compaction road (_asm_doc_measure)."""
     entry = _asm_whole_entry(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human)
     if keep_whole:
         entry["keepWhole"] = True
+    if stands is not None:
+        entry["docStands"] = stands[0]
+        if stands[1]:
+            entry["docPostalWait"] = True
     if installed_out is not None:
         installed_out.append(entry)
     with _ASM_LOCK:
@@ -7040,14 +7060,20 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
     attached_pass = False  # the narrowed boundary arm let a record through where it demoted before: a later demotion the restore
     #                        road would take parses whole instead (_asm_demote_passed), and the fold counts it once it serves
     pass_tags = set()      # the shapes the episode rule vouched for in this delta's passes (fold:attachedPass:<shape>)
+    late = False           # a record landing as the parent an earlier record named: filed after the delta, as a compaction is
     for r in delta:
         t, u = r.get("type"), r.get("uuid")
         if u:
-            if u in ad.by_uuid or u in ad.dangling or u in ((ad.seed or {}).get("verdicts") or {}):
-                return _asm_demote("uuid-known")   # a re-write rebinds last-write-wins index state; a resurrected dangling target
-                #                                    rebinds repaired stitches; a RESTORED entry's adapter holds only the tail's
-                #                                    records, its pre-cut uuids live in the seed (round seven: a reuse of a pre-cut
-                #                                    uuid folded and served u1 a1 u2 a2 where a cold parse clears them)
+            if u in ad.by_uuid or u in ((ad.seed or {}).get("verdicts") or {}):
+                return _asm_demote("uuid-known")   # a re-write rebinds last-write-wins index state; a RESTORED entry's adapter holds
+                #                                    only the tail's records, its pre-cut uuids live in the seed (round seven: a
+                #                                    reuse of a pre-cut uuid folded and served u1 a1 u2 a2 where a cold parse clears
+                #                                    them)
+            if u in ad.dangling:
+                late = True        # a resurrected dangling target rebinds repaired stitches, which the fold cannot re-derive; the
+                #                    restore can, from the cut: `late-parent` takes its road (2026-11-12). It was `uuid-known`, a
+                #                    whole parse: the CLI writes some of a compaction's records before the parent they name, so a
+                #                    build between the two writes left the parent dangling and its arrival re-read the transcript
             p = r.get("parentUuid") or r.get("logicalParentUuid")
             parent_d[u] = None if p == u else p
             new_leaf = u
@@ -7115,11 +7141,19 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
         # A compaction demotes the fold, and its demotion falls to the restore road, which parses the tail from the document's
         # cut and proves only that the tail chains onto the document. So the reason is filed only here, after the whole delta:
         # a record past the compaction that the fold refuses for its own reason (a stamp before the records folded, a Skill call
-        # a pre-cut payload names, a uuid a pre-cut record named as its parent, a re-classifying prompt id) demoted above for that
-        # reason and keeps its whole parse (review of 2026-09-24: returning at the compaction masked them, and the restore served
-        # a tree a cold parse does not build, at every later boot as well). A delta holding a record the narrowed promptid arm
-        # let through parses whole as it did before the narrowing (_asm_demote_passed)
+        # a pre-cut payload names, a re-classifying prompt id) demoted above for that reason and keeps its whole parse (review
+        # of 2026-09-24: returning at the compaction masked them, and the restore served a tree a cold parse does not build, at
+        # every later boot as well). A record landing as the parent a pre-cut record named was such a record until 2026-11-12;
+        # it now files `late-parent` (below, masked by the compaction like any restore-road reason), and the restore's chain
+        # proof refuses it either way. A delta holding a record the narrowed promptid arm let through parses whole as it did
+        # before the narrowing (_asm_demote_passed)
         return _asm_demote_passed() if attached_pass else _asm_demote(compaction)
+    if late:
+        # A late parent (2026-11-12) demotes the fold to the restore road, filed here after the whole delta for the reason a
+        # compaction is: a record past it that the fold refuses for its own reason keeps its whole parse. The restore proves the
+        # tail chains onto the document with the parent in hand, and refuses when a PRE-CUT record named it, whose verdicts the
+        # document decided without it (_tail_chains_onto_the_document), so that case parses whole as it did under uuid-known
+        return _asm_demote_passed() if attached_pass else _asm_demote("late-parent")
     # Leaf descent: the new file-leaf must chain back to the old one THROUGH the delta — an
     # api_error spur re-parent, a rewind, and a /clear fork all fail here. walk.pop doubles
     # as the cycle guard; a delta with no uuid-bearing record passes trivially (leaf unmoved).
@@ -10303,7 +10337,7 @@ def _boundary_effective_parent(r, known):
     return None
 
 
-def _tail_chains_onto_the_document(leaf_path, doc, assume_childless=False):
+def _tail_chains_onto_the_document(leaf_path, doc, assume_childless=False, unwritten_out=None):
     """Whether the leaf's tail (its records past the document's cut) CHAINS onto the document: every tail record that bears a
     uuid or a parentUuid key, whatever its type (user, assistant, a system spur, a summary, a sidechain record, an attachment),
     parents a record IN THE TAIL, or the pre-cut SPINE TIP when the document says the writer proved the tip had no pre-cut
@@ -10320,7 +10354,15 @@ def _tail_chains_onto_the_document(leaf_path, doc, assume_childless=False):
     chains its command wrappers onto the pre-compact leaf, a childless tip, in ten of thirteen corpus cases (the golden detached
     scenario). One predicate for EVERY read that seeds an adapter from a document: the boot restore, the restore after a
     descent, rewrite or nonleaf demotion, the chain-membership and file-rewound readers. A leaf with no cut in the document
-    has no tail to chain."""
+    has no tail to chain.
+    A tail record landing as a parent that a PRE-CUT record named and the pre-cut bytes never held (the document's dangling
+    targets) refuses too (2026-11-12): the document's verdicts were decided while that parent was missing, and its arrival
+    rebinds them (a cold parse grafts the pre-cut orphan onto it), while every chain in the tail may still reach the tip; a
+    restart before the next settle restored such a tail with a pre-cut turn the cold parse folds away.
+    `unwritten_out`, a list when given, learns why a refusal was made: when every chain that fails meets a record naming a
+    parent NO record holds, pre-cut or tail (a parent not written yet: the CLI writes some records of a compaction before
+    the parent they name, 2026-11-12), the uuids of those parents are appended, so the restore road can tell a tail the next
+    append may complete from one whose shape refuses for good. Without it the walk stops at the first chain that fails."""
     fsid = Path(leaf_path).stem
     f = (doc.get("files") or {}).get(fsid) or {}
     cut = f.get("cut")
@@ -10346,6 +10388,11 @@ def _tail_chains_onto_the_document(leaf_path, doc, assume_childless=False):
     #                                                       below runs over one node per uuid with the last copy's parent; the common real
     #                                                       shape (a verbatim duplicate, 3.5 percent of transcripts) grafts, and a repeat
     #                                                       whose last copy is a non-tip root refuses through reachability (round eight)
+    pre_dangling = set((doc.get("gates") or {}).get("dangling") or ())
+    if any(u in pre_dangling for u in by_uuid):
+        return False                                      # a parent the pre-cut bytes named lands in the tail: the verdicts are stale.
+    #                                                       The writer's set also holds a parent a record past its cut named, so
+    #                                                       one landing later refuses too: a whole parse, never a wrong tree
     walk_nodes = list(by_uuid.values())
 
     def parent_of(r):
@@ -10356,17 +10403,30 @@ def _tail_chains_onto_the_document(leaf_path, doc, assume_childless=False):
             p = r.get("parentUuid")
         return None if (not p or p == r.get("uuid")) else p
 
-    reaches = {}                                          # uuid -> whether its parent chain reaches the proven tip (memoized)
+    def unwritten(r):
+        """The parent `r` names that no record holds (pre-cut or tail), or None: for a boundary its raw anchor, which the
+        parse follows once it lands, whatever preserved-segment record stands in for it meanwhile."""
+        p = r.get("parentUuid")
+        if r.get("type") == "system" and r.get("subtype") == "compact_boundary":
+            p = p or r.get("logicalParentUuid")
+        return p if (p and p != r.get("uuid") and p not in known) else None
+
+    reaches = {}                                          # uuid -> True when its parent chain reaches the proven tip, "u" when it
+    #                                                       fails through a parent not written yet, False when it fails otherwise
+    missing = set()                                       # the unwritten parents met on chains that fail
     for r in walk_nodes:                                  # REACHABILITY, not membership (round six, medium): every tail node's
-        path, on_path, cur = [], set(), r                 #  parent chain must end at the proven tip; a chain ending at any other
-        while True:                                       #  root (null, missing, self-link, unknown), revisiting a record (a
-            u = cur.get("uuid")                           #  cycle) or leaving the tail into the pre-cut part refuses
+        path, on_path, cur, last_miss, misses = [], set(), r, -1, []   # parent chain must end at the proven tip; a chain ending at
+        while True:                                       #  any other root (null, missing, self-link, unknown), revisiting a
+            u = cur.get("uuid")                           #  record (a cycle) or leaving the tail into the pre-cut part refuses
             if u is not None and u in reaches:
                 ok = reaches[u]; break
             if u is not None and u in on_path:
                 ok = False; break                         # a cycle (the set beside the path keeps a backwards-written tail linear)
             if u is not None:
                 path.append(u); on_path.add(u)
+            miss = unwritten(cur)
+            if miss is not None:
+                last_miss = len(path) - 1; misses.append(miss)
             p = parent_of(cur)
             if p is None:
                 ok = False; break                         # a root that is not the tip: the tail re-roots the graph
@@ -10375,27 +10435,40 @@ def _tail_chains_onto_the_document(leaf_path, doc, assume_childless=False):
             if p in by_uuid:
                 cur = by_uuid[p]; continue
             ok = False; break                             # the pre-cut interior, an unproven tip, or an unknown uuid
-        for x in path:
-            reaches[x] = ok
-        if not ok:
+        if ok is not True:
+            missing.update(misses)
+        for i, x in enumerate(path):                      # a record at or below the last unwritten parent on its chain fails
+            reaches[x] = True if ok is True else ("u" if (ok == "u" or i <= last_miss) else False)   # through it; one above it
+        if ok is not True and (unwritten_out is None or reaches.get(r.get("uuid")) is False):        #  fails on its own
             return False
+    if any(v == "u" for v in reaches.values()):
+        unwritten_out.extend(sorted(missing))
+        return False
     return True
 
 
-def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, reseated=False):
+def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, reseated=False, after_demote=False,
+                 postal_gate=False):
     """_asm_restore_inner timed whole: asmCheckpoint.restoreMs.total lands on every return (a served entry or a refusal)."""
     _t0 = time.perf_counter()
     try:
-        return _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, reseated=reseated)
+        return _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, reseated=reseated,
+                                  after_demote=after_demote, postal_gate=postal_gate)
     finally:
         _restore_ms("total", _t0)
 
 
-def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, reseated=False):
+def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, reseated=False,
+                       after_demote=False, postal_gate=False):
     """The entry restored from the leaf's assembly checkpoint, served; None when there is none or it does not verify.
     The pre-cut turns come from the document as lazy atoms; the tail is read from the cut and parsed through an
     adapter seeded with the pre-cut graph facts and the carried emit state; the prefix's identity is proven. `reseated`:
-    the restore re-seats a whole entry on the document written from it (the entry carries the churn bound, _asm_gates)."""
+    the restore re-seats a whole entry on the document written from it (the entry carries the churn bound, _asm_gates).
+    `after_demote`: the restore road after this process's own entry for the leaf demoted, so the transcript grew under it
+    in this process's life; a refusal there for a parent not written yet leaves the document standing (below). `postal_gate`:
+    refuse a document written while a postal author waited on the log (its own `postalWait`; one without the key counts as
+    such), as the late parent's road asks (review of 2026-11-12): the restored entry would serve that provisional author
+    until its next whole parse, and the entry it replaces may know nothing of the document to say so (_assemble)."""
     if _asm_refusal_stands(leaf_path):
         _asm_stat("restore:refusedStanding")             # refused for the tail's shape at this very stat: no proof, no rewrite (round two)
         return None
@@ -10410,17 +10483,36 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
     if doc is None:
         return None
     asm_sidecar_refresh(leaf_path, doc)                   # an older sidecar gains the inputs list here (round one, low 2)
+    if postal_gate and doc.get("postalWait", True):
+        _asm_stat("restore:postalWait")                   # the whole parse heals the author once the log catches up, and the
+        _ASM_DEMOTE_TL.postal = True                      #  settle writes a document that says so; _assemble keeps that entry
+        return None                                       #  re-seatable, as a compaction the postal gate sends whole leaves it
+    rp_ = os.path.realpath(str(leaf_path))
+    cut_off_ = int((((doc.get("files") or {}).get(Path(leaf_path).stem) or {}).get("cut") or [0])[0])
     try:
         _t0 = time.perf_counter()
         seed, landed = _seed_from_doc(doc)
         _restore_ms("seed", _t0)
-        if not _tail_chains_onto_the_document(leaf_path, doc):
+        _unwritten = []
+        if not _tail_chains_onto_the_document(leaf_path, doc, unwritten_out=_unwritten):
             _asm_stat("restore:chainRefused")             # the tail does not chain onto the document: the whole parse (T402); the
+            # Every chain that fails names a parent no record holds yet (2026-11-12). The whole parse serves meanwhile (a cold
+            # parse cuts the chain there too), but after a demotion the document is neither rewritten nor marked: the CLI
+            # writes some of a compaction's records before the parent they name, and the parse that read between the two
+            # writes rewrote the document from that half-written graph, every pre-compaction record off its path, so when the
+            # parent landed nothing could restore it and the transcript was parsed whole a second time (minutes, on a session
+            # near 1 GB). Left standing, the document serves the parent's arrival (`late-parent`, _asm_gates). If the parent
+            # never lands, the session's settle or periodic write writes the document from the whole entry, which stays whole
+            # (keepWhole), and a boot's refusal rewrites at once as before: nothing in a fresh process says a writer is mid-write
+            if _unwritten:
+                _asm_stat("restore:chainUnwritten")
+                if after_demote:
+                    _ASM_DEMOTE_TL.unwritten = True       # read by _assemble: the whole entry learns which document stands
+                    return None
             _why = ("unproven" if doc.get("tipChildless") is None and _tail_chains_onto_the_document(leaf_path, doc, assume_childless=True)
                     else "shape")                         # the missing bit alone, or the tail's own shape
             with _ASM_CKPT_LOCK:
-                _ASM_CHAIN_REFUSED_PATHS[os.path.realpath(str(leaf_path))] = (_why, int((((doc.get("files") or {}).get(Path(leaf_path).stem)
-                                                                                         or {}).get("cut") or [0])[0]))
+                _ASM_CHAIN_REFUSED_PATHS[rp_] = (_why, cut_off_)
                 #                                                                  the why and the refused document's leaf cut offset:
                 #                                                                  the whole parse that follows offers its document
             #                                               once; for the shape it then marks the sidecar at the leaf's stat, so the
@@ -10461,7 +10553,19 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
         st.update(_carry_decode(doc["carry"]))
         kept = ad.kept_uuids(ad.active_path())
         order = _chrono(ad, kept)
+        carried = dict(st["summaries"])
         ad._prepass(order, st)
+        if any(b not in ad.by_uuid and st["summaries"].get(b) != carried.get(b) for b in st["summaries"]):
+            # The tail's pre-pass gave a summary to a boundary BEFORE the cut (review of 2026-11-12): a summary whose own
+            # boundary is off the path belongs to the last boundary on the path before it, and when that one lies before the
+            # cut, a cold parse gives its atom this summary's text while the document froze it with its own. Refused as the
+            # tail's shape: the whole parse serves, and offers its document, as after a chain refusal
+            _asm_stat("restore:preCutSummary")
+            if index is not None:
+                index.release()
+            with _ASM_CKPT_LOCK:
+                _ASM_CHAIN_REFUSED_PATHS[rp_] = ("shape", cut_off_)
+            return None
         atoms = list(ad._emit_fold(order, st, rompuuid, postal_index))
         atoms += ad._absorbed(ad.qatts, kept, st, rompuuid, postal_index)
         entry = {"ad": ad, "st": st, "atoms": atoms, "kept": kept, "landed": landed | ad.landed_text_uuids(),
@@ -10790,6 +10894,7 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
                     _ASM_CACHE.pop(key, None)
                     _ASM_CACHE[key] = entry       # a served entry is a USED entry (LRU touch)
             keep_whole = False                    # set when a restore refused a document: the whole parse below keeps its entry whole
+            stands = None                         # the document such a refusal left standing for a parent not written yet
             if entry is not None:
                 _ASM_DEMOTE_TL.reason = None
                 got = _asm_gates(entry, leaf_path, candidate_files, links)
@@ -10860,8 +10965,14 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
                     # froze for the rest of the process (review of 2026-09-24, medium 1). An entry kept whole (its tail at the
                     # share, a refused document, a postal author waiting) carries no flag and restores without the bound, as
                     # every entry did before: held to the share there, an open turn's entry would parse whole at every descent
+                    _ASM_DEMOTE_TL.unwritten = _ASM_DEMOTE_TL.postal = False
                     served = _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human,
-                                          reseated=_why == "reseat" or bool(entry.get("reseat") or entry.get("reseated")))
+                                          reseated=_why == "reseat" or bool(entry.get("reseat") or entry.get("reseated")),
+                                          after_demote=True, postal_gate=_why == "late-parent")
+                    #                     the late parent asks the DOCUMENT whether a postal author waited when it was written
+                    #                     (review of 2026-11-12): a compaction's postal gate reads the entry, but the entry a late
+                    #                     parent lands on is often the whole one that gate itself sent to the whole parse, which
+                    #                     knows nothing of the document and may have healed since
                     if served is not None:
                         _asm_stat("restore"); _asm_stat("restore:afterDemote")
                         _mode("restore")
@@ -10870,7 +10981,10 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
                     # refusal (else every settle would write a document and every miss after it refuse it and parse whole); nor is
                     # any entry whose parse follows a refusal that left the document standing (the chain proof, a standing mark:
                     # the same tail refuses the next document too). Either way the entry stays whole and folds, as before the re-seat
-                    keep_whole = _why == "reseat" or asm_document_stands(leaf_path)
+                    keep_whole = (_why == "reseat" or asm_document_stands(leaf_path)) and not getattr(_ASM_DEMOTE_TL, "postal", False)
+                    _measure = _asm_doc_measure(entry) if getattr(_ASM_DEMOTE_TL, "unwritten", False) else None
+                    if _measure is not None:              # the refusal left this entry's document standing for the parent's
+                        stands = (_measure, bool(entry.get("docPostalWait")))   # arrival: the whole entry knows which one
             elif _CKPT_DIR_FN is not None:
                 served = _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human)
                 if served is not None:
@@ -10895,7 +11009,7 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
             _asm_stat("full:" + why)
             _mode("full")
             served = _asm_full(key, leaf_path, candidate_files, links, rompuuid,
-                               postal_index, sdk_human, keep_whole=keep_whole, installed_out=installed_out)
+                               postal_index, sdk_human, keep_whole=keep_whole, installed_out=installed_out, stands=stands)
             if why in ("refused", "noDocument"):
                 asm_rebuild_note(leaf_path, rompuuid, why)   # a stat, AFTER the parse installed its entry (the review of PR #367):
                 #                                              noted before it, any rebuild start during the parse saw no entry the
