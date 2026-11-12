@@ -187,6 +187,26 @@ class StaleCliModelPick(unittest.TestCase):
         self.assertEqual(len(self._problems()), 1)
         self.assertIn("did NOT apply", self._problems()[0]["text"])
 
+    def test_a_cli_launched_here_from_the_installed_binary_reverts_as_before_with_no_version_reported(self):
+        # this connect launched the CLI from the installed binary, unchanged since, and no init has said its version yet:
+        # it IS the installed Claude Code, so its refusal is a verdict (the CI case: a pick refused moments after a launch)
+        cli = Path(self.d, "claude")
+        cli.write_text("#!/bin/sh\necho 2.1.322\n")
+        self.be.claude_bin = str(cli)
+        sid, s = self._live(cli_seen="")
+        s._launched_bin = sb._bin_ident(cli)
+        s.want_switch_reconnect = lambda why: self.fail("no relaunch: the CLI is the installed binary")
+        self._pick_refused(s, sid)
+        self.assertEqual(s.chosen_model, "opus")
+        self.assertEqual(len(self._problems()), 1)
+        # …while a reattached CLI with no version reported reads as older (the rollout's reattach after a restart)
+        sid2, s2 = self._live(cli_seen="")
+        asks = []
+        s2.want_switch_reconnect = asks.append
+        self._pick_refused(s2, sid2)
+        self.assertEqual(asks, ["model"])
+        self.assertEqual(s2.chosen_model, PICK)
+
     def test_a_refusal_that_is_not_about_an_unknown_id_reverts_as_before(self):
         sid, s = self._live(refuse=Exception("restricted_by_org: claude-fable-5-2 is not available to your organization"))
         s.want_switch_reconnect = lambda why: self.fail("no relaunch for an org restriction")

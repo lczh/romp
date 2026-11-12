@@ -6257,6 +6257,18 @@ def swap_sdk_default(state_dir: Path, key: str, value):
         return _swap_sdk_default_locked(state_dir, key, value)
 
 
+def _bin_ident(path):
+    """(real path, size, mtime) of a Claude Code binary, the identity cli_version keys its read on; None unreadable. A
+    connect that launches a CLI records it (SdkSession._launched_bin), so a later refusal can tell that CLI is the
+    installed binary without asking either for its version."""
+    try:
+        real = os.path.realpath(str(path))
+        st = os.stat(real)
+        return (real, st.st_size, st.st_mtime_ns)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
 # A CLI's refusal of a model id it does not know (its set_model answer): "Model "claude-fable-5-2" is not a recognized model
 # id." on 2.1.305 and 2.1.322 (the latter's catalog_unknown code rides beside it), "Unknown model: …" on older ones.
 _UNRECOGNIZED_MODEL_RE = re.compile(r"not a recognized model|unknown model|catalog_unknown", re.I)
@@ -7172,6 +7184,7 @@ class SdkSession:
         if "mode" in _waiting and self.mode == "bypassPermissions":
             self._mode_pending = self.mode
         self._launch_record = None   # what the last launch from _options carried (launch_values then, and fastGuess)
+        self._launched_bin = None    # the binary identity (_bin_ident) this connect launched its CLI from; None for an attach
         self._hello_launch = None    # the connected host's echo of its spawn's launch record (cli.launch), this connect only
         self._cwd_request_open = False   # move()'s set_cwd round trip is in flight: quiet() holds a relaunch back for it
         self._launch_slot = False    # this session's relaunch holds a launch slot (_LaunchSlots), from its take to its CLI up
@@ -8749,9 +8762,10 @@ class SdkSession:
 
         Returns whether the pick was kept. Not kept, so today's revert, when the refusal is not about an unknown id (an
         org restriction, a malformed id), when the installed version cannot be read or equals the session's CLI's, when
-        a newer pick landed meanwhile, or when this pick already had its relaunch. A session whose CLI has not reported
-        its version (an attach with no turn since) reads as older, so the worst case of that guess is one quiet relaunch
-        before the same loud revert."""
+        the CLI reported no version but this connect launched it from the installed binary unchanged since (_launched_bin),
+        when a newer pick landed meanwhile, or when this pick already had its relaunch. A CLI an earlier launch made that
+        has not reported its version (a reattach after a kernel restart, with no turn since) reads as older, so the worst
+        case of that guess is one quiet relaunch before the same loud revert."""
         if not _UNRECOGNIZED_MODEL_RE.search(str(e)):
             return False
         st = getattr(self, "_stale_pick", None)
@@ -8764,6 +8778,9 @@ class SdkSession:
         seen = str(getattr(self, "_cli_version_seen", "") or "")
         if not installed or installed == seen:
             return False
+        if not seen and getattr(self, "_launched_bin", None) is not None \
+                and self._launched_bin == _bin_ident(self.backend.claude_bin):
+            return False                  # no version reported, but this connect launched the installed binary itself
         with self._lock:
             if self.chosen_model != picked:
                 return False              # a newer pick landed while the version was read: it owns every layer
@@ -11195,6 +11212,7 @@ class SdkSession:
             # applying reconnect. A change of fast mode made during that wait is applied by a relaunch after the
             # connect.
             self._fast_unlocked = bool((self._launch_record or {}).get("fast"))
+            self._launched_bin = _bin_ident(self.backend.claude_bin)   # what a launch here runs (an attach clears it below)
             fast_moved = self._fast_unlocked != bool(self.fast_effective())
             self._fast_expect = ""   # a fresh connection's first init speaks for the flag, not for any
             #   toggle sent on the old one — never hold a pre-reconnect expectation against it
@@ -11266,6 +11284,7 @@ class SdkSession:
                     # reconcile, from this kernel's own state dir (a session has no state_dir of its own, and that typo
                     # once raised out of the connect path and killed the session thread, 2026-07-28).
                     if self._host is not None and getattr(self, "_host_is_attach", False):
+                        self._launched_bin = None   # a CLI an earlier launch made: which binary it runs is not known here
                         launch, launched_here = self._hello_launch, False
                         if isinstance(launch, dict):
                             self._fast_unlocked = bool(launch.get("fast"))   # the launch's own word, not today's rule
