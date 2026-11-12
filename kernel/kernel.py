@@ -14769,11 +14769,13 @@ ASM_REBUILD = os.environ.get("ROMP_ASM_REBUILD", "1") != "0"   # the document re
 
 def _asm_rebuild_maybe():
     """Start the rebuild of ONE leaf a parse found without a document (em.asm_rebuild_note: refused, missing, or too big for the
-    converge pass), the largest pending, on a thread of its own at the lowest CPU priority, when no refresh or rebuild runs (the
-    two share one claim: one whole parse at a time) and the background gate is open (em.asm_background_open: the pusher is
-    asleep between its cycles, and no parse or page connect is in flight). Run at the end of each pusher cycle
-    (_asm_rebuild_tick; an idle cycle's alone from the review of PR #367 to the review of PR #370, and the document writer's
-    cycle before that, which ran whatever the pages were doing), so the rebuilds go one after another while the pusher sleeps.
+    converge pass), the first pending (a session a page opened, the most recent first, then the largest: em.asm_rebuild_pending),
+    on a thread of its own at the lowest CPU priority, when no refresh or rebuild runs (the two share one claim: one whole parse
+    at a time) and the background gate is open (em.asm_background_open: the pusher is asleep between its cycles, and no page's
+    parse or connect is in flight). Run by the rebuild starter at every opening of the gate (_asm_rebuild_starter, 2026-11-12;
+    at the end of each pusher cycle alone before it, _asm_rebuild_tick, which still runs it where no starter runs; an idle
+    cycle's alone from the review of PR #367 to the review of PR #370, and the document writer's cycle before that, which ran
+    whatever the pages were doing), so the rebuilds go one after another while the pusher sleeps.
     Nothing here parses or reads: a stat per pending leaf, and the thread
     (asm_refresh_document's private road) takes no key lock, so no page connect, chat build or pusher cycle waits on it, and it
     waits at its chunk points whenever the gate shuts. A leaf the converge pass can still write from the boot's own read is left
@@ -14825,14 +14827,52 @@ def _asm_rebuild_tick():
     starts when one is due. Every cycle's end, busy or idle (the review of PR #370): keyed on an IDLE cycle's end alone (#370,
     beside _gc_freeze_tick), the gate stood open about 45 s an hour on a host of 65 sessions, where a tenth of the cycles are
     idle, and the largest rebuild there took about two hours, longer than the kernel lasts between deploys; the pusher is
-    asleep after a busy cycle as much as after an idle one, so it loses nothing. Cheap when nothing is due: a dict scan. A
-    failure never ends the pusher: said with its traceback."""
+    asleep after a busy cycle as much as after an idle one, so it loses nothing. While the rebuild starter runs
+    (_asm_rebuild_starter, 2026-11-12) the opening alone is this call's work: the starter wakes on it, and on every later
+    opening, so a gate a parse held shut at this instant no longer waits for the next cycle's end. With no starter (a test, a
+    process without the loops) the rebuild is started here, as before. Cheap when nothing is due: a dict scan. A failure never
+    ends the pusher: said with its traceback."""
     em.asm_background_idle(True)
+    if _ASM_REBUILD_STARTER["running"]:
+        return False
     try:
         return _asm_rebuild_maybe()
     except Exception:
         sys.stderr.write("assembly document rebuild: %s\n" % traceback.format_exc())
         return False
+
+
+_ASM_REBUILD_STARTER = {"running": False}   # the rebuild starter's thread is in its loop (_asm_rebuild_starter)
+_ASM_REBUILD_STARTER_SAID = {}               # exception type name -> said once per kernel life (the starter's)
+
+
+@_stage_marked("asm.rebuild.start")                 # its own reads (a stat per pending leaf) count under their own stage (T401)
+def _asm_rebuild_starter():
+    """The document rebuild's starter thread (2026-11-12), started in main() beside the pusher: waits until the background gate
+    is OPEN and something changed (em.asm_rebuild_wait: the gate opened, a parse noted a leaf, a refresh or a rebuild released
+    the shared claim), then starts the next rebuild if one is due (_asm_rebuild_maybe). An event, never a timer: the gate opens
+    at the pusher's cycle end and again whenever the last page parse or connect push in flight leaves while the pusher sleeps,
+    and every one of those openings is a chance to start. Before it a rebuild started only at the cycle end itself, so a parse
+    that held the gate shut at that one instant cost a whole cycle: on a host whose cycles ran 88 to 565 s after a version bump,
+    no rebuild started in 13.5 minutes while 79 leaves waited. A start that raises is said once per kind and the loop goes on;
+    stopped by _LOOPS_STOP (the loops' stop wakes its wait)."""
+    _ASM_REBUILD_STARTER["running"] = True
+    seen = None
+    try:
+        while not _LOOPS_STOP.is_set():
+            seen = em.asm_rebuild_wait(seen, stop=_LOOPS_STOP)
+            if seen is None or _LOOPS_STOP.is_set():
+                break
+            try:
+                _asm_rebuild_maybe()
+            except Exception as e:                    # Exception, never BaseException: a deliberate loop stop passes
+                kind = type(e).__name__
+                if kind not in _ASM_REBUILD_STARTER_SAID:
+                    _ASM_REBUILD_STARTER_SAID[kind] = True
+                    sys.stderr.write("assembly document rebuild: the starter's start raised (said once per kind): %s\n"
+                                     % traceback.format_exc())
+    finally:
+        _ASM_REBUILD_STARTER["running"] = False
 
 
 def _lower_thread_priority():
@@ -89705,6 +89745,8 @@ class Handler(BaseHTTPRequestHandler):
             #                                     after the 0.5 s backstop (the tab switch IS the event)
             if client.get("app") == "chat":
                 _relay_active_chat(client, msg.get("id"), msg.get("nonce"))   # …and the window's feed learns which session is focused (T347), the announcement number echoed (T416)
+            if msg.get("id"):
+                em.asm_rebuild_prefer(str(msg["id"]))   # …and its document, if it waits for a rebuild, is rebuilt first (2026-11-12)
             return
         if msg and msg.get("type") == "needSlot" and msg.get("slot") in _DELTA_SLOTS:
             # The shim could not apply a view delta (its base revision did not match what it holds — a
@@ -91114,6 +91156,7 @@ class Handler(BaseHTTPRequestHandler):
             client["deflate"] = deflate                # permessage-deflate negotiated: _ws_sender compresses, the read loop inflates
         if active:
             client["active"] = active                  # active-tab-first streaming (the user 2026-06-24)
+            em.asm_rebuild_prefer(str(active))         # …and a rebuild its document waits for goes first (2026-11-12)
         if (q.get("delta") or [""])[0] == "1":
             client["delta"] = True                     # the shim reassembles view deltas (see _send_slot)
         if iid:
@@ -91994,6 +92037,10 @@ def _exit_quiesce():
         pass
     _EXIT_STAND_DOWN.set()
     _LOOPS_STOP.set()
+    try:
+        em.asm_rebuild_wait_release()        # the rebuild starter waits on the gate's condition: it wakes, sees the stop, and ends
+    except Exception:
+        pass
 
 
 def _exit_phase_log(phase, took, window, end, deadline_s, what=""):
@@ -92433,6 +92480,8 @@ def main():
     threading.Thread(target=_timeline_builder, daemon=True, name="timeline-build").start()   # the cold timeline build, off the
     #                                                           pusher (see _cached_timeline); idle until a Sessions pane owes it
     threading.Thread(target=_doc_writer_loop, daemon=True, name="doc-writer").start()   # every document, off the jobs pass
+    threading.Thread(target=_asm_rebuild_starter, daemon=True, name="asm-rebuild-start").start()   # each opening of the background
+    #                                                           gate starts the next document rebuild (see _asm_rebuild_starter)
     _DOC_WRITER_READY.wait()                                  # the writer holds its role before the jobs pass's first decision
     _JOBS_THREAD_STARTED[0] = True                            # the boot row waits for this thread's first pass too
     threading.Thread(target=_jobs_loop, daemon=True, name="jobs").start()   # the housekeeping, off the pusher (see _jobs_pass)
