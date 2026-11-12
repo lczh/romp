@@ -307,12 +307,13 @@ class OneBuildOfACheckoutAtATime(unittest.TestCase):
         self.dir = Path(tempfile.mkdtemp(prefix="romp-build-lock-"))
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.lock = self.dir / "dist" / ".romp-build.lock"
-        self.calls = []
+        self.calls, self.kws = [], []
         self.real_sp = self.km.subprocess
         self.answer = lambda argv, kw: types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
         def fake_run(argv, *a, **kw):
             self.calls.append(list(argv))
+            self.kws.append(kw)
             r = self.answer(argv, kw)
             if kw.get("check") and r.returncode:
                 raise self.real_sp.CalledProcessError(r.returncode, argv)
@@ -429,6 +430,63 @@ class OneBuildOfACheckoutAtATime(unittest.TestCase):
             km._ensure_bundles()
         self.assertEqual((self.calls, seen), ([self.BUILD], [False]), "held while its esbuild runs")
         self.assertTrue(self._free(), "and let go after")
+
+    def test_a_host_where_the_lock_cannot_work_still_builds(self):
+        # the re-review, 2026-11-12: any flock error but "held" read as "not taken", so on a filesystem without locks
+        # (ENOLCK, as some NFS mounts are) the boot build, the dist check, the converge and the pre-restart build all stood
+        # down for good and the UI never built again. Such a host builds unlocked, as before the lock, and says so once
+        import errno
+        import fcntl
+        import io
+        import threading
+        km = self.km
+        (self.dir / "vscode-extension" / "node_modules").mkdir(parents=True)
+        (self.dir / "a-file").write_text("")
+
+        def failing(code):
+            def flock(fd, op):
+                raise OSError(code, os.strerror(code))
+            return types.SimpleNamespace(flock=flock, LOCK_EX=fcntl.LOCK_EX, LOCK_NB=fcntl.LOCK_NB, LOCK_UN=fcntl.LOCK_UN)
+        cases = (("ENOLCK", dict(fcntl=failing(errno.ENOLCK)), "No locks available"),
+                 ("EBADF", dict(fcntl=failing(errno.EBADF)), "Bad file descriptor"),
+                 ("the lock file cannot be opened", dict(_build_lock_path=lambda: self.dir / "a-file" / "x.lock"), "a-file"))
+        for name, over, words in cases:
+            for builder in ("_rebuild_dist", "_ensure_bundles"):
+                with self.subTest(name, builder=builder):
+                    self.calls.clear(); self.kws.clear()
+                    err = io.StringIO()
+                    with mock.patch.multiple(km, **over), mock.patch.object(km, "ROOT", self.dir), \
+                            mock.patch.object(km, "DIST", self.dir / "no-dist"), mock.patch("sys.stderr", err):
+                        out = getattr(km, builder)()
+                    if builder == "_rebuild_dist":
+                        self.assertEqual(out, (True, ""), "the converge serves the build")
+                    self.assertEqual(self.calls, [self.BUILD], "it builds")
+                    self.assertEqual(self.kws[0].get("pass_fds"), (), "with no lock to hand its children")
+                    said = [ln for ln in err.getvalue().splitlines() if "without the checkout's build lock" in ln]
+                    self.assertEqual(len(said), 1, err.getvalue())
+                    self.assertIn(words, said[0])
+                    self.assertFalse([t for t in threading.enumerate() if t.name == "romp-boot-bundles"],
+                                     "the boot builds there and then, with no waiter")
+
+    def test_a_thread_waiting_out_another_process_holds_nothing_the_others_need(self):
+        # the re-review, 2026-11-12: the process's own build queue (_REBUILD_LOCK) was held through the whole wait for
+        # another process's build, so every other thread that wanted a build stacked behind it with no bound of its own
+        import threading
+        import time
+        km = self.km
+        other = self._hold()
+        out = []
+        t = threading.Thread(target=lambda: out.append(km._rebuild_dist()))
+        t.start()
+        time.sleep(0.5)
+        self.assertTrue(t.is_alive(), "it is waiting for the other process")
+        free = km._REBUILD_LOCK.acquire(blocking=False)
+        if free:
+            km._REBUILD_LOCK.release()
+        self.assertTrue(free, "and holds the in-process queue meanwhile only once it has the checkout")
+        self._release(other)
+        t.join(10)
+        self.assertEqual((out, self.calls), ([(True, "")], [self.BUILD]))
 
     def test_the_lock_lives_where_git_ignores_it_at_every_commit(self):
         # anywhere else in the tree it would read as an uncommitted edit and turn the kernel's sha '-dirty'

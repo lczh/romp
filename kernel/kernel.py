@@ -11715,7 +11715,8 @@ def _restart_pending(checkout=None):
 
 _REBUILD_LOCK = threading.Lock()   # one bundle build at a time: a peer's ask (_converge_ask, on a request thread) and
 #                                    the periodic pass (_dist_converge_check) would otherwise run two esbuilds into
-#                                    the same dist/ at once
+#                                    the same dist/ at once. Taken AFTER the checkout's build lock (_bundle_build_lock),
+#                                    and the one queue left where that lock cannot work
 _BUILD_LOCK_WAIT_S = 300           # how long a builder waits for ANOTHER PROCESS's build of this checkout: one `npm install`'s
 #                                    timeout below, the long step a holder can be in. Past it the builder reports the lock held
 #                                    and its caller's failure path runs (the converge restarts; the dist check's notice stays up)
@@ -11732,19 +11733,29 @@ def _build_lock_path():
 @contextlib.contextmanager
 def _bundle_build_lock(wait_s):
     """Hold this checkout's build lock, an fcntl.flock on _build_lock_path, around a bundle build and its `npm install`
-    retry: yields (fd, "") while held, or (None, why) when it was not taken within `wait_s` seconds (0: one try) or could
-    not be opened. _REBUILD_LOCK queues this process's threads; this lock queues PROCESSES, which share node_modules/ and
-    dist/ with nothing between them: a kernel stopped mid-build (the restart a push falls back to when the in-place build
-    outlasts the ask, which is when the npm retry runs) left its `npm install` going, and the next kernel's boot build and
-    dist check ran their own in the same node_modules (the review of the push converge, 2026-11-12). Each builder hands
-    `fd` to the children it runs (pass_fds), so a child that outlives its kernel holds the lock until it exits, and the
-    next kernel's builder waits for it instead of racing it."""
+    retry. This lock queues PROCESSES, which share node_modules/ and dist/ with nothing between them: a kernel stopped
+    mid-build (the restart a push falls back to when the in-place build outlasts the ask, which is when the npm retry
+    runs) left its `npm install` going, and the next kernel's boot build and dist check ran their own in the same
+    node_modules (the review of the push converge, 2026-11-12). Each builder hands the lock's fd to the children it runs
+    (pass_fds), so a child that outlives its kernel holds the lock until it exits, and the next kernel's builder waits for
+    it instead of racing it. Taken BEFORE _REBUILD_LOCK, which queues this process's threads, so a thread waiting out
+    another process's build holds nothing the others need and each waits at most its own bound (the re-review).
+
+    Yields (fds, why). `fds` is what the builder passes its children: (fd,) while the lock is held; () when the lock
+    cannot work here at all, the file not opening or flock failing with anything but "held" (ENOLCK on a filesystem
+    without locks, as some NFS mounts are), and then the build runs unlocked, as every build did before the lock, with one
+    stderr line saying so: a lock that cannot be taken must never stop the UI from building (the re-review found the boot
+    build, the dist check, the converge and the pre-restart build all standing down for good on such a host). None when
+    another process held the lock past `wait_s` seconds (0: one try), with `why` naming it; the builder runs nothing."""
+    def unlocked(why):
+        sys.stderr.write("romp-kernel: building the UI bundles without the checkout's build lock: %s\n" % why)
+        return (), why
     path = _build_lock_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
     except OSError as e:
-        yield None, "the build lock could not be opened (%s)" % e
+        yield unlocked("the lock file could not be opened (%s)" % e)
         return
     try:
         deadline = time.monotonic() + wait_s
@@ -11752,16 +11763,16 @@ def _bundle_build_lock(wait_s):
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
-            except BlockingIOError:
+            except OSError as e:
+                if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    yield unlocked("the lock could not be taken (%s)" % e)
+                    return
                 if time.monotonic() >= deadline:
                     yield None, ("another build of this checkout held its build lock past the %g s a builder waits"
                                  % wait_s if wait_s else "another build of this checkout is running")
                     return
                 time.sleep(0.25)
-            except OSError as e:
-                yield None, "the build lock could not be taken (%s)" % e
-                return
-        yield fd, ""
+        yield (fd,), ""
     finally:
         os.close(fd)                   # this process's hold ends here; a child handed the fd keeps the lock until it exits
 
@@ -11777,28 +11788,29 @@ def _rebuild_dist():
     the failure used to send the converge down the restart path for a UI-only change."""
     cv = ROOT / "vscode-extension"
 
-    def build(fd):
+    def build(fds):
         # --production (minified, no sourcemaps) unless ROMP_EXT_DEV_BUILD is set: the same profile and the
         # same knob as _ensure_bundles and vscode-extension/install.sh. A bare `node esbuild.js` here served
         # unminified bundles with sourcemaps after every fast-forward, and _ensure_bundles never re-minified
         # them: its staleness test is mtime against dist/render.js, not profile, so the bundles a converge
         # wrote stayed current to the next boot until an unrelated source change.
         argv = ["node", "esbuild.js"] + ([] if os.environ.get("ROMP_EXT_DEV_BUILD") else ["--production"])
-        r = subprocess.run(argv, cwd=str(cv), capture_output=True, text=True, timeout=180, pass_fds=(fd,))
+        r = subprocess.run(argv, cwd=str(cv), capture_output=True, text=True, timeout=180, pass_fds=fds)
         return r.returncode == 0, (r.stderr or r.stdout or "").strip()[-300:]
     try:
-        with _REBUILD_LOCK, _bundle_build_lock(_BUILD_LOCK_WAIT_S) as (fd, why):
-            if fd is None:
+        with _bundle_build_lock(_BUILD_LOCK_WAIT_S) as (fds, why):
+            if fds is None:
                 return False, why
-            ok, err = build(fd)
-            if ok:
-                return True, err
-            sys.stderr.write("romp-kernel: in-place bundle build failed — refreshing UI deps (npm install) and retrying…\n")
-            n = subprocess.run(["npm", "install", "--no-audit", "--no-fund"], cwd=str(cv),
-                               capture_output=True, text=True, timeout=300, pass_fds=(fd,))
-            if n.returncode != 0:
-                return False, err                # the build's own words: npm could not help, and its failure is not the news
-            return build(fd)
+            with _REBUILD_LOCK:
+                ok, err = build(fds)
+                if ok:
+                    return True, err
+                sys.stderr.write("romp-kernel: in-place bundle build failed — refreshing UI deps (npm install) and retrying…\n")
+                n = subprocess.run(["npm", "install", "--no-audit", "--no-fund"], cwd=str(cv),
+                                   capture_output=True, text=True, timeout=300, pass_fds=fds)
+                if n.returncode != 0:
+                    return False, err            # the build's own words: npm could not help, and its failure is not the news
+                return build(fds)
     except Exception as e:
         return False, str(e)
 
@@ -92293,7 +92305,7 @@ def _ensure_bundles():
         return
     srcs = [cv / "src", ROOT / "ui" / "webview"]
 
-    def build_if_stale(fd):
+    def build_if_stale(fds):
         # under the checkout's build lock (_bundle_build_lock), whose fd every child below inherits
         stale = not render.exists() or any(
             f.stat().st_mtime > render.stat().st_mtime
@@ -92309,33 +92321,32 @@ def _ensure_bundles():
         argv = ["node", "esbuild.js"] + ([] if os.environ.get("ROMP_EXT_DEV_BUILD") else ["--production"])
         try:
             subprocess.run(argv, cwd=str(cv), check=True,
-                           capture_output=True, timeout=120, pass_fds=(fd,))
+                           capture_output=True, timeout=120, pass_fds=fds)
         except Exception:
             sys.stderr.write("romp-kernel: bundle build failed — refreshing UI deps (npm install) and retrying…\n")
             try:
                 subprocess.run(["npm", "install", "--no-audit", "--no-fund"], cwd=str(cv), check=True,
-                               capture_output=True, timeout=300, pass_fds=(fd,))
+                               capture_output=True, timeout=300, pass_fds=fds)
                 subprocess.run(argv, cwd=str(cv), check=True,
-                               capture_output=True, timeout=120, pass_fds=(fd,))
+                               capture_output=True, timeout=120, pass_fds=fds)
             except Exception as e:
                 sys.stderr.write("romp-kernel: bundle build failed (%s) — UI may be stale\n" % e)
 
     def after_the_other_build():
-        with _REBUILD_LOCK, _bundle_build_lock(_BUILD_LOCK_WAIT_S) as (fd, why):
-            if fd is None:
+        with _bundle_build_lock(_BUILD_LOCK_WAIT_S) as (fds, why):
+            if fds is None:
                 sys.stderr.write("romp-kernel: the UI bundles were not checked (%s) — UI may be stale\n" % why)
                 return
-            build_if_stale(fd)
+            with _REBUILD_LOCK:
+                build_if_stale(fds)
 
     # One try at boot. A held lock is another process building this checkout (a stopped kernel's `npm install`, or a
     # second kernel on it): waiting here would hold the whole boot for as long as that runs, so the check and any build
     # wait for it on a thread of their own, and pages are offered the reload when the bundles move.
-    with _REBUILD_LOCK, _bundle_build_lock(0) as (fd, why):
-        if fd is not None:
-            return build_if_stale(fd)
-    if not why.startswith("another build"):
-        sys.stderr.write("romp-kernel: the UI bundles were not checked (%s) — UI may be stale\n" % why)
-        return
+    with _bundle_build_lock(0) as (fds, why):
+        if fds is not None:
+            with _REBUILD_LOCK:
+                return build_if_stale(fds)
     sys.stderr.write("romp-kernel: %s — the UI bundles are checked when it ends\n" % why)
     threading.Thread(target=after_the_other_build, name="romp-boot-bundles", daemon=True).start()
 
