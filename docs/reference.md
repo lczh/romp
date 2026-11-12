@@ -3649,11 +3649,15 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   (2026-11-12; a boot's refusal rewrites as below). That restore is refused,
   and the whole parse heals the author instead, when the document was written
   while a postal author waited on the log (its own `postalWait`;
-  `restore:postalWait`). Any restore is refused when the tail's pre-pass gives
-  a compaction summary to a boundary before the cut, as it does when the
-  summary's own boundary is off the path (`restore:preCutSummary`): the
-  document froze that boundary's atom, so the whole parse serves and offers its
-  document as after a chain refusal; a document written before the bit is unproven, so a standing
+  `restore:postalWait`). When the tail's pre-pass gives a compaction summary to a boundary before the
+  cut, as it does for a summary hung under attachments and stamped before its
+  own boundary (how the CLI now writes most automatic compactions: the pass
+  gives it to the previous boundary, in a cold parse as in a restore) or one
+  whose boundary is off the path, the restore gives that boundary's frozen
+  atom the value a cold parse emits (`restore:summaryPatched`, counted only
+  when the document's atom differs, as when the summary landed after the
+  document was written; 2026-11-12, replacing a refusal that parsed those
+  sessions whole); a document written before the bit is unproven, so a standing
   document is refused at its first restore after the change, booked
   `full:refused`, and rewritten from the whole parse that follows the
   refusal (`write:afterRefusal`), so the next restore takes it: then and

@@ -7894,6 +7894,39 @@ def _pre_turns_of(doc, index):
     return out
 
 
+def _asm_patch_pre_cut_summaries(moved, doc, index, prefix):
+    """Give the pre-cut boundary atoms in `moved` ({boundary uuid: summary}) the summary the tail's pre-pass left them, as a
+    cold parse emits them (_asm_restore_inner). The rows of a turns-section document are patched in the restore's own index
+    (its row bytes, a copy of the document's, which no reader holds yet), found through the section's per-turn uuids, which
+    cover every row; an atoms-only document's prefix atoms are fresh dicts. A boundary with no pre-cut atom has nothing to
+    show and is left alone. Returns how many atoms changed."""
+    patched = 0
+    if index is not None:
+        found = {}
+        for td in doc.get("turns") or ():
+            for j, u in enumerate(td["uuids"]):
+                if u in moved:
+                    found[u] = td["atoms"][j]
+        for u, k in found.items():
+            row = index._row(k)
+            sc = dict(row.get("s") or {})
+            if sc.get("summary") == moved[u]:
+                continue
+            sc["summary"] = moved[u]
+            row["s"] = sc
+            b = json.dumps(row, separators=(",", ":")).encode("utf-8")
+            index.row_bytes += len(b) - len(index.rowb[k])
+            index.rowb[k] = b
+            patched += 1
+    else:
+        for a in prefix:
+            u = a.get("uuid")
+            if u in moved and a.get("summary") != moved[u]:
+                a["summary"] = moved[u]
+                patched += 1
+    return patched
+
+
 def _tree_identity_of_doc(turns_doc, identity):
     """sha1 over a `turns` section's turn ids, segment ids and atom uuids, and the atoms' own identity digest (the whole
     parse's, verified at write time): the proof a restore reads from the section alone, no atom built."""
@@ -10555,17 +10588,20 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
         order = _chrono(ad, kept)
         carried = dict(st["summaries"])
         ad._prepass(order, st)
-        if any(b not in ad.by_uuid and st["summaries"].get(b) != carried.get(b) for b in st["summaries"]):
-            # The tail's pre-pass gave a summary to a boundary BEFORE the cut (review of 2026-11-12): a summary whose own
-            # boundary is off the path belongs to the last boundary on the path before it, and when that one lies before the
-            # cut, a cold parse gives its atom this summary's text while the document froze it with its own. Refused as the
-            # tail's shape: the whole parse serves, and offers its document, as after a chain refusal
-            _asm_stat("restore:preCutSummary")
-            if index is not None:
-                index.release()
-            with _ASM_CKPT_LOCK:
-                _ASM_CHAIN_REFUSED_PATHS[rp_] = ("shape", cut_off_)
-            return None
+        moved = {b: v for b, v in st["summaries"].items() if b not in ad.by_uuid and v != carried.get(b)}
+        if moved:
+            # The tail's pre-pass gave a summary to a boundary BEFORE the cut: a summary whose parent is no boundary belongs to
+            # the last boundary walked, and the CLI now hangs its summary under attachments and stamps it seconds BEFORE its own
+            # boundary, so the pre-pass, cold or restored, gives it to the previous boundary; a summary whose boundary is off
+            # the path does the same. A cold parse emits that boundary's atom with the value the pass leaves last, which the
+            # tail decides (the writer keeps every pre-cut stamp at or before the tail's), so the frozen atom takes that value
+            # (_asm_patch_pre_cut_summaries) and the restore stays exact. A document written after the summary landed carries
+            # it already, the live case (2026-11-12: the refusal this replaced read the carry, which never holds a tail
+            # summary, and parsed 16 sessions whole at a boot where every frozen atom was right); one written before it is
+            # patched (restore:summaryPatched)
+            n_ = _asm_patch_pre_cut_summaries(moved, doc, index, prefix)
+            if n_:
+                _asm_stat("restore:summaryPatched", n_)
         atoms = list(ad._emit_fold(order, st, rompuuid, postal_index))
         atoms += ad._absorbed(ad.qatts, kept, st, rompuuid, postal_index)
         entry = {"ad": ad, "st": st, "atoms": atoms, "kept": kept, "landed": landed | ad.landed_text_uuids(),
