@@ -25,6 +25,7 @@ import json
 import os
 import random
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timezone
@@ -476,10 +477,13 @@ class TheNextBuildSeesWhatChanged(_World):
 class _StatCalls(object):
     """Counts the stat-family calls (os.stat, os.lstat, os.readlink: what resolving a path and reading a file's facts
     cost) made INSIDE _path_preview_verdicts, and the links it was asked about. The verdict function is wrapped where
-    the build looks it up, with whatever arguments the build passes, so the same count reads the old code and the new."""
+    the build looks it up, with whatever arguments the build passes, so the same count reads the old code and the new.
+    Only the thread that entered the counter is counted: the patch on `os` is process-wide, and a kernel thread of
+    its own (a sweep, a watcher) that stats a file while the build runs is not the build's cost."""
 
     def __enter__(self):
         self.calls = self.links = self.inside = 0
+        self._tid = threading.get_ident()
         self._os = {n: getattr(os, n) for n in ("stat", "lstat", "readlink")}
         for n, real in self._os.items():
             setattr(os, n, self._counted(real))
@@ -489,12 +493,14 @@ class _StatCalls(object):
 
     def _counted(self, real):
         def call(*a, **k):
-            if self.inside:
+            if self.inside and threading.get_ident() == self._tid:
                 self.calls += 1
             return real(*a, **k)
         return call
 
     def _verdicts(self, links, *a, **k):
+        if threading.get_ident() != self._tid:
+            return self._pv(links, *a, **k)
         self.links += len(links or {})
         self.inside += 1
         try:
@@ -552,12 +558,18 @@ class TheCostIsPerFileNotPerMention(_World):
             kinds, whys = self.build()
         self.assertEqual((sorted(kinds), set(kinds.values()), whys), (sorted(files), {"code"}, {}))
         self.assertGreater(min(resolve), 3, "resolving a path costs a stat per component: these files sit several folders down")
-        bound = sum(r + 2 for r in resolve) + roots
-        self.assertLessEqual(s.calls, bound,
-                             "24 files named once each: one resolution of each file and two stats of it (is it a file, how "
-                             "large), and the home and the session's folder resolved once for the build (%d calls at most; "
-                             "%d made). Each judgement used to resolve its file twice, the home twice and the folder once"
-                             % (bound, s.calls))
+        # The accounting, exactly. Per file: one resolution of its path (os.path.realpath, measured above on this tree
+        # as `resolve`), then two stats of the real path, os.path.isfile and os.path.getsize; a code file is not
+        # warmed, so nothing else reads it. Per build: the home and the session's folder resolved once each (`roots`),
+        # the folder read from the names snapshot, which costs no stat. The glossaries folder is never resolved: every
+        # file is confined by the session's folder, so the glossary check is not reached. Equal, not at most: a call
+        # more is a resolution or a stat the change was meant to remove, and a call fewer is a check that went missing.
+        expected = sum(r + 2 for r in resolve) + roots
+        self.assertEqual(s.calls, expected,
+                         "24 files named once each: one resolution of each file and two stats of it (is it a file, how "
+                         "large), and the home and the session's folder resolved once for the build (%d calls expected; "
+                         "%d made). Each judgement used to resolve its file twice, the home twice and the folder once"
+                         % (expected, s.calls))
 
     def test_a_judgement_read_back_from_the_memo_touches_no_file(self):
         corpus = _corpus(self, random.Random(11))
