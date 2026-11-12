@@ -1881,9 +1881,11 @@ is what was asked for.
 After a converge in place, `GET /version` on that machine keeps `kernel_sha` at
 the commit the process booted from, which is the kernel code it runs.
 `converged_sha` names the commit it serves (equal to `kernel_sha` until a
-converge), `checkout_sha` is the checkout's head, and `restart_pending` is
-false. A deploy check asking whether a machine serves a commit reads
-`converged_sha` with `restart_pending`.
+converge), `kernel_ver` the release of that commit, `checkout_sha` the
+checkout's head, and `restart_pending` is false. A deploy check asking whether
+a machine serves a commit reads `converged_sha` with `restart_pending`, and
+`romp version` prints the same: the served commit, the booted one beside it,
+and whether a restart is pending.
 
 A pull works the same way. When this machine pulls a linked machine's newer
 commits (`/tunnels/pull`, the popover's **Pull**) and they change no kernel

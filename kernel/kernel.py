@@ -2570,6 +2570,15 @@ def _kernel_sha(reask=False):
     return _SHA or None
 
 
+def _booted_sha():
+    """The commit this kernel booted from as an EARLIER read of _kernel_sha left it, or None; git is not asked. For a
+    converge asked after someone else moved the checkout (_converge_ask): a first read there names the commit the
+    checkout was just reset to, so a kernel whose boot read never answered took the pushed commit for its own and
+    answered "already running" without building or classifying, a bin/ change included (the review of the push
+    converge, 2026-11-12). Unknown is a refusal there, and the asker restarts."""
+    return _SHA or None
+
+
 _VER = None                                  # lazily-resolved release the running code descends from
 
 
@@ -11707,6 +11716,54 @@ def _restart_pending(checkout=None):
 _REBUILD_LOCK = threading.Lock()   # one bundle build at a time: a peer's ask (_converge_ask, on a request thread) and
 #                                    the periodic pass (_dist_converge_check) would otherwise run two esbuilds into
 #                                    the same dist/ at once
+_BUILD_LOCK_WAIT_S = 300           # how long a builder waits for ANOTHER PROCESS's build of this checkout: one `npm install`'s
+#                                    timeout below, the long step a holder can be in. Past it the builder reports the lock held
+#                                    and its caller's failure path runs (the converge restarts; the dist check's notice stays up)
+
+
+def _build_lock_path():
+    """The file every bundle builder of this checkout locks: in vscode-extension/dist, which git ignores at every commit (a
+    lock file anywhere else in the tree would read as an uncommitted edit and turn the kernel's sha '-dirty', and a commit
+    that ignored it would not cover a checkout moved back past that commit), beside what the builds write, and never
+    removed by esbuild.js, which deletes only its own staging files there."""
+    return ROOT / "vscode-extension" / "dist" / ".romp-build.lock"
+
+
+@contextlib.contextmanager
+def _bundle_build_lock(wait_s):
+    """Hold this checkout's build lock, an fcntl.flock on _build_lock_path, around a bundle build and its `npm install`
+    retry: yields (fd, "") while held, or (None, why) when it was not taken within `wait_s` seconds (0: one try) or could
+    not be opened. _REBUILD_LOCK queues this process's threads; this lock queues PROCESSES, which share node_modules/ and
+    dist/ with nothing between them: a kernel stopped mid-build (the restart a push falls back to when the in-place build
+    outlasts the ask, which is when the npm retry runs) left its `npm install` going, and the next kernel's boot build and
+    dist check ran their own in the same node_modules (the review of the push converge, 2026-11-12). Each builder hands
+    `fd` to the children it runs (pass_fds), so a child that outlives its kernel holds the lock until it exits, and the
+    next kernel's builder waits for it instead of racing it."""
+    path = _build_lock_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+    except OSError as e:
+        yield None, "the build lock could not be opened (%s)" % e
+        return
+    try:
+        deadline = time.monotonic() + wait_s
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    yield None, ("another build of this checkout held its build lock past the %g s a builder waits"
+                                 % wait_s if wait_s else "another build of this checkout is running")
+                    return
+                time.sleep(0.25)
+            except OSError as e:
+                yield None, "the build lock could not be taken (%s)" % e
+                return
+        yield fd, ""
+    finally:
+        os.close(fd)                   # this process's hold ends here; a child handed the fd keeps the lock until it exits
 
 
 def _rebuild_dist():
@@ -11720,26 +11777,28 @@ def _rebuild_dist():
     the failure used to send the converge down the restart path for a UI-only change."""
     cv = ROOT / "vscode-extension"
 
-    def build():
+    def build(fd):
         # --production (minified, no sourcemaps) unless ROMP_EXT_DEV_BUILD is set: the same profile and the
         # same knob as _ensure_bundles and vscode-extension/install.sh. A bare `node esbuild.js` here served
         # unminified bundles with sourcemaps after every fast-forward, and _ensure_bundles never re-minified
         # them: its staleness test is mtime against dist/render.js, not profile, so the bundles a converge
         # wrote stayed current to the next boot until an unrelated source change.
         argv = ["node", "esbuild.js"] + ([] if os.environ.get("ROMP_EXT_DEV_BUILD") else ["--production"])
-        r = subprocess.run(argv, cwd=str(cv), capture_output=True, text=True, timeout=180)
+        r = subprocess.run(argv, cwd=str(cv), capture_output=True, text=True, timeout=180, pass_fds=(fd,))
         return r.returncode == 0, (r.stderr or r.stdout or "").strip()[-300:]
     try:
-        with _REBUILD_LOCK:
-            ok, err = build()
+        with _REBUILD_LOCK, _bundle_build_lock(_BUILD_LOCK_WAIT_S) as (fd, why):
+            if fd is None:
+                return False, why
+            ok, err = build(fd)
             if ok:
                 return True, err
             sys.stderr.write("romp-kernel: in-place bundle build failed — refreshing UI deps (npm install) and retrying…\n")
             n = subprocess.run(["npm", "install", "--no-audit", "--no-fund"], cwd=str(cv),
-                               capture_output=True, text=True, timeout=300)
+                               capture_output=True, text=True, timeout=300, pass_fds=(fd,))
             if n.returncode != 0:
                 return False, err                # the build's own words: npm could not help, and its failure is not the news
-            return build()
+            return build(fd)
     except Exception as e:
         return False, str(e)
 
@@ -11820,11 +11879,22 @@ _INPLACE_LOCK = threading.Lock()   # one in-place converge at a time: the drift 
 #                                    and took the restart path while the first was still building
 
 
+_BUS_BOUNCED_FOR = [""]   # the commit the postal bus was last bounced onto by an in-place converge: the bus runs THAT code
+#                           since, so a later converge bounces it only for bus files changed after it. Measured from the
+#                           booted commit instead, every later converge re-bounced an already-current bus, five seconds
+#                           of unreachable mail and a peer re-notify each (the review of the push converge, 2026-11-12)
+
+
 def _in_place_converge(target):
     """The no-kernel-code converge (T216): bounce the bus if bus-class files changed (its own
-    process — see _bus_converge), rebuild dist, latch, and AUDIT the skip verdict with its per-class
-    file lists so a wrong skip is diagnosable from disk. True = converged (caller returns); False =
-    fall through to the restart path, which is always the safe converge."""
+    process — see _bus_converge) since the code it runs (the booted commit, or the one it was last
+    bounced onto), rebuild dist, latch, and AUDIT the skip verdict with its per-class file lists so
+    a wrong skip is diagnosable from disk. True = converged (caller returns); False = fall through
+    to the restart path, which is always the safe converge. A success forgets the cached release
+    (_VER): VERSION is no kernel code, so a release bump converges in place, and the process serves
+    the new release from then on; a kept cache reported the old one on /version and in the network
+    panel, and the release check offered (or, in auto mode, restarted for) an update already served."""
+    global _VER
     with _INPLACE_LOCK:
         if _REBUILT_FOR[0] == target:
             return True                    # whoever held the lock converged onto this very target
@@ -11839,11 +11909,16 @@ def _in_place_converge(target):
             _sync_notice("in-place converge could not re-read the diff — taking the restart path",
                          ok=False)
             return False
-        if cc["bus"]:
+        bus = cc["bus"]
+        if _BUS_BOUNCED_FOR[0]:                # even with none since the boot: a commit reverting a bus change differs from the bus's code
+            since = _converge_classes(_BUS_BOUNCED_FOR[0], target)
+            bus = since["bus"] if since is not None else ["(the diff since %s could not be read)" % _BUS_BOUNCED_FOR[0]]
+        if bus:
             ok, err = _bus_converge()
             _audit_restart_request("bus-converge", tag=target, ok=("yes" if ok else "no"),
-                                   files=",".join(cc["bus"][:20]), err=("" if ok else err))
+                                   files=",".join(bus[:20]), err=("" if ok else err))
             if ok:
+                _BUS_BOUNCED_FOR[0] = target   # a failed bounce leaves the bus on its old code, so the next converge tries again
                 _sync_notice("postal bus restarted onto the new build (bus-only change — the kernel "
                              "keeps running; a kernel restart would not have updated the bus)")
             else:
@@ -11852,10 +11927,11 @@ def _in_place_converge(target):
         ok, err = _rebuild_dist()
         if ok:
             _REBUILT_FOR[0] = target
+            _VER = None                        # the release is read again from the commit now served (docstring)
             _audit_restart_request("main-converge-skip", tag=target,
                                    why="no kernel-code change",
                                    skip=",".join(cc["skip"][:20]) or "none",
-                                   bus=",".join(cc["bus"][:20]),
+                                   bus=",".join(bus[:20]),
                                    ast_equal=",".join(cc["ast_equal"][:20]))
             _sync_notice("new build served in place (no kernel-code change; no restart) — reload the "
                          "dashboard to pick it up")
@@ -11870,10 +11946,10 @@ def _converge_ask(want):
     asker has already classified the diff; this side decides again from its own tree, because it is the one that
     keeps running: the checkout must be AT `want` (read fresh, which also puts the new head in front of /version's
     checkout_sha), must hold no kernel byte this process does not run (_restart_pending), and the diff from the
-    booted commit must classify restart-free here too (_kernel_code_changed, which fails toward restarting). Then
-    the same _in_place_converge the drift pass runs: bus bounce when bus files changed, bundle rebuild (the `dv`
-    keepalive is what raises the reload offer on open pages), latch, audit row. (ok, detail); a refusal names its
-    reason, and every asker answers one with the restart."""
+    booted commit, as read BEFORE the move (_booted_sha), must classify restart-free here too (_kernel_code_changed,
+    which fails toward restarting). Then the same _in_place_converge the drift pass runs: bus bounce when bus files
+    changed, bundle rebuild (the `dv` keepalive is what raises the reload offer on open pages), latch, audit row.
+    (ok, detail); a refusal names its reason, and every asker answers one with the restart."""
     want = str(want or "").strip()
     if not re.fullmatch(r"[0-9a-f]{40}", want):
         return False, "no commit named"
@@ -11882,9 +11958,9 @@ def _converge_ask(want):
         return False, "the checkout this kernel runs from is at %s, not %s" % (head[:8] or "no commit", want[:8])
     if _restart_pending() is True:
         return False, "the checkout holds kernel code this process does not run"
-    running, target = _kernel_sha(reask=True), _sha8(want)
+    running, target = _booted_sha(), _sha8(want)
     if not running:
-        return False, "the commit this kernel booted from could not be read"
+        return False, "the commit this kernel booted from was not read before its checkout moved"
     if _sha_same(running, want) and not _REBUILT_FOR[0]:
         return True, "already running %s" % target      # booted from this very commit and never moved off it
     if _kernel_code_changed(running, want):
@@ -89858,6 +89934,12 @@ class Handler(BaseHTTPRequestHandler):
                 # _converge_ask decides from this kernel's own tree and refuses whatever it cannot show is
                 # restart-free; a refusal is a 502 with the reason, and the asker answers it by restarting this
                 # kernel, as every push used to. The answer names the commit this process serves afterwards.
+                # An explicitly presented token only (_write_token_ok): its one caller sends X-Romp-Token, and the
+                # ambient cookie a browser attaches for any loopback page is no proof of a caller that moved this
+                # checkout (the review of the push converge, 2026-11-12).
+                if not self._write_token_ok(q):
+                    return self._send(403, json.dumps({"ok": False, "error":
+                        "forbidden: /converge needs the serve token (X-Romp-Token or ?token=)"}), "application/json")
                 try:
                     body = json.loads(raw_body or b"{}")
                 except Exception:
@@ -92210,10 +92292,14 @@ def _ensure_bundles():
         sys.stderr.write("romp-kernel: UI deps missing — run once: (cd %s && npm install)\n" % cv)
         return
     srcs = [cv / "src", ROOT / "ui" / "webview"]
-    stale = not render.exists() or any(
-        f.stat().st_mtime > render.stat().st_mtime
-        for src in srcs for f in [*src.rglob("*.ts"), *src.rglob("*.css"), *src.rglob("*.js")])
-    if stale:
+
+    def build_if_stale(fd):
+        # under the checkout's build lock (_bundle_build_lock), whose fd every child below inherits
+        stale = not render.exists() or any(
+            f.stat().st_mtime > render.stat().st_mtime
+            for src in srcs for f in [*src.rglob("*.ts"), *src.rglob("*.css"), *src.rglob("*.js")])
+        if not stale:
+            return
         sys.stderr.write("romp-kernel: building UI bundles…\n")
         # --production (minified, no sourcemaps), matching vscode-extension/install.sh. Both
         # builders must agree: if the installer minified and this rebuild did not, any later .ts
@@ -92223,16 +92309,35 @@ def _ensure_bundles():
         argv = ["node", "esbuild.js"] + ([] if os.environ.get("ROMP_EXT_DEV_BUILD") else ["--production"])
         try:
             subprocess.run(argv, cwd=str(cv), check=True,
-                           capture_output=True, timeout=120)
+                           capture_output=True, timeout=120, pass_fds=(fd,))
         except Exception:
             sys.stderr.write("romp-kernel: bundle build failed — refreshing UI deps (npm install) and retrying…\n")
             try:
                 subprocess.run(["npm", "install", "--no-audit", "--no-fund"], cwd=str(cv), check=True,
-                               capture_output=True, timeout=300)
+                               capture_output=True, timeout=300, pass_fds=(fd,))
                 subprocess.run(argv, cwd=str(cv), check=True,
-                               capture_output=True, timeout=120)
+                               capture_output=True, timeout=120, pass_fds=(fd,))
             except Exception as e:
                 sys.stderr.write("romp-kernel: bundle build failed (%s) — UI may be stale\n" % e)
+
+    def after_the_other_build():
+        with _REBUILD_LOCK, _bundle_build_lock(_BUILD_LOCK_WAIT_S) as (fd, why):
+            if fd is None:
+                sys.stderr.write("romp-kernel: the UI bundles were not checked (%s) — UI may be stale\n" % why)
+                return
+            build_if_stale(fd)
+
+    # One try at boot. A held lock is another process building this checkout (a stopped kernel's `npm install`, or a
+    # second kernel on it): waiting here would hold the whole boot for as long as that runs, so the check and any build
+    # wait for it on a thread of their own, and pages are offered the reload when the bundles move.
+    with _REBUILD_LOCK, _bundle_build_lock(0) as (fd, why):
+        if fd is not None:
+            return build_if_stale(fd)
+    if not why.startswith("another build"):
+        sys.stderr.write("romp-kernel: the UI bundles were not checked (%s) — UI may be stale\n" % why)
+        return
+    sys.stderr.write("romp-kernel: %s — the UI bundles are checked when it ends\n" % why)
+    threading.Thread(target=after_the_other_build, name="romp-boot-bundles", daemon=True).start()
 
 
 def _pid_alive(pid):

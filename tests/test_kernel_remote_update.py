@@ -1650,17 +1650,20 @@ class ConvergeAsk(unittest.TestCase):
         self.files, self.unreadable = ["ui/webview/strip.ts", "docs/guide.md"], False
         self.head, self.pending, self.booted, self.build_ok = self.WANT, False, self.BOOTED, True
         self.builds, self.bounces, self.notices, self.audits, self.diffs = [], [], [], [], []
-        names = ("_fresh_local_head", "_restart_pending", "_kernel_sha", "_rebuild_dist", "_bus_converge",
-                 "_sync_notice", "_audit_restart_request", "DIST", "_VER")
+        self.ranges, self.bounce_ok, self.git_reads = {}, True, []
+        names = ("_fresh_local_head", "_restart_pending", "_kernel_sha", "_booted_sha", "_rebuild_dist", "_bus_converge",
+                 "_sync_notice", "_audit_restart_request", "DIST", "_VER", "_SHA", "ROOT")
         saved = {n: getattr(km, n) for n in names}
-        self._run, hc, latches = km.subprocess.run, dict(km._HEAD_CACHE), (km._REBUILT_FOR[0], km._INPLACE_TRIED[0])
+        self.saved = saved
+        self._run, hc = km.subprocess.run, dict(km._HEAD_CACHE)
+        latches = (km._REBUILT_FOR[0], km._INPLACE_TRIED[0], km._BUS_BOUNCED_FOR[0], km._SHA_MISS_T[0])
 
         def restore():
             for n, v in saved.items():
                 setattr(km, n, v)
             km.subprocess.run = self._run
             km._HEAD_CACHE.clear(); km._HEAD_CACHE.update(hc)
-            km._REBUILT_FOR[0], km._INPLACE_TRIED[0] = latches
+            km._REBUILT_FOR[0], km._INPLACE_TRIED[0], km._BUS_BOUNCED_FOR[0], km._SHA_MISS_T[0] = latches
         self.addCleanup(restore)
 
         def build():
@@ -1672,14 +1675,19 @@ class ConvergeAsk(unittest.TestCase):
         def fake(argv, **kw):
             if argv[0] == "git" and "diff" in argv:
                 self.diffs.append(argv[-1])
-                return _R(out="\0".join(self.files), rc=1 if self.unreadable else 0)
+                a, b = argv[-1].split("..")
+                files = self.ranges.get((a[:8], b[:8]), self.files)    # a range named in the test, else the one diff
+                return _R(out="\0".join(files), rc=1 if self.unreadable else 0)
+            self.git_reads.append(argv)
             return _R(rc=1)                                           # every other read of git: unanswered
         km.DIST = dist
         km._fresh_local_head = lambda: self.head
         km._restart_pending = lambda checkout=None: self.pending
         km._kernel_sha = lambda reask=False: self.booted
+        km._booted_sha = lambda: self.booted
         km._rebuild_dist = build
-        km._bus_converge = lambda: (self.bounces.append(1) or True, "")
+        km._bus_converge = lambda: (self.bounces.append(1), (self.bounce_ok, "" if self.bounce_ok else "no bus answered"))[1]
+        km._BUS_BOUNCED_FOR[0] = ""
         km._sync_notice = lambda text, ok=True, kind="sync": self.notices.append((text, ok))
         km._audit_restart_request = lambda action, **kw: self.audits.append(action)
         km.subprocess.run = fake
@@ -1727,7 +1735,7 @@ class ConvergeAsk(unittest.TestCase):
                 ("kernel bytes on disk this process does not run", dict(pending=True), self.WANT,
                  "the checkout holds kernel code this process does not run"),
                 ("the booted commit is unknown", dict(booted=None), self.WANT,
-                 "the commit this kernel booted from could not be read"),
+                 "the commit this kernel booted from was not read before its checkout moved"),
                 ("kernel code in the diff", dict(files=["kernel/kernel.py"]), self.WANT, code),
                 ("pages and kernel code in one diff", dict(files=["ui/webview/strip.ts", "bin/romp-manager"]), self.WANT, code),
                 ("a diff that cannot be read", dict(unreadable=True), self.WANT, code)):
@@ -1756,6 +1764,67 @@ class ConvergeAsk(unittest.TestCase):
         self.assertEqual(km._converge_ask(self.WANT), (True, "already running 11111111"))
         self.assertEqual((self.builds, self.diffs), ([], []))
 
+    def test_a_kernel_whose_boot_was_never_read_does_not_take_the_pushed_commit_for_its_own(self):
+        # the review of the push converge, 2026-11-12: with no earlier read of the booted commit, a read here names the
+        # commit the apply just reset the checkout to, and the ask answered "already running" with nothing built or
+        # classified, a bin/ change included. The real readers, over a git that would answer the new head
+        km._kernel_sha, km._booted_sha = self.saved["_kernel_sha"], self.saved["_booted_sha"]
+        km._SHA, km._SHA_MISS_T[0] = None, 0.0
+        self.files = ["bin/romp-manager"]
+
+        def git(argv, **kw):
+            self.git_reads.append(argv)
+            if "rev-parse" in argv:
+                return _R(out="1111111\n")
+            return _R(out="") if "status" in argv else _R(rc=1)
+        km.subprocess.run = git
+        self.assertEqual(km._converge_ask(self.WANT),
+                         (False, "the commit this kernel booted from was not read before its checkout moved"))
+        self.assertEqual((self.builds, self.git_reads), ([], []), "nothing built, and git is not asked for a boot it never saw")
+
+    def test_the_bus_is_bounced_once_per_change_to_its_files(self):
+        # the review of the push converge, 2026-11-12: measured from the booted commit, every later converge re-bounced a
+        # bus already running the code, five seconds of unreachable mail and a peer re-notify each time
+        t1, t2, t3 = self.WANT, "3" * 40, "4" * 40
+        self.ranges = {(self.BOOTED, t1[:8]): ["postal/bus.py", "ui/webview/strip.ts"],
+                       (self.BOOTED, t2[:8]): ["postal/bus.py", "ui/webview/feed.ts"],   # still differs from the boot…
+                       (t1[:8], t2[:8]): ["ui/webview/feed.ts"],                         # …not from the bus's code
+                       (self.BOOTED, t3[:8]): ["ui/webview/feed.ts"],                    # a revert: none since the boot…
+                       (t1[:8], t3[:8]): ["postal/bus.py", "ui/webview/feed.ts"]}        # …but the bus runs t1's code
+        for want, bounces in ((t1, 1), (t2, 1), (t3, 2)):
+            self.head = want
+            self.assertTrue(km._converge_ask(want)[0], want[:8])
+            self.assertEqual(len(self.bounces), bounces, "bounces after converging onto %s" % want[:8])
+        self.assertEqual(len(self.builds), 3, "every converge builds")
+
+    def test_a_bounce_that_failed_is_tried_again_on_the_next_converge(self):
+        t1, t2 = self.WANT, "3" * 40
+        self.ranges = {(self.BOOTED, t1[:8]): ["postal/bus.py"], (self.BOOTED, t2[:8]): ["postal/bus.py"],
+                       (t1[:8], t2[:8]): ["ui/webview/feed.ts"]}
+        self.bounce_ok = False
+        self.assertTrue(km._converge_ask(t1)[0])
+        self.bounce_ok, self.head = True, t2
+        self.assertTrue(km._converge_ask(t2)[0])
+        self.assertEqual(len(self.bounces), 2, "the bus never reached t1's code, so the bus files since the boot stand")
+
+    def test_a_release_bump_served_in_place_is_the_release_it_reports(self):
+        # the review of the push converge, 2026-11-12: VERSION is no kernel code, so a release bump converges in place,
+        # and the release read once per process kept naming the old one on /version, in the network panel and to the
+        # release check, which then offered (or in auto mode restarted for) the update already served
+        root = pathlib.Path(self.tmp) / "checkout"
+        root.mkdir()
+        (root / "VERSION").write_text("0.9.0\n")                    # the bumped release, on disk after the reset
+        km.ROOT, km._VER = root, "v0.8.0"                             # the release the process read at its boot
+        self.files = ["VERSION", "ui/webview/strip.ts"]
+        self.build_ok = False
+        self.assertFalse(km._converge_ask(self.WANT)[0])
+        self.assertEqual(km._kernel_ver(), "v0.8.0", "a converge that did not happen keeps the release it serves")
+        self.build_ok, km._INPLACE_TRIED[0] = True, ""
+        self.assertTrue(km._converge_ask(self.WANT)[0])
+        self.assertEqual(km._kernel_ver(), "v0.9.0")
+        km.subprocess.run = self._run
+        self.assertEqual(km._version_info()["kernel_ver"], "v0.9.0", "what /version and the network panel show")
+
     def test_the_route_requires_the_token_and_answers_with_the_verdict(self):
         import http.client
         import threading
@@ -1765,11 +1834,13 @@ class ConvergeAsk(unittest.TestCase):
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
 
-        def ask(sha, token=True):
+        def ask(sha, token=True, cookie=False):
             c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
             headers = {"Content-Type": "application/json"}
             if token:
                 headers["X-Romp-Token"] = km.TOKEN
+            if cookie:
+                headers["Cookie"] = "romp_token=" + km.TOKEN
             c.request("POST", "/converge", json.dumps({"sha": sha}).encode(), headers)
             resp = c.getresponse()
             raw = resp.read().decode()
@@ -1777,6 +1848,8 @@ class ConvergeAsk(unittest.TestCase):
             return resp.status, raw
         status, _ = ask(self.WANT, token=False)
         self.assertEqual(status, 403, "a caller without the serve token moves nothing")
+        status, raw = ask(self.WANT, token=False, cookie=True)
+        self.assertEqual(status, 403, "nor one with only the cookie a browser attaches for any loopback page: %s" % raw)
         self.assertEqual(self.builds, [])
         status, raw = ask(self.WANT)
         self.assertEqual((status, json.loads(raw)), (200, {"ok": True, "detail": "converged in place onto 11111111",

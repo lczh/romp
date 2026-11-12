@@ -82,6 +82,8 @@ ALLOW = {
     ("kernel.py", "main", "_heartbeat"): "WS keepalive frames",
     ("kernel.py", "main", "_parent_watch"): "a pid probe on the spawning manager",
     ("kernel.py", "main", "_update_check_loop"): "the main-drift git probe",
+    ("kernel.py", "_ensure_bundles", "after_the_other_build"): "waits on the checkout's build lock, then runs esbuild (and npm) as "
+                                                               "subprocesses: no record read, no atom built (2026-11-12)",
     ("kernel.py", "main", "_ensure_postal_bus"): "starts the postal bus process",
     ("kernel.py", "main", "_tunnel_supervisor"): "ssh tunnel supervision and status",
     ("kernel.py", "_notify_bus_peer", "_revive_postal_bus"): "re-spawns the postal bus process",
