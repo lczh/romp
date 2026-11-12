@@ -311,6 +311,7 @@ OFF_FEED = (
     "_settle_event_key",           # the nudge and compaction ticks: lastStopAt
     "_spend_fork_floor",           # the spend guard's floor for a fork's row, a thread's or a live session's: forkedFrom, t
     "_spend_thread_rows",          # the spend guard's comment-thread rows (_spend_guard_tick): forkOf, name
+    "_tail_first_pieces",          # the tail-first shadow's provisional chat build (the fork-cut piece, never served): forkedFrom
     "_thread_events",              # comment threads: forkOf
     "_thread_exchange",            # comment threads (the frame's projection and the relay): forkOf
     "_thread_mail_off",            # the mail-off gate: threadOf

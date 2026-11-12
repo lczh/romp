@@ -186,6 +186,9 @@ CENSUS = {
     "_strip_hook_notices": ("pure", "over a text"),
     "_strip_fork_opener": ("pure", "over a text"),
     "_task_outputs_for": ("sig", "taskout", "the launch record from the transcript's scan; each output file's tail is a taskout dep"),
+    "_piece": ("pure", "the wrapped helper's own value (the helper is classified under its own name); a placeholder only inside a tail-first scope, the shadow's two builds (the tail_first argument), which no cache keeps and no client is served"),
+    "_tail_first_parse": ("pure", "the tail-first shadow's provisional parse (the tail_first argument, never a build the cache keeps): the window's own records, the states file and the postal log"),
+    "_tail_first_store_gate": ("pure", "over the tail-first window, its tree and the side-store rows already read; it raises or returns nothing (the tail_first argument)"),
     "_branch_marker": ("sig", "reg"),   # the fork lineage chip: _thread_reg (the reg) and _name_of, one helper for the whole build and a page
     "_tilde": ("const", "the home directory"),
     "_live_map": ("sig", "row", "the liveness map when the caller passed none"),
@@ -210,6 +213,7 @@ DOTTED = {
     "em.hydrate": ("pure", "over the tree's atoms: fills a body before the assembly cut from the transcript the parse key already covers (T323 stage 4a)"),
 
     "em.parse_z": ("pure", "a rendered orphan note's stamp, parsed for the fold's orphan gate window (round 2, item 11)"),
+    "em.TailRefused": ("const", "an exception class, raised by a tail-first shadow build whose session writes another transcript now (the tail_first argument)"),
     "sb.echo_text_key": ("pure", "over a text"),
     "nar.narration_rev": ("sig", "narration", "the session's main-conversation progress-note revision, a counter in memory"),
     "nar.narration_marks": ("sig", "narration", "the progress-note store's marks for the session, keyed by its revision"),
@@ -254,6 +258,7 @@ GLOBALS = {
     "_RENDER_FLOOR": ("sig", "floor", "the render floor the pusher's last build used; the pusher's own decision is the floor component"),
     "_RENDER_FLOOR_CUT": ("out", "the pusher's build records whether its floor was the tree's cut (read by _follower_floor)"),
     "_PAGE_FILL_TURNS": ("const", "the turns stepped past a page for late fills"),
+    "_Pending": ("const", "the placeholder class a piece returns inside a tail-first scope (an isinstance test)"),
     "_chat_fold_last": ("out", "the perf line's per-thread record"),
     "_chat_fold_lock": ("const", "a lock"),
     "_chat_fold_warned": ("out", "a once-flag"),

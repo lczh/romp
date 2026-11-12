@@ -588,8 +588,10 @@ class SdkQueuedIndicator(unittest.TestCase):
         # in-memory queue, the Codex backend from its own; an unowned sid has none. No backend fork in
         # build_session anymore.
         self.assertIn("be = Sessions.backend_for(sid)", src)
-        # (the path_override arm is the read-only episode render — a closed episode has no live queue)
-        self.assertIn("queued = [] if path_override else be.pending_queued(sid)", src)
+        # (the dark arm is the read-only episode render — a closed episode has no live queue — and the tail-first
+        # shadow's two builds, which read no live input)
+        self.assertIn("_dark = bool(path_override) or tail_first is not None", src)
+        self.assertIn("queued = [] if _dark else be.pending_queued(sid)", src)
         self.assertEqual(km._UNOWNED.pending_queued("sid-unowned"), [])   # the unowned route has no queue to read
 
 
