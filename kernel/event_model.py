@@ -7501,8 +7501,10 @@ class LazyIndex:
         #                                                   under _MAT_LOCK; release() walks and prunes them): plain refs, no WeakSet, since
         #                                                   a LazyAtoms is unhashable and a ref callback may fire under the lock
         self.rowb = [r.encode("utf-8") for r in doc["atoms"]]   # v6: the document's rows are JSON strings already (T401 (4))
-        self.row_bytes = sum(map(len, self.rowb))         # the rows' encoded bytes, summed once here (rowb never changes), so the
-        #                                                   heap block's estimate reads a number, never the rows (restored_index_estimate)
+        self.row_bytes = sum(map(len, self.rowb))         # the rows' encoded bytes, summed here and kept by the one writer of rowb,
+        #                                                   the restore's summary patch before any reader holds the index
+        #                                                   (_asm_patch_pre_cut_summaries), so the heap block's estimate reads a
+        #                                                   number, never the rows (restored_index_estimate)
         self.records = doc["records"]
         self.fsids = list(doc.get("fsids") or [])
         files = doc.get("files")
@@ -7911,6 +7913,64 @@ def _pre_turns_of(doc, index):
                      pcs={u: n for u, n in td.get("pcs") or []}, hT=td.get("hT"))
         out.append(pt)
     return out
+
+
+def _summary_digest(summary):
+    """A boundary atom's summary as the document's `bnd` map records it: a short sha1, None for no summary."""
+    return None if summary is None else hashlib.sha1(summary.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _asm_boundary_rows(doc, index, prefix):
+    """Each pre-cut boundary atom's row in the document and its frozen summary's digest ({uuid: (row index, digest)}, the
+    index of the turns section's rows or of the atoms-only prefix): the writer's `bnd` map, or, for a document written
+    before it, found through the turns section's per-turn uuids (which cover every row) or the prefix atoms, keyed by the
+    record rows that are boundaries, with no digest (the row is decoded to compare)."""
+    bnd = doc.get("bnd")
+    if bnd is not None:
+        return {u: (int(v[0]), v[1]) for u, v in bnd.items()}
+    want = {r[0] for r in doc["records"] if r[3] == "compact_boundary"}
+    out = {}
+    if index is not None:
+        for td in doc.get("turns") or ():
+            for j, u in enumerate(td["uuids"]):
+                if u in want:
+                    out[u] = (td["atoms"][j], _UNKNOWN_DIGEST)
+    else:
+        for k, a in enumerate(prefix):
+            if a.get("uuid") in want:
+                out[a["uuid"]] = (k, _UNKNOWN_DIGEST)
+    return out
+
+
+_UNKNOWN_DIGEST = object()
+
+
+def _asm_patch_pre_cut_summaries(desired, rows_of, index, prefix):
+    """Hold each pre-cut boundary atom in `desired` ({uuid: summary}) to the summary the pre-pass left it, as a cold parse
+    emits it (_asm_restore_inner). `rows_of` maps each to its row and its frozen summary's digest (_asm_boundary_rows): an
+    atom whose digest matches is left without decoding its row. The rows of a turns-section document
+    are patched in the restore's own index (its row bytes, a copy of the document's, which no reader holds yet); an
+    atoms-only document's prefix atoms are fresh dicts. Returns how many atoms changed."""
+    patched = 0
+    for u, want in desired.items():
+        k, digest = rows_of.get(u, (None, None))
+        if k is None or (digest is not _UNKNOWN_DIGEST and digest == _summary_digest(want)):
+            continue                                       # no atom, or the frozen summary is the one the pass leaves: no decode
+        if index is not None:
+            row = index._row(k)
+            sc = dict(row.get("s") or {})
+            if sc.get("summary") == want:
+                continue
+            sc["summary"] = want
+            row["s"] = sc
+            b = json.dumps(row, separators=(",", ":")).encode("utf-8")
+            index.row_bytes += len(b) - len(index.rowb[k])
+            index.rowb[k] = b
+            patched += 1
+        elif 0 <= k < len(prefix) and prefix[k].get("uuid") == u and prefix[k].get("summary") != want:
+            prefix[k]["summary"] = want
+            patched += 1
+    return patched
 
 
 def _tree_identity_of_doc(turns_doc, identity):
@@ -9112,6 +9172,9 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             return _skip("moot")
         # the pre-cut atoms in emit order
         pre_atoms = []
+        bnd_rows = {}                                     # a boundary atom's uuid -> [its row, its summary's digest]: the restore
+        #                                                   holds each one to the summary the pass leaves it with no scan, and
+        #                                                   decodes the row only when the digests differ (_asm_patch_pre_cut_summaries)
         for n_atom, a in enumerate(atoms):
             if n_atom and n_atom % _ASM_BG_EMIT_CHUNK == 0 and chunk():   # a rebuild's chunk point every _ASM_BG_EMIT_CHUNK
                 return _skip("moot")                                         #  atoms of the rows
@@ -9156,6 +9219,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                 row["m"] = a.get("message")                    #  the body rides inline, never a lazy marker hydrate cannot fill
                 if "toolUseResult" in a:
                     row["tur"] = a["toolUseResult"]
+            if a.get("type") == "system" and a.get("subtype") == "compact_boundary" and u:
+                bnd_rows[u] = [len(pre_atoms), _summary_digest(a.get("summary"))]
             pre_atoms.append(row)
         if chunk():                                           # the rows and the pre-cut atom rows are built; the spine is next
             return _skip("moot")
@@ -9327,7 +9392,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                          #                    refuses more (_asm_pid_compact_episode)
                          "skill_use_ids": sorted(ad.skill_use_ids), "src_tool_links": sorted(ad.src_tool_links),
                          "dangling": sorted(ad.dangling)},
-               "carry": _carry_encode(st), "identity": identity, "t": time.time(), "tipChildless": bool(tip_childless)}
+               "carry": _carry_encode(st), "identity": identity, "t": time.time(), "tipChildless": bool(tip_childless),
+               "bnd": bnd_rows}                           # optional (2026-11-12): a document without it is scanned at its restore
         _pst = entry.get("st") or {}
         doc["postalWait"] = bool(_pst.get("postal_miss_rec") or _pst.get("postal_miss_att"))   # a postal author waits on the log
         #                                               (the test the re-seat mark below makes): the document carries the provisional
@@ -10686,19 +10752,36 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
         st.update(_carry_decode(doc["carry"]))
         kept = ad.kept_uuids(ad.active_path())
         order = _chrono(ad, kept)
-        carried = dict(st["summaries"])
-        ad._prepass(order, st)
-        if any(b not in ad.by_uuid and st["summaries"].get(b) != carried.get(b) for b in st["summaries"]):
-            # The tail's pre-pass gave a summary to a boundary BEFORE the cut (review of 2026-11-12): a summary whose own
-            # boundary is off the path belongs to the last boundary on the path before it, and when that one lies before the
-            # cut, a cold parse gives its atom this summary's text while the document froze it with its own. Refused as the
-            # tail's shape: the whole parse serves, and offers its document, as after a chain refusal
-            _asm_stat("restore:preCutSummary")
+        mp_ = float(st.get("max_ppt") or 0)
+        if any((ad.ts_of.get(u) or 0) < mp_ for u in order if u in ad.by_uuid and ad.by_uuid[u].get("type") in ("user", "assistant")):
+            # A kept tail record stamped before the carried watermark (review of 2026-11-12): the carry, and every pre-pass
+            # fact it holds (the last boundary walked, the replay window), is valid only for a tail that sorts at or after
+            # everything before the cut, the invariant the fold's `ts` gate keeps for its delta and the writer's stamp guard
+            # keeps for the records present when it wrote. A record appended since can break it (clock skew: a summary under
+            # an attachment stamped between two pre-cut boundaries, which a cold parse gives to the earlier one and the carry
+            # to the later). Refused as the tail's shape: the whole parse serves and its document cuts where the order holds.
+            # Counted against all 232 of the live host's documents before it shipped: none refused (the CLI stamps a summary
+            # 2 to 49 s before its boundary, never before the record the compaction followed)
+            _asm_stat("restore:stampOrder")
             if index is not None:
                 index.release()
             with _ASM_CKPT_LOCK:
                 _ASM_CHAIN_REFUSED_PATHS[rp_] = ("shape", cut_off_)
             return None
+        ad._prepass(order, st)
+        # Every pre-cut boundary atom is held to the summary the pass leaves it (review of 2026-11-12). A summary whose parent
+        # is no boundary belongs to the last boundary walked, and the CLI now hangs its summary under attachments and stamps
+        # it seconds BEFORE its own boundary, so the pass, cold or restored, gives it to the previous boundary, one before the
+        # cut when the cut opens at the compaction; a summary whose boundary is off the path does the same. A cold parse emits
+        # each boundary's atom with the value the pass leaves last, and the frozen atom holds the value it left when the
+        # document was written: the two differ when a tail summary landed since (it moves onto the atom) or LEFT the path
+        # since (a fork at the anchor: the atom goes back to its own), so the comparison is with the frozen atom, never with
+        # the carry, which never holds a tail summary (the refusal of #462 read the carry and parsed 16 sessions whole at one
+        # boot where every frozen atom was right; the first patch read it too and left the forked case stale)
+        rows_of = _asm_boundary_rows(doc, index, prefix)
+        n_ = _asm_patch_pre_cut_summaries({u: st["summaries"].get(u) for u in rows_of}, rows_of, index, prefix)
+        if n_:
+            _asm_stat("restore:summaryPatched", n_)
         atoms = list(ad._emit_fold(order, st, rompuuid, postal_index))
         atoms += ad._absorbed(ad.qatts, kept, st, rompuuid, postal_index)
         entry = {"ad": ad, "st": st, "atoms": atoms, "kept": kept, "landed": landed | ad.landed_text_uuids(),
