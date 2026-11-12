@@ -8113,6 +8113,8 @@ def _asm_patch_pre_cut_summaries(desired, rows_of, index, prefix):
             continue                                       # no atom, or the frozen summary is the one the pass leaves: no decode
         if index is not None:
             row = index._row(k)
+            if row.get("r") is None or index.records[row["r"]][0] != u:
+                continue                                   # the row the map names is not this boundary's: never patch another atom
             sc = dict(row.get("s") or {})
             if sc.get("summary") == want:
                 continue

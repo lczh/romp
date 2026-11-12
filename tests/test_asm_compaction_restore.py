@@ -1301,6 +1301,9 @@ class CompactionRestore(Harness):
         self.assertTrue(self.doc(path), "the document is written: %s" % em.asm_checkpoint_stats()["skipped"])
         at = sum(len(json.dumps(r)) + 1 for r in recs[:recs.index(comp[0])])
         self.assertEqual(doc_cut(path)[1], at, "the premise: the cut opens the tail at the compaction's boundary")
+        written = _doc(path)
+        self.assertEqual((written.get("sumOwner"), "b160" in (written.get("bnd") or {})), (1, True),
+                         "the writer marks the owner rule and keeps the boundary row map beside it")
         self.fresh()
         tree, modes, moved = self._parse_counted(path)
         got, cut = self._served(tree)
@@ -1395,6 +1398,22 @@ class CompactionRestore(Harness):
                          "the fork restores, the frozen atom given its own summary back: %s" % moved)
         self.assertEqual((modes2, moved2.get("full", 0)), (["fold"], 0), "the turn after folds: %s" % moved2)
         self.assertEqual((boot_modes, boot_moved.get("restore:summaryPatched", 0)), (["restore"], 1), "and the restart patches it")
+
+    def test_a_boundary_row_map_naming_another_row_patches_nothing(self):
+        """The review of 2026-11-12: the patch finds a boundary atom's row through the writer's `bnd` map, and on the turns-section
+        path it trusted the row index without checking whose row it is, unlike the atoms-only path. A map that names another
+        record's row (a corrupt or hand-edited document) now patches nothing there: the atom at that row keeps what it had."""
+        path, recs = self._documented("bad-bnd")
+        d = _doc(path)
+        other = next(k for k, r_ in enumerate(d["atoms"]) if json.loads(r_).get("r") is not None
+                     and d["records"][json.loads(r_)["r"]][0] == "a200")
+        d["bnd"]["b160"] = [other, "0" * 16]                       # another record's row, and a digest that forces the compare
+        _write_doc(path, d)
+        self.fresh()
+        got, modes, moved = self._restore_counted(path)
+        a200 = next(a for t in got["turns"] for a in t["atoms"] if a.get("uuid") == "a200")
+        self.assertEqual((modes, moved.get("restore:summaryPatched", 0)), (["restore"], 0), "nothing patched: %s" % moved)
+        self.assertNotIn("summary", a200, "the record the map wrongly names keeps its own atom")
 
     def test_a_tail_record_stamped_before_the_cut_refuses_the_restore(self):
         """The review of 2026-11-12: a summary hung under an attachment and stamped BETWEEN two pre-cut boundaries (clock skew),
