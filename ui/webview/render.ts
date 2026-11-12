@@ -96,7 +96,7 @@ import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
 import { injectedHead, type InjectedSource } from "./injected-source";
 import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, subHeadParts, subWaitTail, openIconSvg, pinIconSvg, type SubMeta, type AgentGist, type AgentGistRow, type GistLine } from "./subagent-view";
 import { previewKind, previewFull, previewVideoUrl, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, installMdImgZoom, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
-import { mdLayout, opensInLightbox, isVideoUrl, mdImgFile, mdImgFileSrc, mdImgPathPass, type MdLayout, type MdImage, type MdPaths } from "./md-images";   // the pictures a message's markdown embeds, off its text, and where its path figures land: the lightbox's sequence (chatImagesFor)
+import { mdLayout, opensInLightbox, isVideoUrl, mdImgFile, mdImgPathPass, type MdLayout, type MdImage, type MdPaths } from "./md-images";   // the pictures a message's markdown embeds, off its text, and where its path figures land: the lightbox's sequence (chatImagesFor)
 import { openFileClick } from "./file-view";                  // a clicked file WITH its gesture (pdf-new-tab.test.ts)
 import { fileLinkRoute, browseRoute, type BrowseRoute } from "./file-route";   // where a file or folder click opens: here, or the Files pane (file-route.test.ts, browse-route.test.ts)
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
@@ -1752,7 +1752,12 @@ function el(tag: string, cls?: string): HTMLElement {
 // rule would strip, so it never passes through DOMPurify; the fill is a post-pass sanitizeMd itself runs,
 // registered by chat-md.ts, the module that installs the grammar.
 
-function md(src: string, repo: string | null = prRepoFor(), paths: MdPaths | null = null): string {
+// `filePics`: a picture whose src names a picture file loads it through the kernel for the session the text belongs to
+// (renderingOwnerSid), which is right only for text that session wrote. An incoming postal body was written by a PEER (the
+// review of #454): its relative path names a file in the peer's folder and an absolute one a file on the peer's machine, and
+// the card carries the sender's name and host but no session id to resolve against, so such a body passes false and its
+// pictures keep their srcs as written (the alt text, as before the path pass).
+function md(src: string, repo: string | null = prRepoFor(), paths: MdPaths | null = null, filePics = true): string {
   // Transcript text (user prompts, assistant output, subagent reports, postal
   // bodies) is UNTRUSTED and `marked` emits raw HTML verbatim, so its output
   // must be sanitized before it ever reaches .innerHTML — otherwise a payload
@@ -1768,7 +1773,7 @@ function md(src: string, repo: string | null = prRepoFor(), paths: MdPaths | nul
     // the sanitizer's verdicts stand and a marked-autolinked GitHub URL is never wrapped twice.
     const clean = sanitizeMd(dirty);   // the sanitized <body>, its math rendered
     linkifyPrRefs(clean, repo);
-    if (canPreview()) mdImgPathPass(clean, renderingOwnerSid ?? activeId, paths);   // a picture whose src is a path loads the file through the kernel, as a path line's figure does (md-images.ts)
+    if (filePics && canPreview()) mdImgPathPass(clean, renderingOwnerSid ?? activeId, paths);   // a picture whose src is a path loads the file through the kernel, as a path line's figure does (md-images.ts)
     mdImgPostPass(clean);   // a markdown image whose URL failed this page life is parked before the browser fetches it (T291c)
     return clean.innerHTML;
   } catch { const d = document.createElement("div"); d.textContent = src; return d.innerHTML; }
@@ -2576,16 +2581,16 @@ function chatImagesFor(sid: string | null | undefined, from?: Element | null): L
     const byMention = (toks: string[]) => toks.map((tok) => ({ tok, m: text.indexOf(tok) }))
       .sort((x, y) => (x.m < 0 ? Infinity : x.m) - (y.m < 0 ? Infinity : y.m));
     const links = ev.pathLinks || {};
-    // a picture the message embeds from a FILE (md-images.ts mdImgFile: a src that is a path, which md() loads through the
-    // kernel) is that file's stop where it is written, with the message's pin: the source its click opens. Taken first, so
-    // the kernel's verified link for the same path (it reads the picture's path as it reads any in the text) adds no figure
-    // the page never draws
-    const files = new Map<MdImage, { path: string; pin?: string }>();
+    // a picture the message embeds from a FILE (md-images.ts mdImgFile: a src that is a path to a picture file, which md()
+    // loads through the kernel) is that file's stop where it is written, with the message's pin: the source its click opens.
+    // Taken first, so the kernel's verified link for the same path (it reads the picture's path as it reads any in the text)
+    // adds no figure the page never draws. A path to any other file is no file here: its src stays as written (below)
+    const files = new Set<MdImage>();
     for (const m of layout.images) {
       const f = m.video ? null : mdImgFile(m.url, { links, pins });
       if (!f) continue;
-      files.set(m, f);
-      if (previewKind(f.path) === "img" && !here.has("p:" + f.path)) here.set("p:" + f.path, { e: { path: f.path, sid: scope.fileSid, pin: f.pin }, at: m.at, rank: rank++ });
+      files.add(m);
+      if (!here.has("p:" + f.path)) here.set("p:" + f.path, { e: { path: f.path, sid: scope.fileSid, pin: f.pin }, at: m.at, rank: rank++ });
     }
     for (const { tok, m } of byMention(ev.spacePaths || [])) add(tok, layout.figureAt(m));
     for (const { tok, m } of byMention(Object.keys(links))) add(links[tok], layout.figureAt(m));
@@ -2593,10 +2598,9 @@ function chatImagesFor(sid: string | null | undefined, from?: Element | null): L
     // the pictures and videos the message embeds where it writes them, then the still each link to a video file renders
     // after its block (md-images.ts videoLinks; render.ts linkifyFileUris draws it there, after the block's path figures)
     for (const m of [...layout.images, ...layout.videoLinks]) {
-      const f = files.get(m);
-      if (f && previewKind(f.path) === "img") continue;   // the file's own stop, above
+      if (files.has(m)) continue;   // the file's own stop, above
       let url = "";
-      try { url = new URL(f ? mdImgFileSrc(f, scope.fileSid) : m.url, document.baseURI).href; } catch { continue; }   // a file the kernel serves, as md() loads it
+      try { url = new URL(m.url, document.baseURI).href; } catch { continue; }   // as the page resolves it
       if (!opensInLightbox(url, m.video ? "video" : "img") || here.has("u:" + url)) continue;   // as a click opens: a picture's schemes, a video's narrower ones
       here.set("u:" + url, { e: m.video ? { url, alt: m.alt, video: true } : { url, alt: m.alt }, at: m.at, rank: rank++ });
     }
@@ -6258,7 +6262,8 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   // 2026-07-25, who watched a card open and snap shut a moment later: a DOM-only toggle died with every push).
   const { gist: summaryText, body: fullMd } = postalHead(ev);   // gist.ts: the caption, else the CLIPPED first line; the fold whenever the gist does not carry the whole message (T294)
   let body: HTMLElement | null = null;
-  if (fullMd) { body = el("div", "notice-md md"); body.innerHTML = md(fullMd, postalRepoFor(ev)); highlight(body); linkTerms(body); }   // a mail body links the reader's group's terms (T351 stage 2; the sender's group is a later refinement)
+  // …and its pictures of files load only when this session wrote it (md's filePics): a peer's paths name the peer's disk
+  if (fullMd) { body = el("div", "notice-md md"); body.innerHTML = md(fullMd, postalRepoFor(ev), null, ev.direction === "out"); highlight(body); linkTerms(body); }   // a mail body links the reader's group's terms (T351 stage 2; the sender's group is a later refinement)
   // an incoming QUESTION opens by default: a reply is owed, and the whole ask is what you need to read
   const owed = !!intent && intent.cls === "question" && ev.direction === "in";
   const turn = notice({ src, glyph: "peer", gist: summaryText, meta, body, open: owed,

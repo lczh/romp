@@ -15,12 +15,19 @@ const CHAT_CSS = fs.readFileSync(path.join(UI, "styles.css"), "utf8");
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "bin", "romp-kernel"), "utf8");
 
 test("preview.ts: kind classification, kernel /file URL, and hide-but-heal unverified renders", () => {
-  // the client's renderable-extension list must stay in step with the kernel's _PREVIEW_MIME
-  assert.match(PREVIEW, /IMG_EXT = new Set\(\["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"\]\)/);
+  // the client's renderable-extension list must stay in step with the kernel's _PREVIEW_MIME. The picture list lives in
+  // md-images.ts beside the video list since 2026-11-12 (a markdown picture loads only a picture file, mdImgFile), and
+  // previewKind reads it from there: one list, never a copy
+  const MDI = fs.readFileSync(path.join(UI, "md-images.ts"), "utf8");
+  assert.match(MDI, /export const IMG_EXT: ReadonlySet<string> = new Set\(\["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"\]\);/);
+  assert.match(KERNEL, /_IMG_MIME = \{"\.png": "image\/png", "\.jpg": "image\/jpeg", "\.jpeg": "image\/jpeg",\s*"\.gif": "image\/gif", "\.webp": "image\/webp", "\.bmp": "image\/bmp", "\.svg": "image\/svg\+xml"\}/,
+               "the kernel's picture types, extension for extension");
+  assert.match(PREVIEW, /import \{[^}]*\bIMG_EXT\b[^}]*\} from "\.\/md-images";/);
+  assert.doesNotMatch(PREVIEW, /const IMG_EXT\b/, "no second copy in preview.ts");
+  assert.match(PREVIEW, /if \(IMG_EXT\.has\(ext\)\) return "img";/);
   assert.match(KERNEL, /_PREVIEW_MIME = dict\(_IMG_MIME, \*\*\{"\.pdf": "application\/pdf"\}, \*\*_VIDEO_MIME\)/,
                "kernel allowlist = image mimes + pdf + video; the client mirrors it");
   // …and its videos (2026-10-21): the client's VIDEO_EXT (md-images.ts) is the kernel's _VIDEO_MIME, extension for extension
-  const MDI = fs.readFileSync(path.join(UI, "md-images.ts"), "utf8");
   assert.match(MDI, /export const VIDEO_EXT: ReadonlySet<string> = new Set\(\["mp4", "webm", "mov"\]\);/);
   assert.match(KERNEL, /_VIDEO_MIME = \{"\.mp4": "video\/mp4", "\.webm": "video\/webm", "\.mov": "video\/quicktime"\}/);
   assert.match(PREVIEW, /if \(VIDEO_EXT\.has\(ext\)\) return "video";/);

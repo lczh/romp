@@ -812,10 +812,10 @@ const OUTLINE = read("fleet.ts");
 
 test("the chat links inside md(): the sanitized tree is walked before it serializes, against the owning session's repo", () => {
   assert.match(RENDER, /import \{ linkifyPrRefs, senderPrRepo, postalSenderHost \} from "\.\/pr-links";/);
-  assert.match(RENDER, /function md\(src: string, repo: string \| null = prRepoFor\(\), paths: MdPaths \| null = null\): string \{/);
+  assert.match(RENDER, /function md\(src: string, repo: string \| null = prRepoFor\(\), paths: MdPaths \| null = null, filePics = true\): string \{/);
   const mdFn = RENDER.match(/function md\(src: string[^\n]*?\): string \{[\s\S]*?\n\}/)?.[0] || "";
   // sanitizeMd (md-sanitize.ts) hands back the sanitized <body>; the walk runs on it before our own serialization
-  assert.match(mdFn, /const clean = sanitizeMd\(dirty\);[^\n]*\n\s*linkifyPrRefs\(clean, repo\);\s*\n\s*if \(canPreview\(\)\) mdImgPathPass\(clean, [^\n]*\n\s*mdImgPostPass\(clean\);[^\n]*\n\s*return clean\.innerHTML;/,
+  assert.match(mdFn, /const clean = sanitizeMd\(dirty\);[^\n]*\n\s*linkifyPrRefs\(clean, repo\);\s*\n\s*if \(filePics && canPreview\(\)\) mdImgPathPass\(clean, [^\n]*\n\s*mdImgPostPass\(clean\);[^\n]*\n\s*return clean\.innerHTML;/,
     "the sanitizer's own serialization is replaced by ours, after the walk: the sanitizer's verdicts stand");
   assert.match(RENDER, /const id = sid \?\? renderingOwnerSid \?\? renderingSid \?\? activeId;/, "the owning session, as relative paths resolve");
   assert.doesNotMatch(RENDER, /installPrLinkOpener/, "the chat's own a[href] delegate already opens every absolute-scheme anchor");
@@ -828,7 +828,9 @@ test("the session frame's githubRepo rides the Session and survives a chatTail d
 
 test("postal bodies link against the SENDER's frame-known repo only: outbound = the writer's own, inbound = senderPrRepo over the session map by the card's host and name, never the reader's as a fallback", () => {
   // 2026-09-08 (the notice-vocabulary pass): ONE render path — the full message is the notice body (the summary is the head)
-  assert.match(RENDER, /body\.innerHTML = md\(fullMd, postalRepoFor\(ev\)\);/);   // T294: the fold's markdown is postalHead's body (the message when the gist does not carry all of it)
+  // T294: the fold's markdown is postalHead's body (the message when the gist does not carry all of it); its pictures of files
+  // load only on OUTBOUND mail, the one body the reading session wrote (the review of #454: a peer's paths name the peer's disk)
+  assert.match(RENDER, /body\.innerHTML = md\(fullMd, postalRepoFor\(ev\), null, ev\.direction === "out"\);/);
   const fn = RENDER.match(/function postalRepoFor\([\s\S]*?\n\}/)?.[0] || "";
   assert.match(fn, /if \(ev\.direction === "out"\) return prRepoFor\(\);/);
   assert.match(fn, /const cardHost = hostOf\(renderingOwnerSid \?\? renderingSid \?\? activeId \?\? ""\);/,

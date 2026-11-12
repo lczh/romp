@@ -283,7 +283,7 @@ test("a src that is a path names a file on the session's disk: absolute, under h
   assert.deepEqual(mdImgFile("docs/figure.png"), { path: "docs/figure.png" }, "the kernel resolves it against the session's cwd");
   assert.deepEqual(mdImgFile("./docs/../docs/figure.png#top"), { path: "docs/figure.png" }, "normalised, the fragment dropped");
   assert.deepEqual(mdImgFile("/tmp/notes-api/p95%20split.png"), { path: "/tmp/notes-api/p95 split.png" }, "marked's percent-encoding decoded");
-  assert.deepEqual(mdImgFile("constructor"), { path: "constructor" }, "a name that is an Object key is still only a name");
+  assert.deepEqual(mdImgFile("constructor.png"), { path: "constructor.png" }, "a name is only a name");
 });
 
 test("a src the browser fetches itself, or the kernel's file route already, is no file", () => {
@@ -299,7 +299,8 @@ test("a path the kernel verified names its file and carries the message's mentio
   assert.deepEqual(mdImgFile("./figs/a.png", paths), { path: "figs/a.png" }, "the token as written, mapped to the kernel's file; no pin, none carried");
   assert.deepEqual(mdImgFile("/tmp/p95%20split.png", paths), { path: "/tmp/p95 split.png", pin: "v2" }, "found by its decoded token");
   assert.deepEqual(mdImgFile("docs/other.png", paths), { path: "docs/other.png" }, "an unverified path still loads, the kernel resolving it");
-  assert.deepEqual(mdImgFile("toString", { links: {}, pins: {} }), { path: "toString" }, "an inherited key is never a link");
+  const inherited = Object.create({ "a.png": "/notes-api/other.png" }) as Record<string, string>;
+  assert.deepEqual(mdImgFile("a.png", { links: inherited, pins: inherited }), { path: "a.png" }, "an inherited key is never a link");
 });
 
 test("the address: this kernel's /file for a local session, a remote session's /remote/<host>/file with its bare sid, pinned when pinned", () => {
@@ -307,6 +308,18 @@ test("the address: this kernel's /file for a local session, a remote session's /
   assert.equal(mdImgFileSrc({ path: "docs/figure.png", pin: "v1" }, "gpu1:" + WEB),
     "/remote/gpu1/file?path=docs%2Ffigure.png&sid=" + WEB + "&pin=v1", "the owning machine's kernel, through this one's relay");
   assert.equal(mdImgFileSrc({ path: "~/figs/a.png" }, null), "/file?path=~%2Ffigs%2Fa.png", "no session: the path alone");
+});
+
+// ── only a PICTURE file (the review of #454): `![x](~/.claude/.credentials.json)` or `![x](.env)` made the browser fetch the
+// file on render (/file answers a text file with its text, and the error handler retried it). A path line's figure fetches
+// pictures and videos only, and a markdown <img> shows no video, so the pass loads picture files alone and leaves every
+// other src exactly as written.
+test("a src that names a file which is no picture is no file: it stays as written, the kernel never asked for it", () => {
+  for (const u of [".env", "~/.claude/.credentials.json", "docs/notes.json", "/tmp/notes-api/run.log", "figs/plot", "README.md",
+    "docs/report.pdf", "clips/run.mp4", "figs/plot.png.txt", "figs/plot.png?raw=1", "figs.png/notes"]) assert.equal(mdImgFile(u), null, JSON.stringify(u));
+  assert.equal(mdImgFile("docs/notes.json", { links: { "docs/notes.json": "docs/notes.json" }, pins: {} }), null, "a path the kernel verified, the same");
+  for (const ext of ["png", "PNG", "jpg", "jpeg", "gif", "webp", "bmp", "svg"])
+    assert.deepEqual(mdImgFile("figs/plot." + ext), { path: "figs/plot." + ext }, "a picture's extension, any case: " + ext);
 });
 
 // a sanitized body, as far as the pass reads it: its <img>s with their attributes and dataset
@@ -345,4 +358,11 @@ test("md()'s pass on a remote session's message: the remote kernel's file, throu
   assert.equal(imgs[0].dataset.mdSid, "gpu1:" + WEB, "the full sid, host prefix kept, for the lightbox's own fetch");
   mdImgPathPass(root, "gpu1:" + WEB);
   assert.equal(imgs[1].attrs.src, "/remote/gpu1/file?path=docs%2Ffigure.png&sid=" + WEB + "&pin=v1", "a second pass wraps nothing twice");
+});
+
+test("md()'s pass leaves a src naming a file that is no picture exactly as written, and marks nothing", () => {
+  const { imgs, root } = bodyOf([".env", "~/.claude/.credentials.json", "docs/notes.json", "figs/plot.png"]);
+  mdImgPathPass(root, WEB, { links: { "docs/notes.json": "docs/notes.json" }, pins: {} });
+  assert.deepEqual(imgs.map((i) => i.attrs.src), [".env", "~/.claude/.credentials.json", "docs/notes.json", "/file?path=figs%2Fplot.png&sid=" + WEB]);
+  assert.deepEqual(imgs.map((i) => i.dataset.mdPath), [undefined, undefined, undefined, "figs/plot.png"], "no file rides on them: a click opens no file");
 });
