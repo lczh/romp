@@ -6872,6 +6872,17 @@ def _asm_lazy_uuids(e):
                 yield a["uuid"]
 
 
+_ASM_RELEASE_HOOK = [None]        # the kernel's listener for the end of a leaf's use (set_assembly_release_hook)
+
+
+def set_assembly_release_hook(fn):
+    """Kernel wiring (once, at its import): `fn(realpath, rompuuid or None)` is called at every release_assembly, after the
+    leaf's entries and its noted rebuilds are gone, so a rebuild of that leaf running OUTSIDE this process (the document
+    worker) is ended too: nothing will restore from its document. The hook must not block (a release runs under its caller's
+    locks) and a raise from it never fails the release (said once per kind). None removes it."""
+    _ASM_RELEASE_HOOK[0] = fn
+
+
 def release_assembly(leaf_path, rompuuid=None):
     """Drop a leaf's assembly entries at an event that ends its use (2026-10-01): a /clear or a resume fork retiring the
     leaf (the judges' _note_leaf), a dead timeline lane, the last viewer of a subagent closing. Before, nothing left at
@@ -6905,6 +6916,13 @@ def release_assembly(leaf_path, rompuuid=None):
     if popped:
         _asm_stat("released", len(popped))
     asm_rebuild_drop(leaf_path, rompuuid)            # the leaf's use ended: no document is rebuilt for it
+    hook = _ASM_RELEASE_HOOK[0]
+    if hook is not None:                             # nor does one being built in another process carry on (the document worker)
+        try:
+            hook(rp, None if rompuuid is None else str(rompuuid))
+        except Exception as e:                       # noqa: BLE001 - a trim must never fail the event it rides
+            _say_once("assembly checkpoint: the release hook raised (%s: %s; said once per kind); the release stands"
+                      % (type(e).__name__, str(e)[:120]))
     return len(popped)
 
 
@@ -9391,35 +9409,26 @@ def asm_refresh_release(leaf_path, rompuuid, sdk_human=False):
     _asm_bg_wake()                                        # a rebuild waiting for the claim back takes it
 
 
-def asm_refresh_document(leaf_path, rompuuid, sdk_human=False, candidate_files=None, states=None, postal_log=None, now=None,
-                         rebuild=None):
-    """The refresh a claim granted (asm_refresh_claim): a WHOLE parse of the leaf on the private road, which installs no entry and
-    takes no key lock, so the leaf's restored entry and every reader of it carry on untouched, then the writer over that parse,
-    so the document's cut moves up to the turn before the last settled one. Returns True when a document was written.
-    `rebuild`, when given, is the reason a parse noted the leaf for a document REBUILD (asm_rebuild_claim granted it: "refused",
-    "noDocument" or "overCap"): the same road for a leaf with no document at all, counted under asmCheckpoint.rebuild, said once
-    per leaf, and a decline memoized at the leaf's stat (see _ASM_REBUILD).
+def asm_build_document(leaf_path, rompuuid, sdk_human=False, candidate_files=None, states=None, postal_log=None, now=None,
+                       rebuild=None, refuse=None):
+    """The document-building core of a refresh or a rebuild, over plain arguments and nothing of the caller's process: a WHOLE
+    parse of the leaf on the private road (no entry installed, no key lock), then the writer over that parse. One
+    implementation for the two places that run it (2026-11-12): asm_refresh_document on a thread of the kernel, and the
+    document worker (kernel/doc_worker.py), a process of its own that the kernel hands the same arguments. It touches no
+    claim, no counter of the refresh or the rebuild and no live entry: the caller books the outcome (asm_document_handback).
+    `refuse`, when given, is asked once at the replace, after the parse and the encode: a true answer (its text is the
+    reason) publishes nothing and the outcome is `failed` (the worker's memory bound: a document built while an allocation
+    may have failed is not one to keep). Returns {"outcome": written | refused | declined | moot | failed, "wrote", "reason"
+    (the writer's skip reason or the error), "tb" (a rebuild's traceback), "newPre" (the new document's pre-cut bytes) and
+    "docCut" (the written document's cut, as the private entry holds it)}: JSON-shaped, since the worker prints it."""
+    wrote, outcome, new_pre, reasons, tb, dc, refused = False, "failed", None, [], None, None, []
 
-    Why it exists (2026-10-01): a restored entry's cut moved only through a whole parse that REPLACED the entry (a demotion,
-    a compaction past the share), so a session restored at every boot kept the document it first got and the tail past its
-    cut grew without bound: a 133 MB session restored a 36 MB tail five days after its document was written, and the first
-    chat build after every boot rendered all 545 turns of it. Here the whole parse runs off the pusher, on the caller's own
-    thread, and only at a settle once the share is reached; the entry in hand is left as it is for this process and the
-    next boot restores from the new document. After the attempt, written or not, the entry carries the new baseline
-    (`refreshAt`: the new document's pre-cut bytes and the leaf's size when the refresh began), so the next refresh is due only
-    once the leaf has grown past that point by the share again: a cut that cannot move (one long open turn) costs a logarithm
-    of the growth, never a whole parse per settle. The claim is released whatever happens."""
-    key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
-    t0 = time.perf_counter()
-    wrote, outcome, new_pre, reasons = False, "failed", None, []
-    with _ASM_LOCK:
-        live = _ASM_CACHE.get(key)
-    st0 = _asm_rebuild_stat(leaf_path)
-    size0 = st0[0] if st0 is not None else None
-    tb, gated0, claim0 = None, getattr(_ASM_BG_TL, "gated", False), getattr(_ASM_BG_TL, "claim", None)
-    if rebuild is not None:
-        _ASM_BG_TL.gated = True                           # a rebuild waits for the pusher's sleep at its chunk points, and lends
-        _ASM_BG_TL.claim = key                            #  its claim to a refresh while it waits (_asm_bg_yield)
+    def stands():                                         # asked at the replace, after the writer's last wait
+        why = refuse() if refuse is not None else None
+        if why:
+            refused.append(str(why))
+            return True
+        return rebuild is not None and asm_document_stands(leaf_path)
     try:
         _asm_bg_yield()                                   # (a cycle may have begun since the cycle end that started it)
         if rebuild is not None and asm_document_stands(leaf_path):
@@ -9438,9 +9447,11 @@ def asm_refresh_document(leaf_path, rompuuid, sdk_human=False, candidate_files=N
                     wrote = bool(asm_checkpoint_write(leaf_path, rompuuid, sdk_human, tree=tree, reason_out=reasons,
                                                       who="refresh" if rebuild is None else "rebuild", from_entry=priv[0],
                                                       held_readers=priv[0].get("heldReaders"),
-                                                      stand_down=(lambda: asm_document_stands(leaf_path)) if rebuild is not None
-                                                      else None))   # and once more at the replace, after the writer's last wait
-                if not wrote and rebuild is not None and reasons and reasons[-1] == "moot":
+                                                      stand_down=stands if (rebuild is not None or refuse is not None) else None))
+                if refused:
+                    outcome = "failed"                    # the caller's bound said no at the replace: nothing was published
+                    reasons.append(refused[-1])
+                elif not wrote and rebuild is not None and reasons and reasons[-1] == "moot":
                     outcome = "moot"
                 else:
                     outcome = "written" if wrote else ("refused" if rebuild is None else "declined")
@@ -9452,27 +9463,102 @@ def asm_refresh_document(leaf_path, rompuuid, sdk_human=False, candidate_files=N
         else:
             reasons.append(repr(e))
             tb = traceback.format_exc()
+    return {"outcome": outcome, "wrote": bool(wrote), "reason": reasons[-1] if reasons else None, "tb": tb, "newPre": new_pre,
+            "docCut": list(dc) if dc else None}
+
+
+def asm_document_job(leaf_path, rompuuid, sdk_human=False):
+    """The ticket of one document job, taken BEFORE its parse begins and handed to asm_document_handback when it ends: the
+    claim's key, the leaf's live entry and stat as the job began, and the two clocks its bookkeeping reads (the job's
+    duration; a refusal stamped before the job began is one its document retires)."""
+    key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
+    t0 = time.perf_counter()
+    with _ASM_LOCK:
+        live = _ASM_CACHE.get(key)
+    return {"leaf": leaf_path, "rompuuid": rompuuid, "key": key, "live": live, "st0": _asm_rebuild_stat(leaf_path), "t0": t0,
+            "mono": time.monotonic()}
+
+
+def asm_document_handback(job, rebuild, res, external=False):
+    """A document job is over (`job`: asm_document_job's ticket; `res`: asm_build_document's result, None when the job never
+    produced one, which reads as failed): the entry's refresh baseline moves (a refresh; see asm_refresh_document), the shared
+    claim is released, the outcome is counted (a refresh under asmCheckpoint.refresh, a rebuild through _asm_rebuild_done,
+    which says it and memoizes a decline) and the rebuild starter is woken. One implementation for both roads.
+
+    `external`: ANOTHER PROCESS ran the build (the document worker), so this process's writer never ran and the three things
+    it keeps per leaf are brought level here. The oversize verdict's memo is dropped (read once per leaf per process: the
+    worker's writer may have removed the verdict file, after a write, or written one, past the cap), so the next question
+    reads the file. After a write, the cut of the document last published for the leaf is recorded (what the refusal road
+    compares its offered rewrite against), and a refusal of the leaf's previous document recorded before this job began is
+    retired (a fresh document stands: a later parse with none is noDocument, not an old refusal). Only one stamped before
+    the job BEGAN: the worker's replace happened at some moment of the job this process cannot place, and a refusal that
+    stays one job too long costs a label on /perf, never a parse. asmCheckpoint.written stays this process's writer's own
+    count (the worker's writes are under docWorker and rebuild.written). The restore is not done here: the next parse of
+    the leaf finds the document and restores from it, as after any writer."""
+    res = res if isinstance(res, dict) else {}
+    key, live, st0 = job["key"], job["live"], job["st0"]
+    outcome, new_pre = str(res.get("outcome") or "failed"), res.get("newPre")
+    size0 = st0[0] if st0 is not None else None
+    if external:
+        dc = res.get("docCut")
+        with _ASM_CKPT_LOCK:
+            _ASM_OVERSIZE.pop(key[0], None)
+            if outcome == "written":
+                if dc and len(dc) > 4:
+                    _ASM_LAST_WRITE_CUT[key[0]] = int(dc[4])
+                rv = _ASM_CKPT_REFUSED.get(key[0])
+                if rv is not None and rv[1] < job["mono"]:
+                    _ASM_CKPT_REFUSED.pop(key[0], None)
+    with _ASM_LOCK:
+        if live is not None and size0 is not None and rebuild is None:   # the baseline moves on every attempt: a refusal or a
+            pre0 = (live.get("refreshAt") or (live.get("docPre") or 0, 0))[0]   # failure is not retried at the next settle, only
+            live["refreshAt"] = (int(new_pre) if new_pre is not None else int(pre0), int(size0))   # after the next share
+        if _ASM_REFRESH["inflight"] == key:
+            _ASM_REFRESH["inflight"] = None
+        if rebuild is not None and _ASM_REFRESH["paused"] == key:
+            _ASM_REFRESH["paused"] = None                 # (a rebuild that left its gate without the claim back: none is lent now)
+    ms = (time.perf_counter() - job["t0"]) * 1000.0
+    if rebuild is None:
+        with _ASM_CKPT_LOCK:
+            _ASM_REFRESH_STATS[outcome] = _ASM_REFRESH_STATS.get(outcome, 0) + 1
+            _ASM_REFRESH_STATS["ms"] += ms
+    else:
+        _asm_rebuild_done(job["leaf"], job["rompuuid"], rebuild, outcome, st0, ms, res.get("reason"), tb=res.get("tb"))
+    _asm_bg_wake()                                        # the claim is back: a waiting rebuild takes it (a refresh ran on its lent
+    #                                                       claim), and the rebuild starter starts the next one, a retry the outcome
+    #                                                       above put back on the table included (2026-11-12)
+
+
+def asm_refresh_document(leaf_path, rompuuid, sdk_human=False, candidate_files=None, states=None, postal_log=None, now=None,
+                         rebuild=None):
+    """The refresh a claim granted (asm_refresh_claim): a WHOLE parse of the leaf on the private road, which installs no entry and
+    takes no key lock, so the leaf's restored entry and every reader of it carry on untouched, then the writer over that parse,
+    so the document's cut moves up to the turn before the last settled one. Returns True when a document was written.
+    `rebuild`, when given, is the reason a parse noted the leaf for a document REBUILD (asm_rebuild_claim granted it: "refused",
+    "noDocument" or "overCap"): the same road for a leaf with no document at all, counted under asmCheckpoint.rebuild, said once
+    per leaf, and a decline memoized at the leaf's stat (see _ASM_REBUILD).
+
+    Why it exists (2026-10-01): a restored entry's cut moved only through a whole parse that REPLACED the entry (a demotion,
+    a compaction past the share), so a session restored at every boot kept the document it first got and the tail past its
+    cut grew without bound: a 133 MB session restored a 36 MB tail five days after its document was written, and the first
+    chat build after every boot rendered all 545 turns of it. Here the whole parse runs off the pusher, on the caller's own
+    thread, and only at a settle once the share is reached; the entry in hand is left as it is for this process and the
+    next boot restores from the new document. After the attempt, written or not, the entry carries the new baseline
+    (`refreshAt`: the new document's pre-cut bytes and the leaf's size when the refresh began), so the next refresh is due only
+    once the leaf has grown past that point by the share again: a cut that cannot move (one long open turn) costs a logarithm
+    of the growth, never a whole parse per settle. The claim is released whatever happens."""
+    job = asm_document_job(leaf_path, rompuuid, sdk_human)
+    res, gated0, claim0 = None, getattr(_ASM_BG_TL, "gated", False), getattr(_ASM_BG_TL, "claim", None)
+    if rebuild is not None:
+        _ASM_BG_TL.gated = True                           # a rebuild waits for the pusher's sleep at its chunk points, and lends
+        _ASM_BG_TL.claim = job["key"]                     #  its claim to a refresh while it waits (_asm_bg_yield)
+    try:
+        res = asm_build_document(leaf_path, rompuuid, sdk_human, candidate_files=candidate_files, states=states,
+                                 postal_log=postal_log, now=now, rebuild=rebuild)
     finally:
         _ASM_BG_TL.gated, _ASM_BG_TL.claim = gated0, claim0
-        with _ASM_LOCK:
-            if live is not None and size0 is not None and rebuild is None:   # the baseline moves on every attempt: a refusal or a
-                pre0 = (live.get("refreshAt") or (live.get("docPre") or 0, 0))[0]   # failure is not retried at the next settle, only
-                live["refreshAt"] = (new_pre if new_pre is not None else int(pre0), int(size0))   # after the next share
-            if _ASM_REFRESH["inflight"] == key:
-                _ASM_REFRESH["inflight"] = None
-            if rebuild is not None and _ASM_REFRESH["paused"] == key:
-                _ASM_REFRESH["paused"] = None             # (a rebuild that left its gate without the claim back: none is lent now)
-        ms = (time.perf_counter() - t0) * 1000.0
-        if rebuild is None:
-            with _ASM_CKPT_LOCK:
-                _ASM_REFRESH_STATS[outcome] += 1
-                _ASM_REFRESH_STATS["ms"] += ms
-        else:
-            _asm_rebuild_done(leaf_path, rompuuid, rebuild, outcome, st0, ms, reasons[-1] if reasons else None, tb=tb)
-        _asm_bg_wake()                                    # the claim is back: a waiting rebuild takes it (a refresh ran on its lent
-        #                                                   claim), and the rebuild starter starts the next one, a retry the outcome
-        #                                                   above put back on the table included (2026-11-12)
-    return wrote
+        asm_document_handback(job, rebuild, res)
+    return bool(res and res.get("wrote"))
 
 
 # THE DOCUMENT REBUILD (2026-10-23). A whole parse that finds a leaf's document REFUSED (every document a version bump outdates is
