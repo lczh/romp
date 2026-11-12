@@ -2365,10 +2365,12 @@ parse that finds the leaf's document refused (a version bump refuses and
 removes every older document at the deploy boot) or missing notes the leaf,
 once that parse is done, when it is at least the rebuild floor
 (`ROMP_ASM_REBUILD_MIN_KB`, 1 MB by default, the young-session floor's
-value). At the end of each pusher cycle, as the pusher goes to sleep until
-its next wake, the kernel starts the rebuild of the largest noted leaf on a
-thread of its own at the lowest CPU priority: the refresh's private whole parse, then the writer with
-its proofs and its atomic replace. Rebuilds and refreshes share one claim,
+value). Whenever the background gate below opens, the kernel's rebuild
+starter starts the rebuild of the first noted leaf on a thread of its own at
+the lowest CPU priority: the refresh's private whole parse, then the writer
+with its proofs and its atomic replace. The first is a leaf of the session a
+page most recently opened or switched to, if any is noted, and otherwise the
+largest. Rebuilds and refreshes share one claim,
 so one whole parse runs at a time, and no reader of the leaf waits on it. A
 leaf the converge pass can still write from the parse's own read is left to
 that pass; so is a subagent's own transcript, and a leaf that is gone, has a
@@ -2388,15 +2390,25 @@ The rebuild runs only while the kernel is otherwise quiet (the review of PR
 the interpreter, not on a core, and in a lab a page's 40 MB whole parse took
 2.1 times as long beside a rebuild, with full collections of 0.65 to 1.04 s
 over the rebuild's heap. So a background gate shuts as each pusher cycle
-begins, opens as each one ends, and stays shut while any page, judge or
-boot parse of a session runs and while a page connect's push runs. Until
+begins, opens as each one ends, and stays shut while a page's parse of a
+session runs and while a page connect's push runs. Until
 the review of PR #370 only an idle cycle's end (one that sent nothing and
 changed nothing) opened it: on a host of 65 sessions, where a tenth of the
 cycles are idle, that left the rebuild about 45 s an hour, and the 824 MB
 session's rebuild took about two hours, all 28 transcripts over 20 MiB
 nine to eleven, longer than the kernel ran between deploys. The pusher
 sleeps after a busy cycle as much as after an idle one, so it loses
-nothing. No
+nothing. Until 2026-11-12 a rebuild started only at the cycle's end itself,
+and a parse on another thread that held the gate shut at that instant cost a
+whole cycle: on a host whose cycles ran 88 to 565 s after a version bump,
+three cycle ends in 13.5 minutes each met the timeline builder mid-parse, and
+no rebuild started while 79 leaves waited. The starter now waits on the gate
+itself and starts the next rebuild at every opening, at every leaf a parse
+notes and at every release of the shared claim. The parses of the kernel's
+background loops (the timeline builder, the judges, the jobs pass, the boot's
+warm parses, told apart by their threads' stage marks) no longer shut it:
+nobody waits on them, and their whole parses ran for minutes exactly while
+the documents were missing. No
 rebuild starts behind a shut gate, and a running one waits at its chunk
 points: before its parse, after the read, every 4,096 atoms of the emit,
 after the parse, and between the writer's phases (the cut search, the rows,
@@ -2417,6 +2429,29 @@ worked. Every writer
 stages its document and its sidecar under a temp name of its own process and
 thread.
 
+A document past the cap is built once per transcript (2026-11-12). The
+writer keeps its verdict beside where the document would be (a
+`.asm.oversize` file: the transcript's device, inode and size before the
+refused cut, the document's compressed size and record count, and the
+document version), and while the verdict holds, no road builds that
+transcript's document again: the settle's and the converge pass's writes turn
+it away before any work, a parse does not note it for a rebuild, and a
+refresh is not claimed. It holds while the transcript is the same file and no
+shorter, the version is unchanged and the cap is still under the document's
+size, since a document only grows with its transcript; a transcript replaced
+or truncated, a version bump or a raised cap is looked at again, a document
+written for the transcript removes the verdict, and the boot sweep removes it
+with its transcript. Before it the verdict lived on the parse's entry and named
+the cut, which moves at every settled turn: a host's 994 MB session, whose
+document ran past the old 16 MB cap, held the one document writer for about
+382 s at each settle, and no other document was written meanwhile. The cap
+itself rose from 16 to 64 MB then: a document runs about 106 compressed bytes
+per record before its cut, so 16 MB stopped at about 160,000 records, half a
+GB of transcript. In a lab over synthetic transcripts of 3.4 KB a record, the
+963 MB one's whole parse took 28 s and 3.2 GB at its peak, and its restore
+from the 30 MB document 4.3 s and 0.5 GB; 64 MB covers about 630,000
+records, two GB of transcript.
+
 A compaction after the document restores from it, the tail read from the cut
 taking the compaction in, while the tail past the cut is under an eighth of
 the pre-cut bytes and nothing else in the same write parses whole for its own
@@ -2432,8 +2467,9 @@ document says so, `postalWait`; one written before that field existed counts
 as written while an author waited): the document carries the provisional
 author, and only a whole parse corrects it once the log catches up; a rewrite
 under the cut's guard, a shrunk or moved file, another session, other inputs,
-a wrong version, a corrupt or unprovable document, or a document past 16 MB
-each mean a whole parse, counted per reason in `/perf` and said once. The
+a wrong version, a corrupt or unprovable document, or a document past 64 MB
+(`ROMP_ASM_CKPT_CAP_MB`) each mean a whole parse, counted per reason in
+`/perf` and said once. The
 agent files (the subagents' transcripts) get no document yet; that is the next
 stage's. The gain is one tree per session, about
 a quarter of the record cost the T311 report measured (0.25 GB of 6.6); the
@@ -4003,7 +4039,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   index over the rows and the pre-cut turns; `seed`: the adapter's pre-cut
   graph facts; `total`: the whole restore, entry to return, so the unnamed
   remainder, the tail's parse through the seeded adapter, is `total` minus
-  the four), so a boot read names the mover; since document version 6 the
+  the four), so a boot read names the mover; `oversizeHeld`, the writes and
+  rebuild notes an oversize verdict turned away before any build; since
+  document version 6 the
   atom rows are stored as pre-serialized JSON strings, so the decode builds
   strings, not dicts, and the index takes each row's bytes with no re-encode
   (the deploy boot of that version refuses every standing document as
@@ -4016,8 +4054,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   time); the refresh's own parse counts under `parse` as `private`.
   `rebuild`: the documents rebuilt for leaves a parse found without one
   (`noted`, `claimed`, then `written`, `declined`, `failed`, `retry` or
-  `moot`; `gone`, `small`, `released` and `subagent` for leaves that left the
-  table unrebuilt; `bytes` and `ms` of the rebuilt leaves; `yields` and
+  `moot`; `gone`, `small`, `released`, `subagent` and `oversize` (an
+  oversize verdict stands, so the leaf was never noted or left the table) for
+  leaves that left the table unrebuilt; `bytes` and `ms` of the rebuilt leaves; `yields` and
   `yieldMs`, the rebuild's waits at its chunk points for the pusher's next
   sleep and their wall, and `lent`, those a refresh on the lent claim
   prolonged; `pending`, the table's size now, and `waiting`, 1 while a

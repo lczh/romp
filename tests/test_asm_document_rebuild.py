@@ -23,6 +23,11 @@ about 45 s an hour); a rebuild waiting at its gate lends the shared claim to a s
 goes on; and a document a refusal removes under an unchanged leaf is written again by the converge pass, which had set the
 leaf aside for as long as the leaf stood unchanged.
 
+And 2026-11-12: the rebuild starts at every opening of the gate (a page parse that held it shut through the pusher's cycle end
+no longer costs a whole cycle), at a note and at a release of the claim; the kernel's background loops' parses leave the gate
+open; a document past the cap is built once per transcript (its verdict kept on disk, holding while the transcript only grows);
+and the session a page opened is rebuilt before larger ones.
+
 Synthetic only: invented notes-api text, placeholder uuids, private synthetic sids, a temp state root with session hosts
 off, and no CLI (ROMP_CLAUDE_BIN is /bin/false)."""
 import contextlib
@@ -1040,6 +1045,212 @@ class FollowerFloor(Harness):
         self.assertGreater(cut, 0)
         m = km.build_session(SID, NOW + 3, {})
         self.assertEqual(m["floor"], 0, "followed: the index client needs the whole list")
+
+
+class _Starter:
+    """The kernel's rebuild starter (_asm_rebuild_starter, 2026-11-12) on a thread of its own for one test, under a private stop
+    event so the kernel's own loop stop is never touched; a no-op on the base, which had no starter (its rebuild started only at
+    a pusher cycle's end)."""
+
+    def __init__(self, case):
+        self.fn = getattr(km, "_asm_rebuild_starter", None)
+        self.th = None
+        if self.fn is None:
+            return
+        stop = threading.Event()
+        patcher = mock.patch.object(km, "_LOOPS_STOP", stop)
+        patcher.start()
+        self.th = threading.Thread(target=self.fn, name="asm-rebuild-start", daemon=True)
+        self.th.start()
+        assert _until(lambda: km._ASM_REBUILD_STARTER["running"], 10), "the starter entered its loop"
+
+        def _end():
+            stop.set()
+            em.asm_rebuild_wait_release()
+            self.th.join(timeout=30)
+            patcher.stop()
+        case.addCleanup(_end)
+
+
+class TheGateOpeningStartsTheRebuild(Harness):
+    """2026-11-12: a rebuild started only AT the pusher's cycle end, so a gate a parse on another thread held shut at that one
+    instant waited for the next cycle's end, and nothing looked again when the gate opened a moment later (on a host whose
+    cycles ran 88 to 565 s after a version bump, three cycle ends in 13.5 minutes each met the timeline builder mid-parse, and
+    no rebuild ran while 79 leaves waited). The rebuild starter now starts the next rebuild at every opening of the gate, at a
+    note and at a release of the claim."""
+
+    def _noted(self):
+        self.write(transcript(260))
+        self.rows = [{"sid": SID, "path": self.leaf}]
+        self.boot_parse()
+        self.evict_read()                                          # noted; nothing for the converge pass to write from
+        self.assertEqual([p[0] for p in em.asm_rebuild_pending()], [self.leaf])
+
+    def test_a_rebuild_starts_when_a_page_parse_ends_after_the_cycle_end_it_held_the_gate_through(self):
+        self._noted()
+        with em.asm_foreground():                                  # a page's parse in flight across the pusher's cycle end
+            _Starter(self)                                         # (the kernel's starter, waiting on the gate)
+            _gate_edge(False)                                      # a cycle begins…
+            _cycle_end()                                           # …and ends while the page still parses: the gate stays shut
+            self.assertFalse(_rebuild_alive(), "no rebuild behind a shut gate")
+            self.assertFalse(self.doc_file().exists())
+        # the page's parse is done; no further cycle end comes
+        self.assertTrue(_until(lambda: self.doc_file().exists(), 30),
+                        "rebuilt once the gate opened, with no cycle end after it: %s" % em.asm_checkpoint_stats()["rebuild"])
+        _join_rebuilds()
+        self.assertEqual(em.asm_checkpoint_stats()["rebuild"]["written"], 1)
+        self.restores_with_no_whole_parse()
+
+    def test_a_leaf_noted_while_the_pusher_sleeps_is_rebuilt_without_waiting_for_a_cycle_end(self):
+        saved = km.ASM_CONVERGE
+        km.ASM_CONVERGE = False                                    # (the converge pass off: the parse's own read is no reason to wait)
+        self.addCleanup(setattr, km, "ASM_CONVERGE", saved)
+        self.write(transcript(260))
+        self.rows = [{"sid": SID, "path": self.leaf}]
+        _Starter(self)
+        th = threading.Thread(target=lambda: (em._set_stage_mark("warm.parse"), self.boot_parse(), em._set_stage_mark(None)))
+        th.start(); th.join(60)                                    # a boot warm parse, which leaves the gate open, notes the leaf
+        self.assertTrue(_until(lambda: self.doc_file().exists(), 30),
+                        "the note itself started the rebuild: %s" % em.asm_checkpoint_stats()["rebuild"])
+        _join_rebuilds()
+        self.assertEqual(em.asm_checkpoint_stats()["rebuild"]["written"], 1)
+
+
+class BackgroundLoopsDoNotHoldTheGate(Harness):
+    """2026-11-12: the parses of the kernel's background loops (the timeline builder, the judges, the jobs pass, the boot's warm
+    parses) no longer shut the gate. Nobody waits on them, and their whole parses ran for minutes exactly while the documents
+    were missing, which kept the rebuild that would end them from starting or going on. A page's parse still shuts it."""
+
+    def _gate_during_parse(self, stage):
+        probe = em._in_the_foreground(lambda *a, **k: em.asm_background_open())   # parse_session's own wrapper, around a probe
+        out = []
+
+        def run():
+            em._set_stage_mark(stage)                              # the stage setter the event model reads back (the kernel's own,
+            try:                                                   #  whichever kernel load installed it last in this process)
+                out.append(probe())
+            finally:
+                em._set_stage_mark(None)
+        th = threading.Thread(target=run)
+        th.start(); th.join(10)
+        return out[0]
+
+    def test_background_parses_leave_the_gate_open_and_a_pages_shuts_it(self):
+        self.assertTrue(em.asm_background_open(), "the premise: the pusher sleeps, nothing in flight")
+        for stage in ("timeline.build", "judge.triage", "judge.index", "jobs.autoNudge", "warm.parse", "producer"):
+            self.assertTrue(self._gate_during_parse(stage), "a %s parse leaves the gate open" % stage)
+        for stage in (None, "http.GET.chat", "ws-lane", "push", "connect"):
+            self.assertFalse(self._gate_during_parse(stage), "a %s parse shuts it" % stage)
+        self.assertTrue(em.asm_background_open(), "and it opens again once the page's parse is done")
+
+
+class AnOversizeDocumentIsBuiltOnce(Harness):
+    """2026-11-12: a document past the cap was built whole and thrown away, and the memo that should have stopped the next try
+    lived on the parse's entry and named the cut, which moves with every settled turn: on a host whose 994 MB session's document
+    ran past the cap, the one document writer spent about 382 s on it at each settle, and the rebuild parsed it whole at each
+    kernel life. The verdict is kept per transcript, on disk, and holds while the transcript is the same file, no shorter, the
+    version is the same and the cap is still under the document's size."""
+
+    CAP = 2048                                                     # bytes: under this transcript's document (tens of KB)
+
+    def setUp(self):
+        super().setUp()
+        saved = em._ASM_CKPT_CAP
+        em._ASM_CKPT_CAP = self.CAP
+        self.addCleanup(setattr, em, "_ASM_CKPT_CAP", saved)
+
+    def _oversize_once(self):
+        self.write(transcript(260))
+        self.rows = [{"sid": SID, "path": self.leaf}]
+        self.boot_parse()
+        reasons = []
+        self.assertFalse(em.asm_checkpoint_write(self.leaf, SID, False, tree=km._parse(self.leaf, SID, NOW), reason_out=reasons))
+        self.assertEqual(reasons, ["oversize"])
+        self.assertFalse(self.doc_file().exists())
+
+    def _grow(self, turns=6):
+        recs = transcript(260 + turns)
+        with open(self.leaf, "a") as f:
+            f.writelines(json.dumps(r) + "\n" for r in recs[-2 * turns:])
+
+    def test_a_grown_transcript_after_a_restart_is_not_built_again_nor_noted_for_a_rebuild(self):
+        self._oversize_once()
+        self._grow()                                               # a settled turn later: the cut moved
+        self.fresh()                                               # and the kernel restarted (the parse's entry is gone)
+        self.assertEqual(self.boot_parse(), ["full"])              # no document: the leaf parses whole, as it must
+        self.assertEqual(em.asm_rebuild_pending(), [], "never noted: a rebuild would parse it whole for nothing")
+        tree = km._parse(self.leaf, SID, NOW + 5)
+        reasons = []
+        held0 = em.asm_checkpoint_stats().get("oversizeHeld", 0)
+        with mock.patch.object(em, "segment_turns", wraps=em.segment_turns) as seg:
+            wrote = em.asm_checkpoint_write(self.leaf, SID, False, tree=tree, reason_out=reasons)
+        self.assertFalse(wrote)
+        self.assertEqual(reasons, ["oversize"])
+        self.assertEqual(seg.call_count, 0, "turned away before any build")
+        self.assertEqual(em.asm_checkpoint_stats().get("oversizeHeld", 0), held0 + 1)
+        km._ASM_CONVERGE_DONE.clear()
+        self.assertFalse(km._converge_assembly_leaf(self.leaf, SID, time.monotonic()), "the converge pass writes nothing either")
+        self.assertFalse(self.doc_file().exists())
+
+    def test_a_replaced_transcript_and_a_raised_cap_are_looked_at_again(self):
+        self._oversize_once()
+        ov = em._asm_oversize_file(self.leaf)
+        self.assertTrue(ov is not None and ov.exists(), "the verdict is kept beside where the document would be")
+        data = Path(self.leaf).read_bytes()
+        tmp = self.leaf + ".new"
+        Path(tmp).write_bytes(data)
+        os.replace(tmp, self.leaf)                                 # rewritten in place of the old file: another inode
+        self.fresh()
+        self.boot_parse()
+        self.assertEqual([p[0] for p in em.asm_rebuild_pending()], [self.leaf], "a replaced transcript is noted again")
+        with mock.patch.object(em, "segment_turns", wraps=em.segment_turns) as seg:
+            self.assertFalse(em.asm_checkpoint_write(self.leaf, SID, False, tree=km._parse(self.leaf, SID, NOW)))
+        self.assertGreater(seg.call_count, 0, "and built again (still past the cap)")
+        em._ASM_CKPT_CAP = 64 * 1024 * 1024                         # the cap rises over the document (a knob read at boot)
+        self.fresh()
+        self.boot_parse()
+        self.assertEqual([p[0] for p in em.asm_rebuild_pending()], [self.leaf], "noted again under the raised cap")
+        self.assertTrue(em.asm_checkpoint_write(self.leaf, SID, False, tree=km._parse(self.leaf, SID, NOW + 1)),
+                        em.asm_checkpoint_stats()["skipped"])
+        self.assertTrue(self.doc_file().exists())
+        self.assertFalse(ov.exists(), "a document stands: the verdict is gone")
+
+    def test_a_verdict_holds_only_while_its_transcript_stands_and_the_sweep_drops_it_with_the_transcript(self):
+        self._oversize_once()
+        ov = em._asm_oversize_file(self.leaf)
+        self.assertIsNotNone(em.asm_oversize_stands(self.leaf))
+        os.unlink(self.leaf)
+        self.assertIsNone(em.asm_oversize_stands(self.leaf), "no transcript, no verdict")
+        em.checkpoint_sweep()
+        self.assertFalse(ov.exists(), "the sweep removed it with its transcript")
+
+
+class APageOpenSessionIsRebuiltFirst(Harness):
+    """2026-11-12: the rebuild went largest first, so the session a page had just opened waited behind every larger idle one. A
+    session a page opens (its connect's active tab) or switches to (activeTab) goes first now, the most recently opened first."""
+
+    def test_the_session_a_page_switched_to_is_rebuilt_before_a_larger_one(self):
+        small_leaf = str(self.proj / (SID2 + ".jsonl"))
+        self.write(transcript(320, tag="big"))
+        self.write(transcript(220, tag="small"), leaf=small_leaf)
+        self.rows = [{"sid": SID, "path": self.leaf}, {"sid": SID2, "path": small_leaf}]
+        self.boot_parse(SID, self.leaf); self.boot_parse(SID2, small_leaf)
+        self.evict_read(small_leaf); self.evict_read(self.leaf)
+        self.assertEqual([p[1] for p in em.asm_rebuild_pending()], [SID, SID2], "the premise: largest first")
+        client = {"app": "fleet", "alive": True, "sent": {}, "send": lambda s: None}
+        km.Handler._dispatch_ws(type("H", (), {"_push_one": lambda self, c, only=None: None})(), {"type": "activeTab", "id": SID2},
+                                client)
+        self.assertEqual([p[1] for p in em.asm_rebuild_pending()], [SID2, SID], "the page's session first")
+        order, real = [], jd.asm_refresh
+
+        def recording(fsid, leaf, now, **kw):
+            order.append(fsid)
+            return real(fsid, leaf, now, **kw)
+        with mock.patch.object(jd, "asm_refresh", recording):
+            for k in range(3):
+                self.writer_cycle(NOW + 600 + k)
+                _join_rebuilds()
+        self.assertEqual(order, [SID2, SID])
 
 
 if __name__ == "__main__":
