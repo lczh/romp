@@ -400,7 +400,7 @@ test("rendered markdown never carries data-* attributes into the page, in the vi
   const sanitizes = (MD_FN.match(/sanitizeMd\([^)]*\)/g) || []);
   assert.equal(sanitizes.length, 1);
   assert.match(sanitizes[0], /sanitizeMd\(dirty\)/);
-  const chatMd = (RENDER.split("function md(src: string, repo: string | null = prRepoFor()): string {")[1] || "").split("\nfunction ")[0];   // the signature carries the PR-link repo (pr-links.ts)
+  const chatMd = (RENDER.split("function md(src: string, repo: string | null = prRepoFor(), paths: MdPaths | null = null): string {")[1] || "").split("\nfunction ")[0];   // the signature carries the PR-link repo (pr-links.ts)
   assert.match(chatMd, /const clean = sanitizeMd\(dirty\);/);
   assert.match(SANITIZE, /export const MD_PURIFY: Config = \{[\s\S]*?ALLOW_DATA_ATTR: false,[\s\S]*?\};/, "the shared sanitizer's profile forbids data-*");
   assert.doesNotMatch(VIEW + RENDER, /ALLOW_DATA_ATTR|DOMPurify\.sanitize\(/, "neither caller spells a profile of its own");

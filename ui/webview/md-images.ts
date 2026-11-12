@@ -19,6 +19,8 @@
 // the message writes, named by its src or its first <source>, where it is written, and a LINK to a video file (isVideoUrl),
 // whose preview renders after its block the way a path's figure does (videoLinks).
 import type { Token } from "marked";
+import { joinDocPath } from "./md-links";      // a path written as a URL, decoded and normalised (the file viewer's rule)
+import { fileUrl } from "./file-preview";      // the kernel's /file route for a session, a remote one's through its relay
 
 export interface MdImage { url: string; alt: string; at: number; video?: boolean; }
 
@@ -368,4 +370,62 @@ export function mdLayout(src: string, lex: (s: string) => Token[]): MdLayout {
 /** The pictures alone (mdLayout's). */
 export function mdImages(src: string, lex: (s: string) => Token[]): MdImage[] {
   return mdLayout(src, lex).images;
+}
+
+// ── a picture whose src is a FILE on the session's disk (2026-11-12) ────────────────────────────────────────────────────
+// `![plot](/tmp/run/loss.png)`, `![plot](~/figs/loss.png)`, `![plot](figs/loss.png)`: marked writes the path into the <img>
+// as written, the browser resolved it against the dashboard's own origin, and the kernel answered 404, so a picture an
+// agent embedded from its own disk never showed, where the same path on a line of its own did. The chat loads such a
+// picture the way that line's figure loads: through the kernel's /file route for the session the message belongs to (a
+// remote session's through this kernel's /remote/<host>/file relay, fileUrl), which expands ~ and resolves a relative path
+// against that session's folder, and with the message's mention-time pin when the kernel latched one for the path
+// (pathLinks maps the token written to the file, pathPins the file to its pin), so the picture shows the bytes the message
+// was sent with. Which srcs are paths is the file viewer's rule (file-view.ts): every one with no scheme that is not
+// protocol-relative. The kernel's /file still decides what it serves (renderable types, a size cap); nothing here adds a
+// file the dashboard could not already fetch.
+
+/** The links and pins the kernel verified for one message (its chat event's pathLinks and pathPins). */
+export interface MdPaths { links?: Record<string, string> | null; pins?: Record<string, string> | null; }
+
+const ownKey = (o: Record<string, string> | null | undefined, k: string): string =>
+  o && Object.prototype.hasOwnProperty.call(o, k) && typeof o[k] === "string" ? o[k] : "";
+
+/** The file a picture's src names on the session's disk, or null when the src names something the browser fetches itself
+ *  (a scheme: http:, https:, data:, blob:; a protocol-relative `//host/…`; a bare `#fragment` or `?query`), or is already
+ *  the kernel's file route. `src` is the <img>'s attribute as marked wrote it (cleanUrl: percent-encoded). A token the
+ *  kernel verified (`paths.links`, keyed by the text as written) names its file, with that file's pin when it has one;
+ *  any other path is decoded, stripped of its fragment and normalised (joinDocPath), and the kernel resolves it. */
+export function mdImgFile(src: string, paths?: MdPaths | null): { path: string; pin?: string } | null {
+  if (typeof src !== "string" || !src || /^[a-z][a-z0-9+.-]*:/i.test(src) || /^[/\\]{2}/.test(src) || /^[#?]/.test(src)) return null;
+  if (/^\/(?:remote\/[^/?#]+\/)?file\?/.test(src)) return null;   // the kernel's file route already: never wrapped twice
+  let tok = src.replace(/#.*$/, "");
+  try { tok = decodeURIComponent(tok); } catch { /* a stray %: the bytes as written */ }
+  const target = ownKey(paths?.links, tok) || ownKey(paths?.links, src);
+  if (target) {
+    const pin = ownKey(paths?.pins, target);
+    return pin ? { path: target, pin } : { path: target };
+  }
+  const path = joinDocPath("", src);
+  return path ? { path } : null;
+}
+
+/** The address such a picture loads from: the file through `sid`'s kernel, pinned when the message pinned it. */
+export function mdImgFileSrc(f: { path: string; pin?: string }, sid: string | null): string {
+  return fileUrl(f.path, sid) + (f.pin ? "&pin=" + encodeURIComponent(f.pin) : "");
+}
+
+/** md() and userMd() run this on the sanitized body, before mdImgPostPass (which parks and sizes by the src it finds): every
+ *  <img> whose src names a file loads it through the kernel for `sid`, the session the message belongs to (render.ts
+ *  renderingOwnerSid, host prefix included), and carries the file as data-md-path (data-md-sid, data-md-pin), so its click
+ *  opens the lightbox on the FILE, as a path's figure does, and the arrows know it as that file. The marks are ours: the
+ *  sanitizer has already stripped every data-* the message wrote. */
+export function mdImgPathPass(root: ParentNode, sid: string | null, paths?: MdPaths | null): void {
+  for (const img of Array.from(root.querySelectorAll("img[src]")) as HTMLImageElement[]) {
+    const f = mdImgFile(img.getAttribute("src") || "", paths);
+    if (!f) continue;
+    img.setAttribute("src", mdImgFileSrc(f, sid));
+    img.dataset.mdPath = f.path;
+    if (sid) img.dataset.mdSid = sid;
+    if (f.pin) img.dataset.mdPin = f.pin;
+  }
 }

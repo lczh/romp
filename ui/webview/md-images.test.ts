@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import { Marked } from "marked";
-import { mdImages, mdLayout, decodeRefs, opensInLightbox, isVideoUrl } from "./md-images";
+import { mdImages, mdLayout, decodeRefs, opensInLightbox, isVideoUrl, mdImgFile, mdImgFileSrc, mdImgPathPass } from "./md-images";
 import { chatMdExtensions } from "./chat-md";
 
 const chat = new Marked({ gfm: true, breaks: false }, ...chatMdExtensions);
@@ -270,4 +270,79 @@ test("a message that names a video file is read; one that names none still is no
   assert.equal(lexed, 1);
   assert.deepEqual(mdLayout("see https://media.example.test/page", counting).videoLinks, []);
   assert.equal(lexed, 1, "no picture, no video, no video file: never lexed");
+});
+
+// ── a picture whose src is a FILE (2026-11-12): `![plot](/tmp/…png)` resolved against the dashboard's origin and 404'd, where
+// the same path on a line of its own showed. md() and userMd() now load it through the kernel's /file for the session the
+// message belongs to (mdImgPathPass), the rule the file viewer's images follow. Synthetic paths, placeholder sids.
+const WEB = "aaaaaaaa-1111-2222-3333-444444444444";
+
+test("a src that is a path names a file on the session's disk: absolute, under home, relative to the session's folder", () => {
+  assert.deepEqual(mdImgFile("/tmp/notes-api/latency.png"), { path: "/tmp/notes-api/latency.png" });
+  assert.deepEqual(mdImgFile("~/notes-api/figs/latency.png"), { path: "~/notes-api/figs/latency.png" }, "the kernel expands ~");
+  assert.deepEqual(mdImgFile("docs/figure.png"), { path: "docs/figure.png" }, "the kernel resolves it against the session's cwd");
+  assert.deepEqual(mdImgFile("./docs/../docs/figure.png#top"), { path: "docs/figure.png" }, "normalised, the fragment dropped");
+  assert.deepEqual(mdImgFile("/tmp/notes-api/p95%20split.png"), { path: "/tmp/notes-api/p95 split.png" }, "marked's percent-encoding decoded");
+  assert.deepEqual(mdImgFile("constructor"), { path: "constructor" }, "a name that is an Object key is still only a name");
+});
+
+test("a src the browser fetches itself, or the kernel's file route already, is no file", () => {
+  for (const u of ["https://img.example.test/a.png", "HTTP://img.example.test/a.png", "data:image/png;base64,AAAA", "blob:https://x.test/1",
+    "//img.example.test/a.png", "\\\\img.example.test/a.png", "#top", "?v=2", "", "/file?path=%2Ftmp%2Fa.png&sid=s1",
+    "/remote/gpu1/file?path=a.png&sid=s1"]) assert.equal(mdImgFile(u), null, JSON.stringify(u));
+});
+
+test("a path the kernel verified names its file and carries the message's mention-time pin", () => {
+  const paths = { links: { "docs/figure.png": "docs/figure.png", "./figs/a.png": "figs/a.png", "/tmp/p95 split.png": "/tmp/p95 split.png" },
+                  pins: { "docs/figure.png": "v1", "/tmp/p95 split.png": "v2" } };
+  assert.deepEqual(mdImgFile("docs/figure.png", paths), { path: "docs/figure.png", pin: "v1" });
+  assert.deepEqual(mdImgFile("./figs/a.png", paths), { path: "figs/a.png" }, "the token as written, mapped to the kernel's file; no pin, none carried");
+  assert.deepEqual(mdImgFile("/tmp/p95%20split.png", paths), { path: "/tmp/p95 split.png", pin: "v2" }, "found by its decoded token");
+  assert.deepEqual(mdImgFile("docs/other.png", paths), { path: "docs/other.png" }, "an unverified path still loads, the kernel resolving it");
+  assert.deepEqual(mdImgFile("toString", { links: {}, pins: {} }), { path: "toString" }, "an inherited key is never a link");
+});
+
+test("the address: this kernel's /file for a local session, a remote session's /remote/<host>/file with its bare sid, pinned when pinned", () => {
+  assert.equal(mdImgFileSrc({ path: "/tmp/notes-api/latency.png" }, WEB), "/file?path=%2Ftmp%2Fnotes-api%2Flatency.png&sid=" + WEB);
+  assert.equal(mdImgFileSrc({ path: "docs/figure.png", pin: "v1" }, "gpu1:" + WEB),
+    "/remote/gpu1/file?path=docs%2Ffigure.png&sid=" + WEB + "&pin=v1", "the owning machine's kernel, through this one's relay");
+  assert.equal(mdImgFileSrc({ path: "~/figs/a.png" }, null), "/file?path=~%2Ffigs%2Fa.png", "no session: the path alone");
+});
+
+// a sanitized body, as far as the pass reads it: its <img>s with their attributes and dataset
+class FakeImg {
+  attrs: Record<string, string>; dataset: Record<string, string> = {};
+  constructor(src: string) { this.attrs = { src }; }
+  getAttribute(k: string): string | null { return k in this.attrs ? this.attrs[k] : null; }
+  setAttribute(k: string, v: string): void { this.attrs[k] = v; }
+}
+const bodyOf = (srcs: string[]) => { const imgs = srcs.map((u) => new FakeImg(u)); return { imgs, root: { querySelectorAll: () => imgs } as unknown as ParentNode }; };
+
+test("md()'s pass: every picture written as a path loads through the kernel for the owning session, a URL picture is left alone", () => {
+  const reply = "The screens:\n\n![a](/tmp/notes-api/a.png)\n\n![b](~/notes-api/b.png)\n\n![c](docs/figure.png)\n\n"
+    + "<img src=\"/tmp/notes-api/raw.png\" width=\"45%\">\n\n![web](https://img.example.test/wide.png)\n\n![d](data:image/png;base64,AAAA)";
+  const srcs = mdImages(reply, lex).map((m) => m.url);   // each <img>'s src as marked writes it (the attribute the pass reads)
+  const { imgs, root } = bodyOf(srcs);
+  mdImgPathPass(root, WEB, { links: { "docs/figure.png": "docs/figure.png" }, pins: { "docs/figure.png": "v1" } });
+  assert.deepEqual(imgs.map((i) => i.attrs.src), [
+    "/file?path=%2Ftmp%2Fnotes-api%2Fa.png&sid=" + WEB,
+    "/file?path=~%2Fnotes-api%2Fb.png&sid=" + WEB,
+    "/file?path=docs%2Ffigure.png&sid=" + WEB + "&pin=v1",
+    "/file?path=%2Ftmp%2Fnotes-api%2Fraw.png&sid=" + WEB,
+    "https://img.example.test/wide.png",
+    "data:image/png;base64,AAAA"]);
+  assert.deepEqual(imgs.map((i) => [i.dataset.mdPath, i.dataset.mdSid, i.dataset.mdPin]), [
+    ["/tmp/notes-api/a.png", WEB, undefined], ["~/notes-api/b.png", WEB, undefined], ["docs/figure.png", WEB, "v1"],
+    ["/tmp/notes-api/raw.png", WEB, undefined], [undefined, undefined, undefined], [undefined, undefined, undefined]],
+    "the file rides on the picture, so its click opens the lightbox on the file");
+});
+
+test("md()'s pass on a remote session's message: the remote kernel's file, through this kernel's relay", () => {
+  const { imgs, root } = bodyOf(["/tmp/notes-api/a.png", "docs/figure.png"]);
+  mdImgPathPass(root, "gpu1:" + WEB, { links: { "docs/figure.png": "docs/figure.png" }, pins: { "docs/figure.png": "v1" } });
+  assert.deepEqual(imgs.map((i) => i.attrs.src), ["/remote/gpu1/file?path=%2Ftmp%2Fnotes-api%2Fa.png&sid=" + WEB,
+    "/remote/gpu1/file?path=docs%2Ffigure.png&sid=" + WEB + "&pin=v1"]);
+  assert.equal(imgs[0].dataset.mdSid, "gpu1:" + WEB, "the full sid, host prefix kept, for the lightbox's own fetch");
+  mdImgPathPass(root, "gpu1:" + WEB);
+  assert.equal(imgs[1].attrs.src, "/remote/gpu1/file?path=docs%2Ffigure.png&sid=" + WEB + "&pin=v1", "a second pass wraps nothing twice");
 });
