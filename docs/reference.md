@@ -3649,15 +3649,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   (2026-11-12; a boot's refusal rewrites as below). That restore is refused,
   and the whole parse heals the author instead, when the document was written
   while a postal author waited on the log (its own `postalWait`;
-  `restore:postalWait`). When the tail's pre-pass gives a compaction summary to a boundary before the
-  cut, as it does for a summary hung under attachments and stamped before its
-  own boundary (how the CLI now writes most automatic compactions: the pass
-  gives it to the previous boundary, in a cold parse as in a restore) or one
-  whose boundary is off the path, the restore gives that boundary's frozen
-  atom the value a cold parse emits (`restore:summaryPatched`, counted only
-  when the document's atom differs, as when the summary landed after the
-  document was written; 2026-11-12, replacing a refusal that parsed those
-  sessions whole); a document written before the bit is unproven, so a standing
+  `restore:postalWait`). Every pre-cut boundary atom is held to the summary the tail's pre-pass
+  leaves it, as a cold parse emits it (`restore:summaryPatched`, counted only
+  when the document's frozen atom differs): a summary hung under attachments
+  and stamped before its own boundary (how the CLI now writes most automatic
+  compactions) goes to the previous boundary, one before the cut when the cut
+  opens at the compaction, so the atom changes when such a summary lands after
+  the document was written, or leaves the path after it (a fork at the
+  anchor); the writer records each boundary atom's row (`bnd`), and a document
+  without it is scanned (2026-11-12, replacing a refusal that parsed those
+  sessions whole). A kept tail user or assistant record stamped before the
+  carried watermark refuses the restore (`restore:stampOrder`), as the fold's
+  `ts` gate does for a delta: the carry holds only for a tail that sorts after
+  everything before the cut (none of the live host's 232 documents met it
+  when it shipped); a document written before the bit is unproven, so a standing
   document is refused at its first restore after the change, booked
   `full:refused`, and rewritten from the whole parse that follows the
   refusal (`write:afterRefusal`), so the next restore takes it: then and

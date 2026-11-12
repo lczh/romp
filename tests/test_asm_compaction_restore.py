@@ -55,7 +55,9 @@ on every road, a boot included: the document's verdicts were decided without it,
 review of the same day: a late parent on a document written while a postal author waited parses whole (the document's own
 `postalWait`). A tail summary that the pre-pass gives to a boundary before the cut (a summary stamped before its own
 boundary and hung under attachments, as the CLI now writes them, or one whose boundary a late parent left off the path) is
-given to that boundary's frozen atom as a cold parse gives it (restore:summaryPatched), never refused to a whole parse.
+given to that boundary's frozen atom as a cold parse gives it (restore:summaryPatched), never refused to a whole parse,
+and every pre-cut boundary atom is held to the pass result, so one whose tail summary left the path (a fork at the anchor)
+gets its own back. A kept tail record stamped before the carried watermark refuses the restore (restore:stampOrder).
 Synthetic transcripts only: invented notes-api text, placeholder uuids."""
 import json
 import os
@@ -1270,6 +1272,11 @@ class CompactionRestore(Harness):
                 ran.append(split)
         self.assertEqual(len(ran), 2, "both splits ran: %s" % ran)
 
+    def _restore_counted(self, path):
+        tree, modes, moved = self._parse_counted(path)
+        got, _cut = self._served(tree)
+        return got, modes, moved
+
     @staticmethod
     def _summary_of(tree, uuid):
         """The summary a stripped tree's boundary atom `uuid` carries."""
@@ -1346,6 +1353,85 @@ class CompactionRestore(Harness):
                 self.assertEqual((boot_modes, patched_boot), (["restore"], 1), "the restart restores and patches again")
                 ran.append(entry)
         self.assertEqual(len(ran), 3, "every entry ran: %s" % ran)
+
+    def test_a_tail_summary_that_leaves_the_path_gives_the_frozen_boundary_its_own_back(self):
+        """The review of 2026-11-12: the live document shape (a compaction of the new shape plus one turn, the document cut at
+        its boundary, so the previous boundary's frozen atom holds the tail summary, as the pass gives it), then a fork at the
+        compaction's anchor: the compaction leaves the path, so a cold parse gives the previous boundary its OWN summary back.
+        The pass result for that boundary equals the carry again, and the first patch compared with the carry, so the frozen
+        atom kept the tail summary, live, at the next restart and on the fold after. Every pre-cut boundary atom is now held to
+        the pass result (restore:summaryPatched), found through the writer's `bnd` map, or by a scan of the turns section for
+        a document written before the map."""
+        for with_map in (True, False):
+            with self.subTest(with_map=with_map):
+                self._forked_compaction("early-summary-forked-%s" % with_map, with_map)
+
+    def _forked_compaction(self, name, with_map):
+        recs = episode(NOW - 86400)
+        anchor = recs[-1]["uuid"]
+        comp, s = early_summary_compaction(self.after(recs, 120), "forked", anchor)
+        recs += comp + turn(self.after(recs + comp, 30), "forked", s)
+        path = self.write(name, recs)
+        self.fresh()
+        self.parse(path)
+        self.assertTrue(self.doc(path), "the document is written: %s" % em.asm_checkpoint_stats()["skipped"])
+        self.assertIn("b160", _doc(path).get("bnd") or {}, "the writer records each boundary atom's row")
+        if not with_map:
+            d = _doc(path)
+            d.pop("bnd")
+            _write_doc(path, d)
+        self._restart(path)
+        fork = [G.uline(self.after(recs, 60), "back to before the compaction: rank by date instead", "u_fork", anchor),
+                G.aline(self.after(recs, 80), "ranking by date", "a_fork", "u_fork", stop="end_turn")]
+        self._append(path, fork)
+        live, modes, moved = self._restore_counted(path)
+        ref = self._snapshot(path, name)
+        nxt = turn(self.after(recs + fork, 60), "after-fork", "a_fork")
+        self._append(path, nxt)
+        folded, modes2, moved2 = self._restore_counted(path)
+        self.fresh()
+        boot, boot_modes, boot_moved = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertFalse((self._summary_of(cold, "b160") or "").startswith("summary so far: the notes-api search pages by cursor"),
+                         "the premise: once the compaction leaves the path, the previous boundary shows its own summary")
+        self.assertSameTree(live, self.cold(ref), "live, after the fork")
+        self.assertSameTree(folded, cold, "the fold after it")
+        self.assertSameTree(boot, cold, "the next restart")
+        self.assertEqual((modes, moved.get("restore:summaryPatched", 0), moved.get("full", 0)), (["restore"], 1, 0),
+                         "the fork restores, the frozen atom given its own summary back: %s" % moved)
+        self.assertEqual((modes2, moved2.get("full", 0)), (["fold"], 0), "the turn after folds: %s" % moved2)
+        self.assertEqual((boot_modes, boot_moved.get("restore:summaryPatched", 0)), (["restore"], 1), "and the restart patches it")
+
+    def test_a_tail_record_stamped_before_the_cut_refuses_the_restore(self):
+        """The review of 2026-11-12: a summary hung under an attachment and stamped BETWEEN two pre-cut boundaries (clock skew),
+        landing past the cut. A cold parse walks it between them and gives it to the earlier boundary; a restore continues
+        from the carry, whose last boundary walked is the later one, and patched the later boundary instead (the two swapped
+        summaries). The carry holds only for a tail that sorts at or after everything before the cut, so a kept tail record
+        stamped before the carried watermark refuses the restore (restore:stampOrder), as the fold's own stamp gate does for
+        a delta, and the whole parse serves; the document it writes restores at the restart after. (Counted against all 232
+        of the live host's documents: none refused.)"""
+        recs = episode(NOW - 86400, turns=120, compact_every=40)
+        path = self.write("skewed-summary", recs)
+        self.fresh()
+        self.parse(path)
+        self.assertTrue(self.doc(path), "the document is written")
+        t40 = next(em.parse_z(r["timestamp"]) for r in recs if r.get("uuid") == "b40")
+        t80 = next(em.parse_z(r["timestamp"]) for r in recs if r.get("uuid") == "b80")
+        comp, s = early_summary_compaction(self.after(recs, 120), "skew", recs[-1]["uuid"])
+        comp[-1] = dict(comp[-1], timestamp=G.iso((t40 + t80) / 2))          # the summary's stamp between b40 and b80
+        self._append(path, comp + [G.aline(self.after(recs, 160), "carrying on", "skew_a", s, stop="end_turn")])
+        self.fresh()
+        boot, modes, moved = self._restore_counted(path)
+        self.fresh()
+        boot2, modes2, moved2 = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertTrue((self._summary_of(cold, "b40") or "").startswith("summary so far: the notes-api search pages by cursor"),
+                        "the premise: a cold parse gives the skewed summary to the earlier boundary")
+        self.assertSameTree(boot, cold, "the restart after the append")
+        self.assertSameTree(boot2, cold, "the restart after that")
+        self.assertEqual((modes, moved.get("restore:stampOrder", 0), moved.get("full:refused", 0)), (["full"], 1, 1),
+                         "refused for the stamp order, parsed whole: %s" % moved)
+        self.assertEqual(modes2, ["restore"], "the rewritten document restores: %s" % moved2)
 
     def test_a_parent_a_pre_cut_record_named_parses_whole_on_every_road(self):
         """A record landing as the parent that a record BEFORE the document's cut named (the pre-cut orphan after turn 150):
