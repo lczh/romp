@@ -6976,24 +6976,38 @@ points do not apply, and the claim is not lent out meanwhile: one whole parse of
 Bounds and counters, all on `/perf` under `docWorker`:
 
 - `spawned`, `done` (the done lines by outcome: `written`, `declined`, `moot`, `failed`), `seconds` (the workers' wall
-  time), `peak` (the last finished job's transcript bytes, peak address space and resident peak beside its bound) and
-  `running` (the job in flight: its pid, age and bytes). No clock bounds a job: a worker that never answers holds the
-  claim and shows here with its age.
-- `refused`, `heldForMemory`: a job starts only when the machine's `MemAvailable` is at least 1.5 × 3.3 × the
-  transcript's bytes (3.3: a whole parse's peak over its transcript in the lab of the 64 MB cap). Otherwise the leaf
-  stays pending, counted at every look and said once per leaf, and a smaller leaf behind it may still go; it is asked
-  again whenever the starter next looks. Where `MemAvailable` cannot be read (anything but Linux) the job runs in the
-  kernel, counted `fallbacks.noMemInfo`.
-- `memory`: the worker's address space is limited (`RLIMIT_AS`) to 1 GiB plus the admitted figure, taken over every
-  file the parse reads, plus 256 MiB. The parser reads any error on a record as a malformed line, so an allocation
-  that failed at that limit could leave a document that misses history and still looks whole; a worker whose address
-  space peaked inside the last 256 MiB therefore publishes nothing and reports `failed`. That, the worker's memory
-  exit code and a kill by the OS (the worker asks to be the first process taken when the machine runs out) are one
-  case: counted here, never repeated inside the kernel, and subject to the rebuild's own rule (one more try, through
-  admission, then the loud line).
-- `fallbacks.spawn`, `fallbacks.crash`, `lostInARow`, `latched`: a worker that cannot be started, or leaves with no
-  done line, is counted and said, and that job runs in the kernel. Three in a row latch the kernel's own road for the
-  kernel's life (a sync notice; each later job counts `fallbacks.latched`); a done line starts the count again.
+  time), `peak` (the last finished job's transcript bytes and records, its estimate, peak address space and resident
+  peak beside its bounds) and `running` (the job in flight: its pid, age and bytes).
+- `refused`, `heldForMemory`: a job's memory is estimated as 64 MiB, plus the bytes of every file its parse reads, plus
+  8 KiB per record of them (a parse holds memory per record as well as per byte: a review measured about 9.5 times
+  the transcript at 756-byte records and 3.3 times at 3.8 KB). The record count is the one the parse that noted the
+  leaf saw, or the reader's, else a sample of a few windows across the file. A job starts only when the machine's
+  `MemAvailable` is at least 1.5 times the estimate. Otherwise the leaf stays pending, counted at every look and said
+  once per leaf in the log and the error center, and a smaller leaf behind it may still go; it is asked again whenever
+  the starter next looks. Where `MemAvailable` cannot be read (anything but Linux) the job runs in the kernel, counted
+  `fallbacks.noMemInfo`.
+- `memory`, `verdicts`, `verdictHeld`: the admitted figure is also the worker's address-space limit (`RLIMIT_AS`), so
+  a worker never takes more than the machine had free when it started. The parser reads any error on a record as a
+  malformed line, so an allocation that failed at that limit could leave a document that misses history and still
+  looks whole; a worker whose address space peaked past a soft bound (256 MiB under the limit, or a third of it for a
+  small job) therefore publishes nothing and reports `failed`. That, the worker's memory exit code and a kill by the
+  OS (the worker asks to be the first process taken when the machine runs out) are one case: counted, said in the log
+  and the error center, never repeated inside the kernel and not tried again. The leaf keeps a memory verdict beside
+  its document (`<key>.asm.memory` under the checkpoint directory, as an oversize verdict is kept), and while it holds
+  no worker is started for the leaf in any kernel life: it parses whole, as a session with no document does. It holds
+  until the transcript is replaced or the sizing changes, and leaves with the transcript; deleting the file lets a
+  worker try again. With the switch off it is never read.
+- `fallbacks.spawn`, `fallbacks.crash`, `fallbacks.failed`, `fallbacks.timeout`, `lostInARow`, `latched`: a job the
+  worker lost runs in the kernel, counted and said. Lost means it could not be started, left with no done line,
+  answered `failed` for a reason other than memory, reported a document that is not on disk, or gave no outcome
+  within its bound: ten minutes plus a second per 256 KiB of transcript (a tenth of the slowest rate measured), after
+  which it is sent SIGTERM, and SIGKILL 30 seconds later. Three in a row latch the kernel's own road for the kernel's
+  life (said in the error center; each later job counts `fallbacks.latched`); any other done line starts the count
+  again.
+- `fallbacks.drift`: when the checkout holds kernel code this kernel does not run (a pull before the restart), or the
+  two cannot be compared, the job runs in the kernel, said once per checkout and not counted as a loss: a worker would
+  run the newer event model, whose documents this kernel refuses and deletes. The job names the kernel's code
+  identity, and a worker that finds other code on disk refuses it the same way.
 - `cancelled`, `stopped`: a leaf whose use ends mid-job (`/clear`, a dead lane) has its worker ended by pid, and the
   kernel's exit ends the running one; neither is a fallback. The worker also asks the OS to end it when the thread
   that started it ends (a parent-death signal, requested by the worker itself as its first act, so the kernel spawns

@@ -8,8 +8,9 @@ a time. With STATE/doc-worker reading `on` the kernel starts this script instead
 interpreter, spawned and never a fork of the kernel, and the two talk in two lines:
 
   stdin   one JSON line, the job: {"op": "build", "leaf", "rompuuid", "sdkHuman", "cands", "states", "postalLog", "now",
-          "rebuild", "ckptDir", "softBytes", "limitBytes", "parent"}; the arguments the kernel's own road hands
-          em.asm_refresh_document, the checkpoint directory, the memory bounds and the kernel's pid
+          "rebuild", "ckptDir", "softBytes", "limitBytes", "parent", "codeIdent"}; the arguments the kernel's own road
+          hands em.asm_refresh_document, the checkpoint directory, the memory bounds, the kernel's pid and the identity
+          of the kernel code it runs
   stdout  one JSON line, the outcome: {"op": "done", "pid", "outcome", "wrote", "reason", "tb", "newPre", "docCut", "ms",
           "vmPeak", "vmHWM", "memory"}; em.asm_build_document's result plus what the job cost
 
@@ -37,8 +38,17 @@ MemoryError that surfaces is reported the same way, and one outside the build le
 The process also asks to be the first one taken if the machine itself runs out (oom_score_adj), so that it is this
 process, never the kernel.
 
-Exit codes: 0 after a done line, whatever the outcome; EXIT_MEMORY (86) for a memory failure outside the build; anything
-else with no done line is a crash to the kernel, which runs the job on its own thread and counts the fallback."""
+The same code as the kernel's. A checkout that moved after the kernel started holds a newer event model, whose documents
+the running kernel refuses and deletes, and a worker started from it would rebuild them until the restart. So after it
+loads the event model, this process hashes kernel/*.py as the kernel hashes its own at import (_code_ident_of here and in
+kernel.py, pinned equal by the tests) and refuses the job when that differs from the job's `codeIdent`: hashed after the
+load, a move at any moment reads as a difference, never the other way round. The kernel asks first (_restart_pending), so
+this is the race's backstop.
+
+Exit codes: 0 after a done line, whatever the outcome; EXIT_MEMORY (86) for a memory failure outside the build;
+EXIT_DRIFT (87) for a job refused for other code; anything else with no done line is a crash to the kernel, which runs
+the job on its own thread and counts the fallback."""
+import hashlib
 import importlib.util
 import json
 import os
@@ -50,6 +60,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 EXIT_MEMORY = 86                  # no done line, and the cause was memory: the kernel does not repeat the job in its own process
 EXIT_REFUSED = 2                  # no done line: a job this process could not take (unreadable, no death signal, no limit)
+EXIT_DRIFT = 87                   # no done line: the kernel code this process loaded is not the kernel's (see above)
 
 
 def _protocol_out():
@@ -152,6 +163,20 @@ def _over_soft_bound(soft):
     return None
 
 
+def _code_ident_of(root):
+    """The identity of the kernel code under `root`/kernel: a short sha1 over the bytes of kernel/*.py in path order, the
+    recipe of kernel.py's _code_ident_of (the tests pin the two equal), or "" when it cannot be read."""
+    h = hashlib.sha1()
+    try:
+        files = sorted(Path(root, "kernel").glob("*.py"))
+        for f in files:
+            h.update(f.name.encode())
+            h.update(f.read_bytes())
+    except OSError:
+        return ""
+    return h.hexdigest()[:12] if files else ""
+
+
 def _event_model():
     spec = importlib.util.spec_from_file_location("romp_loadsource", str(HERE / "loadsource.py"))
     mod = importlib.util.module_from_spec(spec)
@@ -163,6 +188,11 @@ def run(job, out):
     """Build the job's document and print the done line. Returns the exit code."""
     t0 = time.perf_counter()
     em = _event_model()
+    mine = _code_ident_of(HERE.parent)                    # after the load: a checkout that moved at any moment differs
+    if not job.get("codeIdent") or mine != job["codeIdent"]:
+        _say("the kernel code here (%s) is not the kernel's (%s): the job is the kernel's own to run"
+             % (mine or "unreadable", job.get("codeIdent") or "none named"))
+        return EXIT_DRIFT
     ckpt = Path(job["ckptDir"])
     em.set_checkpoint_dir(lambda: ckpt)
     em.set_document_stop(lambda: True)                    # no fold checkpoint is written here: the kernel is their only writer
