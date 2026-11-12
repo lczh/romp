@@ -3706,10 +3706,15 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   cut, or leaves the path after the document was written); the writer records
   each boundary atom's row (`bnd`), and a document without it is scanned. A
   document written before the owner rule (no `sumOwner`) is corrected at its
-  restore: its pre-cut summaries are found from its rows (the user records
-  whose parent chain runs through attachments to a boundary), read from the
-  transcript a few lines past their boundary, and assigned again before the
-  pass, with no version bump and no whole parse; the derivation must agree
+  restore: the pre-cut bytes are read once for the lines naming
+  isCompactSummary (a summary emits no atom, so neither the rows nor the atoms
+  flag one; each kept user row is a summary exactly when the line at its
+  record index is, the line count before the cut against the document's record
+  count proving the lines are the records), every summary is assigned again
+  before the pass, chainless ones included, with no version bump and no whole
+  parse (on the live host at the change: 232 documents, none refused, 164
+  corrected, the read up to 2 s for 1 GB of pre-cut bytes, once per document
+  until the next write gives it `sumOwner`); the derivation must agree
   with every assignment the document's carry holds, and a moved summary that
   changes whether a restore window opens must be followed by a reply before
   any other user record, else the restore refuses once

@@ -8132,143 +8132,139 @@ def _asm_patch_pre_cut_summaries(desired, rows_of, index, prefix):
 
 _ASM_SUMOWNER_MEMO = {}            # (document path, its write stamp, its leaf cut) -> the pre-cut summaries by owner a restore of a
 _ASM_SUMOWNER_MEMO_MAX = 512        #  document without `sumOwner` derived (_asm_doc_summaries_by_owner): its pre-cut bytes never change
-_ASM_SUMOWNER_SCAN = 32 << 20       # the most bytes one candidate's read may scan forward from its anchor before the restore refuses
-_UNDECODED = object()
+_SUMMARY_KEY = b'"isCompactSummary"'
 
 
-def _asm_doc_summaries_by_owner(doc, leaf_path, index, prefix):
+def _asm_scan_summary_lines(path, end):
+    """Every line of `path` before byte `end` that names isCompactSummary, decoded ({line number: record}), and how many
+    newline-ended lines lie before `end`. One pass over the bytes in 8 MiB blocks, the key and the newlines found by the
+    bytes methods, so only the lines naming the key are decoded (1 GB of pre-cut bytes in a few tenths of a second, against
+    two seconds a line at a time); counted as read."""
+    hits, n, pos, rest = {}, 0, 0, b""
+    with open(path, "rb") as fh:
+        while pos < end:
+            block = fh.read(min(8 << 20, end - pos))
+            if not block:
+                break
+            pos += len(block)
+            data = rest + block if rest else block
+            whole = data.rfind(b"\n") + 1                  # complete lines only; a line split across blocks rides to the next
+            j, counted, nl = data.find(_SUMMARY_KEY, 0, whole), 0, n
+            while j >= 0:
+                start = data.rfind(b"\n", 0, j) + 1
+                stop = data.find(b"\n", j) + 1
+                nl += data.count(b"\n", counted, start)    # the newlines before this line, counted once across the block
+                counted = start
+                try:
+                    hits[nl] = json.loads(data[start:stop])
+                except ValueError:
+                    pass
+                j = data.find(_SUMMARY_KEY, stop, whole)
+            n += data.count(b"\n", 0, whole)
+            rest = data[whole:]
+    _count_read(str(path), pos)
+    return hits, n
+
+
+def _asm_doc_summaries_by_owner(doc, leaf_path, index, prefix, carry=None):
     """The pre-cut summaries as the pre-pass now assigns them ({boundary uuid: text}) for a document written before the
     owner was the boundary a summary's attachment chain hangs off (no `sumOwner`, 2026-11-12): its carry and frozen atoms hold
-    the older assignment, which gave most summaries the CLI writes now to the previous compaction. The document's rows give
-    every pre-cut record's type, verdict, stamp and raw parent, so the summaries' candidates are the kept user rows whose raw
-    parent chain runs through attachment rows to a boundary row, exactly as FileAdapter._summary_owner walks it; only the
-    flag and the text are not in the rows, so each candidate's record is read from the transcript, scanning forward from the
-    nearest boundary atom at or before it in its file (its byte offset is in that atom's row; the CLI writes a summary a few
-    lines after its boundary) to the record the row names, counted as the reader counts (a uuid can repeat in a file, and
-    the parse keeps the last copy). The older assignment is replayed over the summaries found, and every assignment in the
-    document's carry (the same pre-pass, run by the writer over the pre-cut records alone) must be one of it: a summary the
-    candidates miss (no chain to a boundary) would show there, unless a found summary overwrote it on the same boundary and
-    then moved away, which no live transcript holds (no summary without a chain among 695 on one machine). Returns the assignment, or None when it cannot be established exactly (a candidate past the
-    scan bound or not found, a replay that disagrees with the carry): the restore then refuses the document."""
+    the older assignment, which gave most summaries the CLI writes now to the previous compaction. Neither the rows nor the
+    atoms flag a summary (a summary emits no atom), so the pre-cut bytes of each file are read once for the lines naming
+    isCompactSummary, and each kept user row is a summary exactly when the line at its record index in its file is one: the
+    complete set, chainless summaries included (a summary whose parent chain meets no boundary through attachments keeps
+    the last boundary walked under both rules, and one assigned there before a summary that moves away is that boundary's
+    value under the newer rule; the review of 2026-11-12 found the candidate walk alone missed it). Line numbers are record
+    indexes only when every line before the cut is a record, which the file's pre-cut line count against the document's
+    record count proves. The older assignment is replayed over the summaries and every assignment in the document's carry
+    must be one of it (the carry may hold FEWER: a document written before the parent-link rule of 2026-09-19 left a
+    transcript's first summary unassigned). Returns the assignment, or None when it cannot be established exactly (a line
+    count that disagrees, a row whose line is another record's, a carry the replay contradicts, a window that may change
+    which records are replays): the restore then refuses the document."""
     rows = doc["records"]
     key = (os.path.realpath(str(leaf_path)), doc.get("t"), int(((doc["files"].get(Path(leaf_path).stem) or {}).get("cut") or [0])[0]))
     with _ASM_CKPT_LOCK:
         hit = _ASM_SUMOWNER_MEMO.get(key)
     if hit is not None:
         return dict(hit)
-    carry = dict((_carry_decode(doc["carry"]).get("summaries")) or {})
+    carry = dict(carry if carry is not None else ((_carry_decode(doc["carry"]).get("summaries")) or {}))   # the restore's own decode
     at = {r[0]: i for i, r in enumerate(rows)}
     kept = [i for i, r in enumerate(rows) if r[1] in ("a", "b", "e")]
     bounds = sorted((rows[i][5] or 0, rows[i][4], i) for i in kept if rows[i][3] == "compact_boundary")   # chrono: (stamp, seq)
     if not bounds:
         return carry
-    cands = []                                             # (row index, owner row index) of the summaries' candidates
+    srcs = _source_files(doc["files"])
+    fsids = list(doc.get("fsids") or [])
+    lines_of = {}                                          # file index -> {line number: record} of the lines naming the key
+    for fi, fsid in enumerate(fsids):
+        f, path = doc["files"].get(fsid) or {}, srcs.get(fsid)
+        if path is None:
+            return None
+        end = int(f["size"]) if f.get("skip") else int((f.get("cut") or [0])[0])
+        try:
+            hits, n_lines = _asm_scan_summary_lines(path, end)
+        except OSError:
+            return None
+        if n_lines != int(f.get("pre") or 0):
+            return None                                    # a blank or undecodable line before the cut: no line is an index
+        lines_of[fi] = hits
+    found = []                                             # (stamp, seq, row index, structural owner uuid, text)
     for i in kept:
         if rows[i][2] != "u":
             continue
-        p, hops = rows[i][9], 0
+        rec = lines_of.get(rows[i][6], {}).get(rows[i][7])
+        if rec is None:
+            continue
+        if not isinstance(rec, dict) or rec.get("uuid") != rows[i][0]:
+            return None                                    # the line at the row's index is another record's
+        if rec.get("type") != "user" or rec.get("isCompactSummary") is not True:
+            continue
+        own, p, hops = None, rows[i][9], 0                 # the attachment chain, as FileAdapter._summary_owner walks it
         while p is not None and hops < 256:
             j = at.get(p)
             if j is None:
                 break
             if rows[j][3] == "compact_boundary":
-                cands.append((i, j))
+                own = rows[j][0]
                 break
             if rows[j][2] != "t":
                 break
             p, hops = rows[j][9], hops + 1
-    # the anchors: each kept boundary's atom row (its byte offset), through the turns section or the prefix
-    want = {rows[b[2]][0] for b in bounds}
-    anchor, adopted = {}, set()                            # boundary uuid -> its line's byte offset; the adopted boundaries
-    #                                                        (a live manual /compact's: its atom row carries its own emit `seq`)
-    def _anchor_row(u_, row_):
-        if row_.get("at"):
-            anchor[u_] = int(row_["at"][0])
-        if "seq" in row_:
-            adopted.add(u_)
-    rows_of = _asm_boundary_rows(doc, index, prefix)      # the writer's map, or the scan for a document without it
-    for u_ in want:
-        k_ = (rows_of.get(u_) or (None,))[0]
-        if k_ is not None:                                 # the atoms-only form's rows are still on the document
-            _anchor_row(u_, index._row(k_) if index is not None else json.loads(doc["atoms"][k_]))
-    srcs = _source_files(doc["files"])
-    fsids = list(doc.get("fsids") or [])
-    found = []                                             # (stamp, seq, row index, structural owner uuid, text)
-    for i, j in cands:
-        fi = rows[i][6]
-        prior = [b for b in bounds if rows[b[2]][6] == fi and rows[b[2]][7] <= rows[i][7] and rows[b[2]][0] in anchor]
-        if not prior:
-            return None
-        b_ = max(prior, key=lambda b: rows[b[2]][7])
-        path = srcs.get(fsids[fi]) if fi < len(fsids) else None
-        if path is None:
-            return None
-        target = rows[i][7] - rows[b_[2]][7]               # the candidate's place after the anchor, in the reader's records: a
-        rec, n_rec, scanned = None, -1, 0                  #  uuid can repeat, and the row names the copy the parse kept
-        try:
-            with open(path, "rb") as fh:
-                fh.seek(anchor[rows[b_[2]][0]])
-                for line in fh:
-                    scanned += len(line)
-                    _count_read(str(path), len(line))
-                    ls = line.strip()
-                    if ls:
-                        try:                               # counted as the reader counts: a blank or undecodable line is
-                            r_ = json.loads(ls.decode("utf-8", "replace"))   # no record
-                        except ValueError:
-                            r_ = _UNDECODED
-                        if r_ is not _UNDECODED:
-                            n_rec += 1
-                            if n_rec == 0 and (not isinstance(r_, dict) or r_.get("uuid") != rows[b_[2]][0]):
-                                return None                # the anchor is not the boundary's record
-                            if n_rec == target:
-                                rec = r_
-                                break
-                    if scanned > _ASM_SUMOWNER_SCAN:
-                        break
-        except OSError:
-            return None
-        if not isinstance(rec, dict) or rec.get("uuid") != rows[i][0]:
-            return None
-        if rec.get("type") != "user" or rec.get("isCompactSummary") is not True:
-            continue
         stext = _text_of(_content(rec.get("message")))
-        found.append((rows[i][5] or 0, rows[i][4], i, rows[j][0], _summary_capped(stext) if stext else None))
+        found.append((rows[i][5] or 0, rows[i][4], i, own, _summary_capped(stext) if stext else None))
     found.sort()
+    par = lambda i: at.get(rows[i][9])
+    old_owner = lambda i, own_new, last: rows[i][9] if (par(i) is not None and rows[par(i)][3] == "compact_boundary") else last
+    new_owner = lambda i, own_new, last: own_new if own_new is not None else old_owner(i, own_new, last)
 
     def replay(owner_of):
-        out, bi, last = {}, 0, None
+        out, owners, bi, last = {}, [], 0, None
         for ts_, sq_, i, own_new, text in found:
             while bi < len(bounds) and (bounds[bi][0], bounds[bi][1]) < (ts_, sq_):
                 last = rows[bounds[bi][2]][0]
                 bi += 1
             own = owner_of(i, own_new, last)
+            owners.append(own)
             if own and text:
                 out[own] = text
-        return out
-    par = lambda i: at.get(rows[i][9])
-    old_owner = lambda i, own_new, last: rows[i][9] if (par(i) is not None and rows[par(i)][3] == "compact_boundary") else last
-    older = replay(old_owner)
+        return out, owners
+    older, old_owners = replay(old_owner)
     if any(older.get(b) != v for b, v in carry.items()):
-        return None                                        # an assignment the writer carried that the summaries found do not
-    #                                                        make: a summary the candidates missed. (The carry may hold FEWER: a
-    #                                                        document written before the parent-link rule of 2026-09-19 left a
-    #                                                        transcript's first summary unassigned, as its frozen atom shows.)
-    newer = replay(lambda i, own_new, last: own_new)
+        return None                                        # an assignment the writer carried that the summaries do not make
+    newer, new_owners = replay(new_owner)
     # A summary whose owner changed changes whether the restore window opens there when exactly one of the two owners
     # arms it (none: the older rule found no owner for a transcript's first compaction; or an adopted boundary, which never
     # arms), and the window decides which records after it are replays. The rows cannot say which records the window would
     # drop, so such a summary must be followed, in the walk's order over the kept rows, by an assistant record before any
     # other user record and before the cut; otherwise no exact derivation
+    adopted = set()                                        # a live manual /compact's boundary: its atom row carries its emit `seq`
+    rows_of = _asm_boundary_rows(doc, index, prefix)
+    for b in bounds:
+        k_ = (rows_of.get(rows[b[2]][0]) or (None,))[0]
+        if k_ is not None and "seq" in (index._row(k_) if index is not None else json.loads(doc["atoms"][k_])):
+            adopted.add(rows[b[2]][0])
     arms = lambda own: bool(own) and own not in adopted
-    moved_rows = set()
-    bi, last = 0, None
-    for ts_, sq_, i, own_new, text in found:
-        while bi < len(bounds) and (bounds[bi][0], bounds[bi][1]) < (ts_, sq_):
-            last = rows[bounds[bi][2]][0]
-            bi += 1
-        if arms(old_owner(i, own_new, last)) != arms(own_new):
-            moved_rows.add(i)
+    moved_rows = [f_[2] for f_, o_, n_ in zip(found, old_owners, new_owners) if arms(o_) != arms(n_)]
     if moved_rows:
         summary_rows = {f_[2] for f_ in found}
         ck = lambda i: (rows[i][5] or 0, rows[i][4])
@@ -11118,7 +11114,7 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
             # previous compaction's card. The pre-cut assignment is derived again and the pre-pass continues from it; every
             # pre-cut boundary atom is then held to the result below, as for any document: corrected on its restore, never
             # refused for it (a version bump would have parsed 163 of the live host's 232 sessions whole)
-            fixed = _asm_doc_summaries_by_owner(doc, leaf_path, index, prefix)
+            fixed = _asm_doc_summaries_by_owner(doc, leaf_path, index, prefix, st["summaries"])
             if fixed is None:
                 _asm_stat("restore:summaryOwnerRefused")   # the backstop: no exact derivation (see the helper); the whole parse
                 if index is not None:                      #  serves and offers its document, written with `sumOwner`, which
