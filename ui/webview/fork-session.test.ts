@@ -20,23 +20,33 @@ const BACKEND = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "sdk
 test("the fork affordance rides BELOW each response run — delegated, with the cut the old bubble button passed", () => {
   // the spot map: the FIRST genuine editable prompt after a run is its cut; the tip run forks everything
   assert.match(RENDER, /function applyForkSpots\(sid: string, v: View\): void \{/);
-  assert.match(RENDER, /&& senderKind\(ev\) === "user" && editable\?\.has\(ev\.uuid\)/);
-  assert.match(RENDER, /if \(run && !spots\.has\(run\)\) spots\.set\(run, ""\);/);
+  // the plan lives in fork-spots.ts since 2026-11-06 (node-tested there): the cut is a genuine editable prompt, and the tip run's
+  // spot waits for the turn to end (the kernel's status.turnOpen, never the chip: round six)
+  const PLAN = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "fork-spots.ts"), "utf8");
+  assert.match(RENDER, /forkSpotPlan\(evs, \(ev\) => senderKind\([^)]*\) === "user" && !!editable\?\.has\(ev\.uuid \|\| ""\), turnOpenOf\(s\?\.status\)\)/);
+  assert.match(PLAN, /else if \(ev\.kind === "user" && ev\.uuid && run && !spots\.has\(run\) && isCut\(ev\)\) spots\.set\(run, ev\.uuid\);/);
+  assert.match(PLAN, /if \(!turnOpen && run && !spots\.has\(run\)\) spots\.set\(run, ""\);/);
   assert.match(RENDER, /\.turn-assistant\[data-uuid="\$\{cssEscape\(anchor\)\}"\]/);
   // …applied on the marks' hooks, like the branch chips (the transcript DOM rebuilds constantly)
   assert.match(RENDER, /applyForkSpots\(sid, v\);/);
 });
 
 test("the fork button sits INLINE, right of the worked-seconds label — never its own row below it", () => {
-  // the user 2026-08-25: the elapsed footer is the flex host; a turn with no footer (the live tip)
-  // keeps the button on its own row exactly as before. The remover walks closest(.turn-assistant)
-  // because the spot may nest inside the elapsed row.
+  // the user 2026-08-25: the elapsed footer is the flex host; a turn with no footer (no clock) gives the button
+  // the footer's twin with no words, never a row of its own (round seven: a spot that appears or goes moves no
+  // row, and none floats over a row's text). The remover walks closest(.turn-assistant) because the spot may
+  // nest inside the elapsed row.
   assert.match(RENDER, /const elapsed = turn\.querySelector\(":scope > \.turn-elapsed"\) as HTMLElement \| null;/);
-  assert.match(RENDER, /if \(elapsed\) elapsed\.appendChild\(row\);\s*\n\s*else turn\.appendChild\(row\);/);
+  assert.match(RENDER, /forkLine\(turn, row\);/);
+  assert.match(RENDER, /if \(!line\) \{ line = el\("div", "fork-line"\); turn\.appendChild\(line\); \}/);
   assert.match(RENDER, /const anchor = \(old\.closest\("\.turn-assistant"\) as HTMLElement \| null\)\?\.dataset\.uuid \|\| "";/);
   const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
   assert.match(CSS, /\.turn-elapsed \{[^}]*display: flex; align-items: center; gap: 8px; min-width: 0;/s);
   assert.match(CSS, /\.turn-elapsed \.fork-spot \{ margin-top: 0; \}/);
+  assert.match(CSS, /\.turn-elapsed \.fork-spot, \.fork-line \.fork-spot \{ height: 0; align-self: center; align-items: center; \}/,
+    "the button overlays the line's own height: a line is as tall with it as without");
+  assert.doesNotMatch(CSS, /\.turn > \.fork-spot \{[^}]*position: absolute/, "no spot floats in a row's corner");
+  assert.doesNotMatch(CSS, /\.turn-elapsed \{ min-height/, "no worked line is taller for a button it may not carry");
   // the OLD home is gone: the prompt's msg-acts row no longer carries a fork (the user 2026-08-19)
   assert.doesNotMatch(RENDER, /acts\.appendChild\(fk\);/);
   // the fork GLYPH beside the word, Fork in the accessible name (T381, the user 2026-09-12): the stroke family's

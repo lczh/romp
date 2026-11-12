@@ -25,6 +25,10 @@ Scope note — what is deliberately NOT checked:
   name meaning). The rename ping (RENAME_NUDGE, 2026-08-24) is the same family — it tells a session
   its own new name — and is pinned below to stay one marker-free line with no romp nouns beyond
   the sanctioned prefix.
+- sdk_backend's ARRIVAL_NOTE (the user 2026-11-12), added to a message the user typed when it reaches a
+  turn already running: honestly labelled from romp rather than speaking as the user, by the user's
+  decision (they asked that romp not impersonate them). Pinned below like the rename ping: one
+  marker-free line, the sanctioned prefix, no romp nouns past it.
 
 SYNTHETIC fixtures only (placeholder ids, invented goal text).
 """
@@ -261,6 +265,23 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
         self.assertIn("renamed", body)
         self.assertIn("'tests'", body, "…and it names the new name itself")
 
+    def test_the_arrival_note_is_labelled_from_romp_and_speaks_plainly(self):
+        # the arrival note (the user 2026-11-12): the ONE injected ask that is labelled from romp instead of speaking as
+        # the user, by the user's decision (romp must not impersonate them). It keeps the sanctioned [romp] prefix, one
+        # line, no markers, and past the prefix no romp noun: the reader still knows nothing of cards, boards or goals
+        import os as _os
+        sb = load_source("romp_sdk_backend_voice", _os.path.join(BIN, "romp_sdk_backend.py"))
+        note = sb.ARRIVAL_NOTE
+        self.assertEqual(note, "[romp] The user won't see an answer that stays in your thinking, and is waiting on a "
+                               "reply to the message above. Answer it now in one or two plain sentences, then carry on.",
+                         "the user's approved wording, verbatim")
+        self.assertTrue(note.startswith("[romp] "), "the sanctioned prefix: honestly from romp")
+        self.assertNotIn("\n", note, "one line")
+        self.assertNotIn("<!--", note)
+        body = note.split("]", 1)[1].lower()
+        for word, why in ROMP_WORDS:
+            self.assertNotIn(word, body, "the note speaks plainly past its prefix (%r: %s)" % (word, why))
+
     def test_the_subagent_identity_note_speaks_plainly(self):
         # Subagents at standard speed (2026-10-08): the subagents' environment line names the catalog entry the recipe
         # borrows, so their system prompt gets one plain line naming the model they really run on. It names no
@@ -483,6 +504,7 @@ class TheRuleIsWrittenDown(unittest.TestCase):
         self.assertIn("SessionStart instruction", md)
         self.assertIn("marker tail", md)
         self.assertIn("housekeeping note", md)
+        self.assertIn("arrival note", md, "the one ask labelled from romp, by the user's 2026-11-12 decision")
 
 
 if __name__ == "__main__":

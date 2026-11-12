@@ -19,7 +19,7 @@ import { stripInline } from "./docreview";
 
 /** The tab's state fields, the chip's awaiting fields (kind, count, rows, peers: what an awaiting session waits on), the clock. */
 export interface SnapStatusLike extends TabStateLike, ChipStatusLike { sinceEpoch?: number | null }
-export interface SnapshotEventLike { kind?: string; md?: string; text?: string; ts?: string; t?: number }
+export interface SnapshotEventLike { kind?: string; md?: string; text?: string; ts?: string; t?: number; narration?: boolean }
 export interface SnapColor { bg: string; fg: string }
 export interface SnapSessionLike {
   name?: string; color?: SnapColor | null; status?: SnapStatusLike | null;
@@ -145,7 +145,8 @@ export function plainText(md: string, max: number): string {
   return oneLine(joined, max);
 }
 
-/** The last assistant message in the tail, one line of plain text, for the hover. */
+/** The last assistant message in the tail, one line of plain text, for the hover: the latest thing the session said, which
+ *  is its segment's reply wherever it sits (compact.ts segmentReplies), a progress note included (2026-11-06). */
 export function lastMessage(s: SnapSessionLike): string {
   const evs = s.events || [];
   for (let i = evs.length - 1; i >= 0; i--) {

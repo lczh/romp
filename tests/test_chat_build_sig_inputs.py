@@ -83,6 +83,7 @@ CENSUS = {
     "_chat_seam_open_at": ("pure", "over the events"),
     "_chat_stat_key": ("sig", "taskout", "the fold's per-output identity; the same stat the taskout dep re-takes"),
     "_chat_turn_fp": ("pure", "over a turn"),
+    "_narr_sealed": ("pure", "the fold entry's sealed thinking uuids, over the entry and the newly sealed events"),
     "_asm_cut_turn": ("pure", "over the turns' lazy markers: the first turn with a live atom (transcript)"),
     "_follower_floor": ("sig", "floor", "the floor the pusher last used, read by a build outside its cycle (the pusher's decision is the component); the tree's cut (transcript) when that floor was an older tree's cut, and then the pusher's cached build is dropped (2026-10-23)"),
     "_cursors_before": ("pure", "over the earlier turns' scalars and the note lists (transcript, states, note)"),
@@ -177,6 +178,7 @@ CENSUS = {
     "_split_reminders": ("pure", "over a text"),
     "_stamp_agents": ("sig", "taskout", "the sidecar directory and each agent transcript it reads are taskout deps (stat'd before the read, re-stat'd per cycle); the task scan is over the transcript, the liveness gate over the row and the spawn epoch (row, reg, gone)"),
     "_stamp_interrupt_causes": ("pure", "over the events"),
+    "_turn_open": ("sig", "states", "the states log's latest state and a turnCut record after it, the lane's anchor log too (the newer of the two); with no state record the turns (_session_working: downtime); when the log has the turn open and the turns have closed it, the row's state (row)"),
     "_thought_tokens": ("pure", "over one record's message (its id and usage) and the build's own set of credited ids"),
     "_stamp_running_tools": ("pure", "over the tail events, the last stop's time and whether the turn is open (_session_working over the parse)"),
     "_last_stop_iso": ("pure", "over the parse's turns (their end_turn and their stop records)"),
@@ -209,6 +211,9 @@ DOTTED = {
 
     "em.parse_z": ("pure", "a rendered orphan note's stamp, parsed for the fold's orphan gate window (round 2, item 11)"),
     "sb.echo_text_key": ("pure", "over a text"),
+    "nar.narration_rev": ("sig", "narration", "the session's main-conversation progress-note revision, a counter in memory"),
+    "nar.narration_marks": ("sig", "narration", "the progress-note store's marks for the session, keyed by its revision"),
+    "nar.narration_marked_since": ("sig", "narration", "the fold's narration gate: the uuids the store took past a revision"),
     "cm.context_rgb": ("pure", "over a percentage"),
     "cm.ramp": ("pure", "over a fraction and the colormap's stops"),
     "cm.stops_for": ("pure", "over the colormap name"),
@@ -261,7 +266,7 @@ GLOBALS = {
     "_parse_mode": ("memo", "see _parse_mode.get"),
     "_pending_ops": ("sig", "ops"),
     "bisect": ("const", "a module"), "cm": ("const", "a module"), "em": ("const", "a module"),
-    "jd": ("const", "a module"), "json": ("const", "a module"), "os": ("const", "a module"),
+    "jd": ("const", "a module"), "json": ("const", "a module"), "nar": ("const", "a module"), "os": ("const", "a module"),
     "re": ("const", "a module"), "sb": ("const", "a module"), "sys": ("const", "a module"),
     "traceback": ("const", "a module"),
 }
@@ -1063,6 +1068,20 @@ class Differential(_World):
         self.assertEqual(self.sig(), b, "byte-stable while the note stands: no rebuild per push")
         km._set_working_note(SID, "")
         self.assertEqual(self.sig(), a, "the clear (the kernel's idle-and-done lift, or the session's own) restores it")
+
+    def test_a_progress_note_mark_misses_under_narration_and_a_replayed_one_does_not(self):
+        # the progress-note store (kernel/narration.py) turns a thinking block into the agent's prose; a subagent frame's
+        # mark, or a host's replay to a restarted kernel, is filed with no transcript write and no live-tail change
+        a = self.sig()
+        km.nar.record_narration(jd.STATE, SID, "a2", [0], [0])
+        b = self.sig()
+        self.assertEqual(self.moved(a, b), ("narration",))
+        km.nar.record_narration(jd.STATE, SID, "a2", [0], [0])
+        self.assertEqual(self.sig(), b, "the same frame handed over again files nothing")
+        km.nar.record_narration(jd.STATE, PEER, "p1", [0], [0])
+        self.assertEqual(self.sig(), b, "another session's mark is not this tab's")
+        km.nar.record_narration(jd.STATE, SID, "sub1", [0], [0], sub=True)
+        self.assertEqual(self.sig(), b, "a subagent's note is the subagent viewer's, not the parent chat's")
 
     def test_the_feed_verdict_misses_under_needs_only_as_a_verdict_on_this_session(self):
         # the ledger carries the feed's per-session needs-you (needsInput); the set behind it is None until the

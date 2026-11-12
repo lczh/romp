@@ -63,6 +63,16 @@ test("the turn's thinking total sums its rows' figures back to the turn's trigge
   assert.equal(turnThoughtTokens(evs.slice(1), 4), null, "the trigger is outside the events held: no figure at all");
 });
 
+test("a progress note shown as prose still counts its message's thinking tokens in the turn's total (2026-11-06)", () => {
+  // the kernel draws a note (a thinking block the CLI listed as the model's note to the person) as an assistant row flagged
+  // narration; when it opens its message's thinking, the message's figure rides it, and the turn still thought those tokens
+  const evs = [
+    { kind: "user" }, { kind: "thinking", thinkTokens: 300 }, { kind: "assistant", narration: true }, { kind: "tool" },
+    { kind: "assistant", narration: true, thinkTokens: 120 }, { kind: "tool" }, { kind: "assistant", thinkTokens: 50 },
+  ];
+  assert.equal(turnThoughtTokens(evs, 6), 420, "the note's figure counts; a reply never carries one (a stray is not read)");
+});
+
 test("render.ts: the frame is dispatched to the in-place painters, and the 1 s timer drives the clocks", () => {
   assert.match(RENDER, /else if \(m\.type === "liveStatus"\) applyLiveStatus\(m\);/);
   assert.match(RENDER, /setInterval\(\(\) => \{ apiRetryTick\(\); retryingTick\(\); liveStatusTick\(\); \}, 1000\);/,

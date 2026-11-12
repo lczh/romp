@@ -41,7 +41,8 @@ import { windowFocusedElement } from "./window-focus";   // the window's focus a
 import { markerLabel, dayContext, DayWalk, relativeLabel, relativeLines } from "./time-marker";
 import { composeStatusWidgets, folderIconNode, folderLink, type StatusRecord } from "./status-widgets";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
-import { compactDisplay, isFoldableNoticeShape, itemAnchor, itemHolds, runRows, thoughtHasWords, thoughtOf, thoughtKey, type DisplayItem } from "./compact";
+import { compactDisplay, isFoldableNoticeShape, isProseShape, itemAnchor, itemHolds, runRows, thoughtHasWords, thoughtOf, thoughtKey, type DisplayItem, type NoteRoles } from "./compact";
+import { forkSpotPlan } from "./fork-spots";
 import { insertRun, regionsFromRuns, gapHeight, gapTurnPx, GAPS_SHARE, HIDDEN_SHARE, heldUnitPx, LAYOUT_LIMIT_FALLBACK, pageAt, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, kernelTurnOf, measureTurnPx, type MeasuredRow, type Region, type Run, type Gap, type Ev } from "./chat-regions";
 import { senderKind, SenderKind } from "./sender-identity";
 import { railPads, TICK_PAD } from "./rail-pads";   // the comment ticks' clamped hit pads (the comment-forward rail, 2026-09-24)
@@ -96,7 +97,7 @@ import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
 import { injectedHead, type InjectedSource } from "./injected-source";
 import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, subHeadParts, subWaitTail, openIconSvg, pinIconSvg, type SubMeta, type AgentGist, type AgentGistRow, type GistLine } from "./subagent-view";
 import { previewKind, previewFull, previewVideoUrl, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, installMdImgZoom, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
-import { mdLayout, opensInLightbox, isVideoUrl, mdImgFile, mdImgFileSrc, mdImgPathPass, type MdLayout, type MdImage, type MdPaths } from "./md-images";   // the pictures a message's markdown embeds, off its text, and where its path figures land: the lightbox's sequence (chatImagesFor)
+import { mdLayout, opensInLightbox, isVideoUrl, mdImgFile, mdImgPathPass, type MdLayout, type MdImage, type MdPaths } from "./md-images";   // the pictures a message's markdown embeds, off its text, and where its path figures land: the lightbox's sequence (chatImagesFor)
 import { openFileClick } from "./file-view";                  // a clicked file WITH its gesture (pdf-new-tab.test.ts)
 import { fileLinkRoute, browseRoute, type BrowseRoute } from "./file-route";   // where a file or folder click opens: here, or the Files pane (file-route.test.ts, browse-route.test.ts)
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
@@ -209,7 +210,7 @@ type ChatEvent = (
   // gist: a romp SYSTEM notice's USER-facing head, lifted by the kernel from the notice's <!-- romp-gist -->
   // marker (2026-09-08) — the body is written to the agent and never doubles as the head
   | { kind: "user"; md: string; uuid?: string; ts?: string; reminders?: string[]; taskOutputs?: TaskOutputs; human?: boolean; romp?: boolean; rompAuto?: boolean; rompSystem?: boolean; gist?: string; spendGuard?: boolean; interruptCause?: string; interruptSpend?: SpendFigures; followUp?: boolean; goal?: string; fuCtx?: string; canned?: string; tag?: string; mid?: string; mids?: string[]; images?: { src: string; path?: string }[]; undelivered?: boolean; echoT?: number; absorbed?: boolean; sentAt?: number; hiddenByPending?: boolean; source?: InjectedSource; preamble?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }
-  | { kind: "assistant"; md: string; uuid?: string; ts?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }   // pathPreview: the links a hover may preview, by kind (T351). spacePaths: backticked filenames WITH spaces the kernel verified exist (build_session _space_paths) → whole-span links. pathLinks: path-shaped tokens the kernel verified against the filesystem, token → real open target (build_session _path_links) — the linkifier's gate
+  | { kind: "assistant"; md: string; uuid?: string; ts?: string; narration?: boolean; thinkTokens?: number; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }   // narration: a PROGRESS NOTE, a thinking block the CLI's stream listed as the model's note to the person (kernel build_session, kernel/narration.py; 2026-11-06), drawn as the agent's prose like any reply; thinkTokens rides it when it opens its API message's thinking. pathPreview: the links a hover may preview, by kind (T351). spacePaths: backticked filenames WITH spaces the kernel verified exist (build_session _space_paths) → whole-span links. pathLinks: path-shaped tokens the kernel verified against the filesystem, token → real open target (build_session _path_links) — the linkifier's gate
   | { kind: "thinking"; text: string; encrypted: boolean; uuid?: string; ts?: string; thinkTokens?: number; row?: { gist: string; key?: string } }   // thinkTokens: the exact thinking tokens of the API message this row opens (usage.output_tokens_details.thinking_tokens, on its first thinking row only; kernel build_session), the "Thought · 2.5k tokens" label and the turn's total
   //   row: PAGE-ONLY, never from the kernel: compact mode's collapsed Thought row (thoughtEvent), drawn by renderThought
   | {
@@ -399,7 +400,7 @@ interface ChatNotice { itemId: string; key: string; rev: number; title: string; 
                        warns?: BadgeItem["warns"]; failLog?: BadgeItem["failLog"]; doneConfirming?: boolean | null;
                        summaryAnchorUuid?: string | null; summaryAnchorQuote?: string | null; summaryAnchorsPara?: SectionItem["summaryAnchorsPara"];
                        blocked?: unknown; column?: string | null; judging?: boolean | null; working?: SpinFields["working"]; sessState?: string | null }
-interface Status { state: ChipState; sinceEpoch: number | null; modelFallback?: ModelFallback | null; notices?: ChatNotice[] | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; bgServiceIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; modePending?: boolean; fast?: string; fastCapable?: boolean | null; auth?: string; authLive?: string; authPending?: boolean; authOwn?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; needsYou?: boolean | null; needsYouCount?: number | null; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; apiNoRetry?: boolean; subagentStandard?: boolean; subagentStandardOffered?: boolean; subagentSpeed?: string; subagentStandardRetry?: boolean; relaunchWaits?: string; relaunchCuts?: string; modelWait?: string; fastPending?: boolean; }   // subagentStandard = the session's "Subagents at standard speed (experimental)" switch, subagentStandardOffered = the fast menu shows its row (the switch is on, or the model is the one it needs), subagentSpeed = the row's sub-line: the kernel's speed check (usage.speed off the transcripts) or what holds the switch back (2026-10-08)   // relaunchWaits = what a pick's relaunch waits for, in words ("2 background tasks"; absent or "" when nothing holds it: the kernel's relaunch_waits, 2026-10-01, when a pick stopped cutting the work a session runs): the Billing sub-line says it, so does the effort change's chat line while the effort badge wears its dots, and for a waiting bypass pick (modePending) the mode picker's Bypass row and the tab's hover say it   // modelWait = the model pick the model badge's dots stand for when it waits for a relaunch ("Fable 5.2"; "" when none does: a pick the session's older Claude Code did not know, applied by the relaunch onto the installed one, the review of #455): the badge's hover and the tab's say it with relaunchWaits (modelWaitText)   // relaunchCuts = what pushing that pick through now would end (the kernel's relaunch_cuts; a queued message survives a relaunch, so it is not named): the Apply now row's sub-line and confirm (apply-now.ts)   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions): the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you: the red tab) rather than a transient API error (amber, retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried: retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried: a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); apiNoRetry = the blocking notice is one nothing retries (the launch error's noRetry, the Codex bracket's end notices: a compaction Codex could not run, the app-server's death, or a kernel restart whose outcome the new kernel cannot learn; the ends named 2026-09-22, when the restart end outgrew a gloss of one failed compaction): the card draws no Retry, no Stop-all and no retrying-soon meta (2026-09-21); needsYou = the FEED filed a card of this session under needs-you (build_session, from the kernel's last feed build; null before the first) → the Needs you ring widget wears a dashed magenta ring on the tab in every live state, working included (tab-state.ts RING_TEST, tab-widgets.ts composeTabRing; the ask ring of 2026-09-13, renamed and recoloured 2026-09-21); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
+interface Status { state: ChipState; sinceEpoch: number | null; modelFallback?: ModelFallback | null; notices?: ChatNotice[] | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; bgServiceIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; modePending?: boolean; fast?: string; fastCapable?: boolean | null; auth?: string; authLive?: string; authPending?: boolean; authOwn?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; turnOpen?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; needsYou?: boolean | null; needsYouCount?: number | null; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; apiNoRetry?: boolean; subagentStandard?: boolean; subagentStandardOffered?: boolean; subagentSpeed?: string; subagentStandardRetry?: boolean; relaunchWaits?: string; relaunchCuts?: string; modelWait?: string; fastPending?: boolean; }   // subagentStandard = the session's "Subagents at standard speed (experimental)" switch, subagentStandardOffered = the fast menu shows its row (the switch is on, or the model is the one it needs), subagentSpeed = the row's sub-line: the kernel's speed check (usage.speed off the transcripts) or what holds the switch back (2026-10-08)   // relaunchWaits = what a pick's relaunch waits for, in words ("2 background tasks"; absent or "" when nothing holds it: the kernel's relaunch_waits, 2026-10-01, when a pick stopped cutting the work a session runs): the Billing sub-line says it, so does the effort change's chat line while the effort badge wears its dots, and for a waiting bypass pick (modePending) the mode picker's Bypass row and the tab's hover say it   // modelWait = the model pick the model badge's dots stand for when it waits for a relaunch ("Fable 5.2"; "" when none does: a pick the session's older Claude Code did not know, applied by the relaunch onto the installed one, the review of #455): the badge's hover and the tab's say it with relaunchWaits (modelWaitText)   // relaunchCuts = what pushing that pick through now would end (the kernel's relaunch_cuts; a queued message survives a relaunch, so it is not named): the Apply now row's sub-line and confirm (apply-now.ts)   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions): the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you: the red tab) rather than a transient API error (amber, retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried: retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried: a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); apiNoRetry = the blocking notice is one nothing retries (the launch error's noRetry, the Codex bracket's end notices: a compaction Codex could not run, the app-server's death, or a kernel restart whose outcome the new kernel cannot learn; the ends named 2026-09-22, when the restart end outgrew a gloss of one failed compaction): the card draws no Retry, no Stop-all and no retrying-soon meta (2026-09-21); needsYou = the FEED filed a card of this session under needs-you (build_session, from the kernel's last feed build; null before the first) → the Needs you ring widget wears a dashed magenta ring on the tab in every live state, working included (tab-state.ts RING_TEST, tab-widgets.ts composeTabRing; the ask ring of 2026-09-13, renamed and recoloured 2026-09-21); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
 
 // The side a pick this box cannot bill actually fell to ("login" | "key"), "" when nothing did: the kernel's
 // authPickFell (the launch's own decision, 2026-09-09). An older kernel without the field is read the way the
@@ -1752,7 +1753,12 @@ function el(tag: string, cls?: string): HTMLElement {
 // rule would strip, so it never passes through DOMPurify; the fill is a post-pass sanitizeMd itself runs,
 // registered by chat-md.ts, the module that installs the grammar.
 
-function md(src: string, repo: string | null = prRepoFor(), paths: MdPaths | null = null): string {
+// `filePics`: a picture whose src names a picture file loads it through the kernel for the session the text belongs to
+// (renderingOwnerSid), which is right only for text that session wrote. An incoming postal body was written by a PEER (the
+// review of #454): its relative path names a file in the peer's folder and an absolute one a file on the peer's machine, and
+// the card carries the sender's name and host but no session id to resolve against, so such a body passes false and its
+// pictures keep their srcs as written (the alt text, as before the path pass).
+function md(src: string, repo: string | null = prRepoFor(), paths: MdPaths | null = null, filePics = true): string {
   // Transcript text (user prompts, assistant output, subagent reports, postal
   // bodies) is UNTRUSTED and `marked` emits raw HTML verbatim, so its output
   // must be sanitized before it ever reaches .innerHTML — otherwise a payload
@@ -1768,7 +1774,7 @@ function md(src: string, repo: string | null = prRepoFor(), paths: MdPaths | nul
     // the sanitizer's verdicts stand and a marked-autolinked GitHub URL is never wrapped twice.
     const clean = sanitizeMd(dirty);   // the sanitized <body>, its math rendered
     linkifyPrRefs(clean, repo);
-    if (canPreview()) mdImgPathPass(clean, renderingOwnerSid ?? activeId, paths);   // a picture whose src is a path loads the file through the kernel, as a path line's figure does (md-images.ts)
+    if (filePics && canPreview()) mdImgPathPass(clean, renderingOwnerSid ?? activeId, paths);   // a picture whose src is a path loads the file through the kernel, as a path line's figure does (md-images.ts)
     mdImgPostPass(clean);   // a markdown image whose URL failed this page life is parked before the browser fetches it (T291c)
     return clean.innerHTML;
   } catch { const d = document.createElement("div"); d.textContent = src; return d.innerHTML; }
@@ -2576,16 +2582,16 @@ function chatImagesFor(sid: string | null | undefined, from?: Element | null): L
     const byMention = (toks: string[]) => toks.map((tok) => ({ tok, m: text.indexOf(tok) }))
       .sort((x, y) => (x.m < 0 ? Infinity : x.m) - (y.m < 0 ? Infinity : y.m));
     const links = ev.pathLinks || {};
-    // a picture the message embeds from a FILE (md-images.ts mdImgFile: a src that is a path, which md() loads through the
-    // kernel) is that file's stop where it is written, with the message's pin: the source its click opens. Taken first, so
-    // the kernel's verified link for the same path (it reads the picture's path as it reads any in the text) adds no figure
-    // the page never draws
-    const files = new Map<MdImage, { path: string; pin?: string }>();
+    // a picture the message embeds from a FILE (md-images.ts mdImgFile: a src that is a path to a picture file, which md()
+    // loads through the kernel) is that file's stop where it is written, with the message's pin: the source its click opens.
+    // Taken first, so the kernel's verified link for the same path (it reads the picture's path as it reads any in the text)
+    // adds no figure the page never draws. A path to any other file is no file here: its src stays as written (below)
+    const files = new Set<MdImage>();
     for (const m of layout.images) {
       const f = m.video ? null : mdImgFile(m.url, { links, pins });
       if (!f) continue;
-      files.set(m, f);
-      if (previewKind(f.path) === "img" && !here.has("p:" + f.path)) here.set("p:" + f.path, { e: { path: f.path, sid: scope.fileSid, pin: f.pin }, at: m.at, rank: rank++ });
+      files.add(m);
+      if (!here.has("p:" + f.path)) here.set("p:" + f.path, { e: { path: f.path, sid: scope.fileSid, pin: f.pin }, at: m.at, rank: rank++ });
     }
     for (const { tok, m } of byMention(ev.spacePaths || [])) add(tok, layout.figureAt(m));
     for (const { tok, m } of byMention(Object.keys(links))) add(links[tok], layout.figureAt(m));
@@ -2593,10 +2599,9 @@ function chatImagesFor(sid: string | null | undefined, from?: Element | null): L
     // the pictures and videos the message embeds where it writes them, then the still each link to a video file renders
     // after its block (md-images.ts videoLinks; render.ts linkifyFileUris draws it there, after the block's path figures)
     for (const m of [...layout.images, ...layout.videoLinks]) {
-      const f = files.get(m);
-      if (f && previewKind(f.path) === "img") continue;   // the file's own stop, above
+      if (files.has(m)) continue;   // the file's own stop, above
       let url = "";
-      try { url = new URL(f ? mdImgFileSrc(f, scope.fileSid) : m.url, document.baseURI).href; } catch { continue; }   // a file the kernel serves, as md() loads it
+      try { url = new URL(m.url, document.baseURI).href; } catch { continue; }   // as the page resolves it
       if (!opensInLightbox(url, m.video ? "video" : "img") || here.has("u:" + url)) continue;   // as a click opens: a picture's schemes, a video's narrower ones
       here.set("u:" + url, { e: m.video ? { url, alt: m.alt, video: true } : { url, alt: m.alt }, at: m.at, rank: rank++ });
     }
@@ -4472,7 +4477,8 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
       return notice({ src: "session", glyph: "session", gist: SETTLE_GIST, cls: "turn-interrupt",
                       tip: "the model closed the interrupted turn with nothing to add; the real work resumes below" });
     }
-    const turn = el("div", "turn turn-assistant");
+    // a progress note (ev.narration) is the agent speaking mid-turn: the same prose as a reply, its class a hook only
+    const turn = el("div", "turn turn-assistant" + (ev.narration ? " turn-narration" : ""));
     turn.appendChild(dot("ring"));
     const body = el("div", "assistant md");
     body.innerHTML = md(ev.md, undefined, { links: ev.pathLinks, pins: ev.pathPins });   // a picture that names a file shows the bytes the message pinned
@@ -6258,7 +6264,8 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   // 2026-07-25, who watched a card open and snap shut a moment later: a DOM-only toggle died with every push).
   const { gist: summaryText, body: fullMd } = postalHead(ev);   // gist.ts: the caption, else the CLIPPED first line; the fold whenever the gist does not carry the whole message (T294)
   let body: HTMLElement | null = null;
-  if (fullMd) { body = el("div", "notice-md md"); body.innerHTML = md(fullMd, postalRepoFor(ev)); highlight(body); linkTerms(body); }   // a mail body links the reader's group's terms (T351 stage 2; the sender's group is a later refinement)
+  // …and its pictures of files load only when this session wrote it (md's filePics): a peer's paths name the peer's disk
+  if (fullMd) { body = el("div", "notice-md md"); body.innerHTML = md(fullMd, postalRepoFor(ev), null, ev.direction === "out"); highlight(body); linkTerms(body); }   // a mail body links the reader's group's terms (T351 stage 2; the sender's group is a later refinement)
   // an incoming QUESTION opens by default: a reply is owed, and the whole ask is what you need to read
   const owed = !!intent && intent.cls === "question" && ev.direction === "in";
   const turn = notice({ src, glyph: "peer", gist: summaryText, meta, body, open: owed,
@@ -11735,26 +11742,30 @@ function applyForkSpots(sid: string, v: View): void {
   const s = sessions.get(sid);
   const evs = (s?.events || []) as ChatEvent[];
   const editable = (s as any)?._editable as Set<string> | undefined;
-  const spots = new Map<string, string>();   // last-assistant-of-run uuid -> cut uuid ("" = whole conversation)
-  let run: string | null = null;             // the newest assistant uuid whose run has no cut yet
-  for (const ev of evs) {
-    if (ev.kind === "assistant" && ev.uuid) run = ev.uuid;
-    else if (ev.kind === "user" && ev.uuid && run && !spots.has(run)
-             && senderKind(ev) === "user" && editable?.has(ev.uuid)) {
-      spots.set(run, ev.uuid);   // the FIRST prompt after the run = the cut just below its response
-    }
-  }
-  if (run && !spots.has(run)) spots.set(run, "");   // the tip run: nothing follows -> whole conversation
+  // last-response-of-run uuid -> cut uuid ("" = whole conversation): fork-spots.ts, the FIRST genuine editable prompt after the
+  // run its cut; nothing in a turn still OPEN anchors a spot, and the tip run's spot waits for the turn's end (the kernel's
+  // status.turnOpen, the running-call stamp's reading, never the chip: a permission prompt or a retry moves the chip mid-turn)
+  const spots = forkSpotPlan(evs, (ev) => senderKind(ev as { human?: boolean; romp?: boolean; tag?: string; md?: string }) === "user" && !!editable?.has(ev.uuid || ""), turnOpenOf(s?.status));
   for (const old of Array.from(v.el.querySelectorAll(".fork-spot")) as HTMLElement[]) {
     // closest, not parentElement: the spot may nest inside the turn's elapsed row (below)
     const anchor = (old.closest(".turn-assistant") as HTMLElement | null)?.dataset.uuid || "";
-    if (spots.get(anchor) !== old.dataset.cut) old.remove();   // gone, or its cut moved
+    // …and a spot on a later row of the response's turn (forkHost) names its response itself. A spot whose host is no longer
+    // the response's last row (a row landed after it, a line opened or closed) is not where it belongs: it goes, so a
+    // response never carries two
+    const own = old.dataset.anchor || anchor;
+    const prose = v.el.querySelector(`.turn-assistant[data-uuid="${cssEscape(own)}"]`) as HTMLElement | null;
+    if (spots.get(own) !== old.dataset.cut || !prose || old.closest(".turn") !== forkHost(prose, old.dataset.cut || "")) old.remove();   // gone, moved, or rehomed
   }
+  const tail = new Set<HTMLElement>();   // the rows whose hover reveals a spot: each response and the rows after it, to its host
   for (const [anchor, cut] of spots) {
-    const turn = v.el.querySelector(`.turn-assistant[data-uuid="${cssEscape(anchor)}"]`) as HTMLElement | null;
-    if (!turn || turn.querySelector(".fork-spot")) continue;
+    const prose = v.el.querySelector(`.turn-assistant[data-uuid="${cssEscape(anchor)}"]`) as HTMLElement | null;
+    if (!prose) continue;
+    const turn = forkHost(prose, cut, tail);   // the row its turn's "worked …" line sits on
+    const had = turn.querySelector(".fork-spot") as HTMLElement | null;
+    if (had) { forkLine(turn, had); continue; }   // homed in the row's line again (a worked line that came or went since)
     const row = el("div", "fork-spot");
     row.dataset.cut = cut;
+    row.dataset.anchor = anchor;
     const fk = el("button", "msg-fork") as HTMLButtonElement;
     fk.type = "button";
     // the fork glyph beside the word (T381, the user 2026-09-12: a line from the left branching into two that run
@@ -11767,12 +11778,69 @@ function applyForkSpots(sid: string, v: View): void {
       : "Fork the session — a new parallel session continues this whole conversation; this one is untouched";
     row.appendChild(fk);
     // INLINE with the "worked …" seconds label when the turn has one (the user 2026-08-25: not on a
-    // new row — just to the right of it). The elapsed row is the flex host; a turn with no footer
-    // (the live tip) keeps the button on its own row exactly as before.
-    const elapsed = turn.querySelector(":scope > .turn-elapsed") as HTMLElement | null;
-    if (elapsed) elapsed.appendChild(row);
-    else turn.appendChild(row);
+    // new row — just to the right of it). The elapsed row is the flex host, and the button overlays its own
+    // height, so the line is as tall with it as without (styles.css). A turn with no clock draws no worked
+    // line: the button gets a line of its own there, the worked line's twin with no words (forkLine).
+    forkLine(turn, row);
   }
+  for (const line of Array.from(v.el.querySelectorAll(".fork-line")) as HTMLElement[]) if (!line.querySelector(".fork-spot")) line.remove();
+  // the reveal (styles.css .fork-tail): a hover on the response, on its tool line's head, on any of its calls or on any row
+  // after it shows the spot its turn ends on. Diffed, so a pass that changes nothing writes no class
+  for (const n of Array.from(v.el.querySelectorAll(":scope > .fork-tail")) as HTMLElement[]) if (!tail.has(n)) n.classList.remove("fork-tail");
+  for (const n of tail) if (!n.classList.contains("fork-tail")) n.classList.add("fork-tail");
+}
+
+/** Whether a session's turn is OPEN: the kernel's status.turnOpen (_turn_open, the reading the running-call stamp takes), true
+ *  from the prompt to the CLI's result frame through a permission prompt, a question, a retry and a restart's reattach, all
+ *  of which move the chip, and through a Stop hook's block and a compaction mid-turn, which the transcript's end_turn does
+ *  not see. A Stop press closes it at the press (the backend files "idle" then, before the CLI has stopped). The fork spots and the "worked …" line key on it,
+ *  so neither appears mid-turn only to go again when the turn resumes. A kernel that sends no turnOpen: its chip (working or
+ *  compacting) stands in, as before. */
+function turnOpenOf(st: Status | undefined): boolean {
+  if (!st) return false;
+  const chip = st.state === "working" || st.state === "compacting";
+  return typeof st.turnOpen === "boolean" ? st.turnOpen || st.state === "compacting" : chip;
+}
+
+/** The row a response's fork spot rides: the one carrying its turn's "worked …" line, the line's inline home, so a spot that
+ *  lands at the turn's end takes no row of its own and moves nothing. That line sits on the turn's last row before the cut
+ *  prompt (`cut`; "" for the tip: the newest row), whatever lies between: the response's tool line (its calls, when the line
+ *  is open), a question box and the work after it, a Thought row, a tool after a summary, an error card the turn ended on.
+ *  The walk runs from the response to the cut's row, a queued bubble or the end; a turn with no worked line (no clock) keeps
+ *  the spot on the last row of the work after its response. Collects the rows from the response to the host into `tail`, the
+ *  rows whose hover reveals the spot. */
+function forkHost(prose: HTMLElement, cut: string, tail?: Set<HTMLElement>): HTMLElement {
+  const rows: HTMLElement[] = [prose];
+  let foot = prose.querySelector(":scope > .turn-elapsed") ? 0 : -1, work = 0, inWork = true;
+  for (let n = prose.nextElementSibling as HTMLElement | null; n; n = n.nextElementSibling as HTMLElement | null) {
+    if (n.classList.contains("day-divider")) continue;
+    if (!n.classList.contains("turn") || n.classList.contains("turn-queued") || n.classList.contains("turn-assistant") || (cut && n.dataset.uuid === cut)) break;
+    rows.push(n);
+    if (n.querySelector(":scope > .turn-elapsed")) foot = rows.length - 1;
+    if (inWork && isWorkRow(n)) work = rows.length - 1; else inWork = false;
+  }
+  const at = foot >= 0 ? foot : work;
+  if (tail) for (let i = 0; i <= at; i++) tail.add(rows[i]);
+  return rows[at];
+}
+/** Home a fork spot in its row's line: the row's "worked …" line, else a line of the spot's own (.fork-line, the worked line's
+ *  twin with no words: a turn with no clock), dropped once a worked line arrives. */
+function forkLine(turn: HTMLElement, spot: HTMLElement): void {
+  const elapsed = turn.querySelector(":scope > .turn-elapsed") as HTMLElement | null;
+  let line = elapsed;
+  if (!line) {
+    line = turn.querySelector(":scope > .fork-line") as HTMLElement | null;
+    if (!line) { line = el("div", "fork-line"); turn.appendChild(line); }
+  }
+  if (spot.parentElement !== line) line.appendChild(spot);
+  if (elapsed) turn.querySelector(":scope > .fork-line")?.remove();
+}
+/** A row of the agent's work: a tool call, a tool run (its line or a row of it open), a Thought row (a thinking row in full
+ *  mode). Never a notice, a notice run, a question box or a message. */
+function isWorkRow(n: HTMLElement): boolean {
+  const c = n.classList;
+  if (!c.contains("turn") || c.contains("turn-noticegroup") || c.contains("turn-notice")) return false;
+  return c.contains("turn-tool") || c.contains("turn-toolgroup") || c.contains("turn-thought") || c.contains("turn-thinking");
 }
 
 /** Yellow ticks on the chat's scroll rail marking commented spots (the user 2026-08-15) — one per
@@ -12464,6 +12532,7 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
         list.appendChild(it.kind === "toolgroup"
           ? renderToolGroup(runTools(evs, it.indices), prev, key, open)   // the head counts the run's tools only
           : renderNoticeGroup(run, evs[anchor], prev, key, open));
+        if (it.kind === "toolgroup") foldedRunHead(list.lastElementChild as HTMLElement, evs, it, open, turnWorkedSecs(evs, it.indices[it.indices.length - 1], thWorking), null);
         let exit: number | null;   // the epoch the run leaves the walk on (the rail chain and the day mark alike)
         if (open) {
           // the run's own members, as the chat draws them: a tool run's thoughts as Thought rows (runRows), a notice run's notices
@@ -12497,6 +12566,7 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
       // turnWorkedSecs, with the thread session's own busy reading standing in for `working`
       const node = renderEvent(ev, prev, turnWorkedSecs(evs, it.index, thWorking));
       list.appendChild(node);
+      if (it.attached) node.classList.add("tool-attached");   // a lone call after a prose row, tucked under it
       if (!quoteHost && ev.kind === "user") quoteHost = node;
       const ep = eventEpoch(ev);
       if (ep != null) prev = ep;
@@ -14173,7 +14243,7 @@ function scrollToAnchor(uuid: string): boolean {
         openFolds.add(toolGroupKey(s.events[hit.indices[0]]));
       if (hit && hit.kind === "noticegroup" && hit.indices.includes(idx))
         openFolds.add(noticeGroupKey(s.events[hit.indices[0]]));
-      const working = s.status.state === "working" || s.status.state === "compacting";
+      const working = turnOpenOf(s.status);   // the turn not yet ended: no "worked …" line yet (turnOpenOf)
       renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), working);
       // Re-query with the SAME three selectors the first lookup used. data-mids was missing here, so an
       // unhydrated postal turn (whose message ids live only in data-mids) could be found in the events,
@@ -14329,7 +14399,7 @@ function landNearestMoment(t: number): boolean {
   const items = displayItems(s);
   let u = items.findIndex((it) => itemHolds(it, best));
   if (u < 0) u = Math.max(0, items.findIndex((it) => itemFirstEvent(it) >= best));
-  const working = s.status.state === "working" || s.status.state === "compacting";
+  const working = turnOpenOf(s.status);   // the turn not yet ended: no "worked …" line yet (turnOpenOf)
   renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), working);
   const target = (uuid ? v.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"]`) : null)
     || (v.el.querySelector(`[data-unit="${u}"]`) as HTMLElement | null);
@@ -14850,7 +14920,7 @@ function syncViewInner(id: string, atBottom?: boolean): View {
     v.rendered = 0; v.stale = false; v.winStart = 0; v.winEnd = 0; v.painted = undefined; v.rediff = false;
     return v;
   }
-  const working = s.status.state === "working" || s.status.state === "compacting";
+  const working = turnOpenOf(s.status);   // the turn not yet ended: no "worked …" line yet (turnOpenOf)
   // The footer on the current turn's last reply reads the session's working state (on once idle, off while
   // it works), and a status-only tail changes that with no event change — the no-op fast path below would
   // leave the footer as it was. So the state is remembered per view, and a flip patches the footer there.
@@ -15002,7 +15072,8 @@ function unitSig(v: View, s: Session, it: DisplayItem, prevEpoch: number | null,
   if (it.kind === "gap") return "gap|" + it.lo + "|" + it.hi + "|" + it.before + "|" + gapTurnPx(s.regions ?? [], v.pxPerTurn, gapsMaxPx()) + "|" + (gapHasAsk(s.id, it) ? "ask" : "");
   const f0 = itemFirstEvent(it);
   let sig = it.kind + "|" + (prevEpoch ?? "") + "|" + (mark ?? "") + "|" + (turns && f0 < turns.length ? turns[f0] : "");
-  if (it.kind === "toolgroup") sig += openFolds.has(toolGroupKey(s.events[f0])) ? "|open" : "|shut";
+  if (it.kind === "toolgroup") sig += (openFolds.has(toolGroupKey(s.events[f0])) ? "|open" : "|shut") + (it.attached ? "|att" : "");
+  else if (it.kind === "event" && it.attached) sig += "|att";
   else if (it.kind === "noticegroup") sig += openFolds.has(noticeGroupKey(s.events[f0])) ? "|open" : "|shut";
   const editable = (s as any)._editable as Set<string> | undefined;
   for (const i of unitReads(it, s.events)) {
@@ -15037,9 +15108,9 @@ function sizeBottomSpacer(v: View, bot: HTMLElement, top: HTMLElement | null): v
 // either way. `items` is the view's unit list (both modes since 2026-09-23: a history gap is a unit too, so an event's
 // index is not its unit's number in normal mode either, and reading it as one patched the row above the reply):
 // the window's start maps to its first event and the reply's event index back to the unit whose node carries it.
-// A reply with no node of its own shows no footer: a thinking row compact mode hides (a textless one, or a thought whose
-// row a later block of it closes), or a member of a COLLAPSED
-// run (its head carries no footer), so there is nothing to patch. An EXPANDED run's member row carries one, and that
+// A reply with no node of its own: a thinking row compact mode hides (a textless one, or a thought whose row a later block
+// of it closes) shows no footer, nor does a member in the middle of a COLLAPSED run; the LAST member of a collapsed tool run
+// has its footer on the run's head (foldedRunHead, patched here like any node). An EXPANDED run's member row carries one, and that
 // row is patched here like any other node (found by the run's unit and the reply's place in the run): both callers
 // return on the state they read before the patch, so a repaint mark set here would wait for a frame an idle session
 // never gets (review find, 2026-09-23). Only a run outside the painted window keeps the mark, for the paint that brings
@@ -15054,21 +15125,26 @@ function patchWorkedFooters(v: View, s: Session, from: number, working: boolean,
     const unit = unitOfEvent(ev);
     let node: HTMLElement | null = null;
     if (unit < 0) {
-      // the reply is a member of a run (or a row compact mode hides): a collapsed run's head carries no footer; an expanded
-      // run's rows follow its head in it.indices order, each tagged with the run's unit and tg-child (appendItem)
+      // the reply is a member of a run (or a row compact mode hides): a collapsed TOOL run whose last member it is carries the
+      // footer on its head (closedRunFooter), any other collapsed run none; an expanded run's rows follow its head in it.indices
+      // order, each tagged with the run's unit and tg-child (appendItem)
       const run = items ? items.findIndex((it) => (it.kind === "toolgroup" || it.kind === "noticegroup") && it.indices.includes(ev)) : -1;
       const it = run >= 0 ? items![run] : null;
       if (!it || (it.kind !== "toolgroup" && it.kind !== "noticegroup")) continue;
-      if (!openFolds.has(it.kind === "toolgroup" ? toolGroupKey(s.events[it.indices[0]]) : noticeGroupKey(s.events[it.indices[0]]))) continue;
-      const rows = v.el.querySelectorAll(`:scope > [data-unit="${run}"].tg-child`);
-      // one row per tool and per stretch of thoughts (runRows), the footer on a row's last member, as appendItem draws them
-      const at = (it.kind === "toolgroup" ? runRows(it.indices, (i) => s.events[i].kind === "thinking") : it.indices.map((i) => [i]))
-        .findIndex((row) => row[row.length - 1] === ev);
-      if (at < 0) continue;   // a thought inside a row whose later block follows it: that row carries no footer of this event's
-      node = at < rows.length ? (rows[at] as HTMLElement) : null;
-      // The row is patched in this call, never left to a repaint: both callers return on the state they read before the
-      // patch, and an idle session gets no next frame for it to ride (review find, 2026-09-23). Only a run outside the painted
-      // window takes the mark, for the paint that brings it in.
+      const shut = !openFolds.has(it.kind === "toolgroup" ? toolGroupKey(s.events[it.indices[0]]) : noticeGroupKey(s.events[it.indices[0]]));
+      if (shut && (it.kind !== "toolgroup" || it.indices[it.indices.length - 1] !== ev)) continue;
+      if (shut) node = v.el.querySelector(`:scope > [data-unit="${run}"]:not(.day-divider)`) as HTMLElement | null;
+      else {
+        const rows = v.el.querySelectorAll(`:scope > [data-unit="${run}"].tg-child`);
+        // one row per tool and per stretch of thoughts (runRows), the footer on a row's last member, as appendItem draws them
+        const at = (it.kind === "toolgroup" ? runRows(it.indices, (i) => s.events[i].kind === "thinking") : it.indices.map((i) => [i]))
+          .findIndex((row) => row[row.length - 1] === ev);
+        if (at < 0) continue;   // a thought inside a row whose later block follows it: that row carries no footer of this event's
+        node = at < rows.length ? (rows[at] as HTMLElement) : null;
+      }
+      // The row (or a collapsed run's head) is patched in this call, never left to a repaint: both callers return on the
+      // state they read before the patch, and an idle session gets no next frame for it to ride (review find, 2026-09-23).
+      // Only a run outside the painted window takes the mark, for the paint that brings it in.
       if (!node) { if (v.painted) { v.painted.sig[run] = undefined; v.rediff = true; } continue; }
     } else {
       node = v.el.querySelector(`:scope > [data-unit="${unit}"]:not(.day-divider)`) as HTMLElement | null;
@@ -15153,7 +15229,62 @@ function displayItems(s: Session): DisplayItem[] {
 /** Compact mode's display units over a list of events: the ONE builder the chat, a subagent viewer and the comment popover
  *  share (tool names for the standalone-tool exception, the foldable notices, the thoughts with words). */
 function compactItems(evs: readonly ChatEvent[]): DisplayItem[] {
-  return compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === "tool" ? e.name : undefined), evs.map(isFoldableNotice), evs.map(thoughtHasWords));
+  return compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === "tool" ? e.name : undefined), evs.map(isFoldableNotice), evs.map(thoughtHasWords), noteRoles(evs));
+}
+/** The roles compactDisplay folds by: every prose row (the tools after it attach to it) and the Agent cards that stay rows. */
+function noteRoles(evs: readonly ChatEvent[]): NoteRoles {
+  return { note: evs.map(isProse), keep: evs.map(isKeptCard) };
+}
+/** A tool that stays its own row between prose rows, as it always did: an Agent (or Task) card, the report it carries. */
+function isKeptCard(e: ChatEvent): boolean { return e.kind === "tool" && (e.name === "Agent" || e.name === "Task"); }
+/** Assistant prose a reader reads as the agent speaking: a reply or a note, never the interrupt's settle (a seam marker) or a
+ *  slash command's output. */
+function isProse(e: ChatEvent | undefined): boolean { return !!e && isProseShape(e as { kind: string }); }
+/** A tool line folds its calls, so it says what each call's own row would: a call still RUNNING (the kernel's `running`
+ *  stamp) wears the working dot and "running…" with its elapsed time, ticked by the 1 s timer (.tool-elapsed[data-since]) and
+ *  gone at the push that brings its result; a FAILED call wears the red dot and the line says how many failed, in red, as a
+ *  row says "error"; a call CUT before its result could come (stamped not running, with no result: renderTool's "no result")
+ *  wears the plain dot and the line says how many have no result. The dot is the only part of an attached line's rail mark
+ *  that shows, and only for these states (a done line's ✓ stays off). The dot keeps its own classes (dot-nav, its hit area). */
+function attachedRunState(head: HTMLElement, evs: readonly ChatEvent[], indices: readonly number[], open: boolean): void {
+  const tools = runTools(evs, indices);
+  const failed = tools.filter((t) => t.isError).length;
+  const running = tools.find((t) => !t.isError && (t.running ?? ((t.name === "Task" || t.name === "Agent") && !t.output)));
+  const cut = tools.filter((t) => t.running === false && !t.agentRunning && !t.output && !t.isError).length;
+  const d = head.querySelector(":scope > .dot") as HTMLElement | null;
+  if (d && !failed && (running || cut)) { d.classList.remove("green"); d.classList.add(running ? "working" : "ring"); }
+  if (open) return;
+  const line = head.querySelector(":scope > .toolgroup-line") as HTMLElement | null;
+  if (!line) return;
+  if (failed) {
+    const f = el("span", "toolgroup-failed");
+    f.textContent = " · " + (failed === tools.length ? (failed === 1 ? "failed" : "all failed") : failed + " failed");
+    line.appendChild(f);
+  }
+  if (cut) {
+    const c = el("span", "toolgroup-noresult");
+    c.textContent = " · " + (cut === tools.length ? "no result" : cut + " no result");
+    line.appendChild(c);
+  }
+  const since = running && running.ts ? Date.parse(running.ts) / 1000 : NaN;
+  if (running) {
+    const r = el("span", "toolgroup-running"); r.textContent = " · running…";
+    line.appendChild(r);
+    if (Number.isFinite(since) && since > 0) {
+      const t = el("span", "tool-elapsed"); t.dataset.since = String(since); t.textContent = durLabel(Date.now() / 1000 - since);
+      line.appendChild(t);
+    }
+  }
+}
+/** A tool run's head, past its line: the attached class (the tools after a prose row, drawn as its trailing line) and the
+ *  line's state. And what a COLLAPSED run's head carries under its line: when the run's last member is the last row of a
+ *  finished segment (`secs`, the worked-footer rule over that member), the segment's "worked …" footer: a segment that ends
+ *  inside a folded run (before a message sent mid-turn or the session going idle) keeps the line every other segment shows.
+ *  An open run's last row carries it instead (appendItem); patchWorkedFooters keeps both. */
+function foldedRunHead(head: HTMLElement, evs: readonly ChatEvent[], it: Extract<DisplayItem, { kind: "toolgroup" }>, open: boolean, secs: number | null, thought: number | null): void {
+  if (it.attached) { head.classList.add("toolgroup-attached"); attachedRunState(head, evs, it.indices, open); }
+  if (open) return;
+  if (secs != null) head.appendChild(elapsedFooter(secs, thought));
 }
 // T386 stage 2: the history the page does not hold is GAPS between its runs (and before the first), each a display unit of its own
 // placed before the first item of the run below it (`before`: that run's first event index in s.events, the runs' events being
@@ -15249,6 +15380,7 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
     const head = tag(renderToolGroup(runTools(s.events, it.indices), prevEpoch, key, open));   // the head counts the run's tools only
     host.appendChild(head);
     adv(it.indices[0]);
+    foldedRunHead(head, s.events, it, open, ...turnFoot(s.events, it.indices[it.indices.length - 1], working));
     if (open) {   // expanded → the run's members in order, each tool as its normal turn and each stretch of thoughts as ONE
       // collapsed Thought row (runRows). Not the contiguous start..end span: it.indices holds only the run's members, so a
       // textless thinking block between the tools stays hidden. (Until 2026-10-23 no thinking showed here at all, the
@@ -15283,7 +15415,9 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
       adv(anchor);   // the walk leaves the run on its latest member, whatever order its members came in
     }
   } else {
-    host.appendChild(tag(renderEvent(s.events[it.index], prevEpoch, ...turnFoot(s.events, it.index, working))));
+    const node = tag(renderEvent(s.events[it.index], prevEpoch, ...turnFoot(s.events, it.index, working)));
+    if (it.attached) node.classList.add("tool-attached");   // a lone call after a prose row, tucked under it
+    host.appendChild(node);
     adv(it.index);
   }
   walk.pass(unitExit(s, it));   // a no-op for an expanded tool run (every row already passed): one rule with dayWalkBefore
@@ -18026,7 +18160,7 @@ function virtualizeToViewport(): void {
       // scroll event and this frame, so capturing it earlier anchored to a stale spot → the "snap back" on a
       // fast random jump (the user 2026-06-25).
       const idx = unitAtScroll(v, content);
-      const working = s.status.state === "working" || s.status.state === "compacting";
+      const working = turnOpenOf(s.status);   // the turn not yet ended: no "worked …" line yet (turnOpenOf)
       const items = displayItems(s);
       const c = Math.max(0, Math.min(idx, items.length - 1));
       // where unit c sits relative to the viewport top NOW (so it doesn't jump); a unit hidden in a spacer (a jump) keeps the reader's
@@ -23349,7 +23483,7 @@ function fillInPlace(sid: string, v: View | undefined): void {
   v.stick = false;   // a fill never follows the tail: the reader is where they are
   fillBuilding = atLimit;   // the gap elements this rebuild makes are the page's own (quietGaps), at the limit only
   try {
-    if (u >= 0) renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting");
+    if (u >= 0) renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), turnOpenOf(s.status));
     else syncView(sid, false);
   } finally { fillBuilding = false; }
   // a visible row that survived the rebuild goes back to its exact offset; otherwise (no row on screen, or the anchor row gone: a turn
@@ -23369,7 +23503,7 @@ function fillInPlace(sid: string, v: View | undefined): void {
     const u2 = unitOfTurn(items, turnsNow, Math.floor(pointBefore));
     if (u2 >= 0) {
       fillBuilding = atLimit;
-      try { renderWindowItems(v, s, items, Math.max(0, u2 - WINDOW_RADIUS), Math.min(items.length, u2 + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting"); }
+      try { renderWindowItems(v, s, items, Math.max(0, u2 - WINDOW_RADIUS), Math.min(items.length, u2 + WINDOW_RADIUS), turnOpenOf(s.status)); }
       finally { fillBuilding = false; }
       const y2 = yOfTurn(v, s, items, turnsNow, content, pointBefore);
       writeScroll(content, y2 != null ? y2 : topBefore, "gap-fill", false, topBefore);

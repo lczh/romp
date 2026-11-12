@@ -152,6 +152,12 @@ test("executed: lastMessage takes the newest assistant text as PLAIN words on on
   assert.equal(lastMessage({ events: [{ kind: "assistant", text: "plain `text` field" }] }), "plain text field", "the text field when there is no md");
 });
 
+test("executed: lastMessage reads the latest thing said, a segment's last prose, a progress note included (2026-11-06)", () => {
+  // a turn's last prose is its reply wherever it sits: a summary the API returned as a note, before a cleanup tool
+  assert.equal(lastMessage({ events: [{ kind: "assistant", md: "The reply." }, { kind: "user", md: "next" },
+                                      { kind: "assistant", md: "Done: the cache is gone.", narration: true }, { kind: "tool" }] }), "Done: the cache is gone.");
+});
+
 test("executed: plainText drops inline HTML and underscore emphasis too: the transcript renders them as structure, a tooltip would show them as typed", () => {
   assert.equal(plainText("<b>x</b>", 400), "x");
   assert.equal(plainText("_x_", 400), "x");

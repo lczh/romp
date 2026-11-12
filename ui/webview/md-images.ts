@@ -93,6 +93,11 @@ export function opensInLightbox(url: string, kind: "img" | "video" = "img",
  *  The kernel's /file serves exactly these (kernel _VIDEO_MIME; preview-core.test.ts pins the pair). */
 export const VIDEO_EXT: ReadonlySet<string> = new Set(["mp4", "webm", "mov"]);
 
+/** The extensions a chat treats as a picture file, the kernel's _IMG_MIME (preview-core.test.ts pins the pair): preview.ts
+ *  previewKind's "img", and the only files a markdown picture loads from the session's disk (mdImgFile). Kept here beside
+ *  VIDEO_EXT so both modules read the one list. */
+export const IMG_EXT: ReadonlySet<string> = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
+
 /** A link whose target is a video file: a web address whose PATH ends in one of VIDEO_EXT (a query or a fragment after it
  *  is the server's business). Relative or schemeless hrefs are never one: a link's preview loads from where it points,
  *  and only an absolute web address says where that is. */
@@ -383,6 +388,10 @@ export function mdImages(src: string, lex: (s: string) => Token[]): MdImage[] {
 // was sent with. Which srcs are paths is the file viewer's rule (file-view.ts): every one with no scheme that is not
 // protocol-relative. The kernel's /file still decides what it serves (renderable types, a size cap); nothing here adds a
 // file the dashboard could not already fetch.
+// Only a PICTURE file is loaded this way (IMG_EXT, previewKind's "img"; the review of #454): a src that names any other
+// file, `![x](.env)` or `![x](~/.claude/settings.json)`, stays as written, so rendering a message never fetches it from the
+// session's disk (/file answers a text file with its text), the rule a path line's figure keeps (pictures and videos
+// only). Such a src resolves against the page as before, the kernel's 404 shows its alt text, and no retry is armed.
 
 /** The links and pins the kernel verified for one message (its chat event's pathLinks and pathPins). */
 export interface MdPaths { links?: Record<string, string> | null; pins?: Record<string, string> | null; }
@@ -394,7 +403,8 @@ const ownKey = (o: Record<string, string> | null | undefined, k: string): string
  *  (a scheme: http:, https:, data:, blob:; a protocol-relative `//host/…`; a bare `#fragment` or `?query`), or is already
  *  the kernel's file route. `src` is the <img>'s attribute as marked wrote it (cleanUrl: percent-encoded). A token the
  *  kernel verified (`paths.links`, keyed by the text as written) names its file, with that file's pin when it has one;
- *  any other path is decoded, stripped of its fragment and normalised (joinDocPath), and the kernel resolves it. */
+ *  any other path is decoded, stripped of its fragment and normalised (joinDocPath), and the kernel resolves it. Null too
+ *  when the file is no picture (isPicturePath): its src is left as written. */
 export function mdImgFile(src: string, paths?: MdPaths | null): { path: string; pin?: string } | null {
   if (typeof src !== "string" || !src || /^[a-z][a-z0-9+.-]*:/i.test(src) || /^[/\\]{2}/.test(src) || /^[#?]/.test(src)) return null;
   if (/^\/(?:remote\/[^/?#]+\/)?file\?/.test(src)) return null;   // the kernel's file route already: never wrapped twice
@@ -402,12 +412,16 @@ export function mdImgFile(src: string, paths?: MdPaths | null): { path: string; 
   try { tok = decodeURIComponent(tok); } catch { /* a stray %: the bytes as written */ }
   const target = ownKey(paths?.links, tok) || ownKey(paths?.links, src);
   if (target) {
+    if (!isPicturePath(target)) return null;
     const pin = ownKey(paths?.pins, target);
     return pin ? { path: target, pin } : { path: target };
   }
   const path = joinDocPath("", src);
-  return path ? { path } : null;
+  return path && isPicturePath(path) ? { path } : null;
 }
+
+/** A path whose extension is a picture's: previewKind(path) === "img", read off the same list (IMG_EXT). */
+const isPicturePath = (p: string): boolean => IMG_EXT.has(p.slice(p.lastIndexOf(".") + 1).toLowerCase());
 
 /** The address such a picture loads from: the file through `sid`'s kernel, pinned when the message pinned it. */
 export function mdImgFileSrc(f: { path: string; pin?: string }, sid: string | null): string {

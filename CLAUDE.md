@@ -345,6 +345,9 @@ THREE deliberate exceptions, all fine, none a licence to widen:
 - Also fine: the `[romp] The kernel restarted…` notices in `sdk_backend.py`. Those
   are genuinely ABOUT romp — they tell a session why its turn was cut — so they
   name it (and the housekeeping note above gives the name meaning).
+- Also fine: the arrival note (`ARRIVAL_NOTE` in `sdk_backend.py`) on a message the user
+  typed that reaches a running turn is honestly labelled from romp rather than speaking as
+  the user (the user's decision, 2026-11-12: romp must not impersonate them).
 
 `tests/test_injected_voice.py` renders every injected body and fails on romp
 vocabulary in the prose, so this holds without anyone remembering it.
