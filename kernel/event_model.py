@@ -1493,6 +1493,7 @@ def set_checkpoint_dir(fn):
         _ASM_DOC_MEMO.clear(); _ASM_DOC_MEMO_BYTES[0] = 0   # nor does a memoized assembly document, the seeded walk's or the restore's (round two)
         _ASM_REBUILD.clear(); _ASM_REBUILD_DECLINED.clear(); _ASM_REBUILD_BLIPPED.clear()   # nor a rebuild noted against another directory
         _ASM_REBUILD_RAISED.clear()
+        _ASM_OVERSIZE.clear()                             # nor an oversize verdict read from another directory
     with _CKPT_LOCK:
         _CKPT_PENDING.clear(); _CKPT_SEQ.clear(); _FOLD_DIRTY.clear(); _CKPT_DOC_FOLDS.clear(); _DROP_OWED.clear()
         _DROP_HANDOFF.clear(); _HANDOFF_FAULTS.clear()
@@ -2438,6 +2439,17 @@ def checkpoint_sweep():
         if not cp.exists():
             try:
                 aside.unlink(); gone += 1
+            except OSError:
+                pass
+    for ov in Path(d).glob("*.asm.oversize"):             # an oversize verdict (_ASM_OVERSIZE) leaves with its transcript
+        try:
+            v = json.loads(ov.read_text(encoding="utf-8"))
+            keep = isinstance(v, dict) and isinstance(v.get("path"), str) and os.path.exists(v["path"])
+        except (OSError, ValueError):
+            keep = False
+        if not keep:
+            try:
+                ov.unlink(); gone += 1
             except OSError:
                 pass
     for cp in list(Path(d).glob("*.json")) + list(Path(d).glob("*.asm.json.gz")):
@@ -7934,7 +7946,16 @@ def restored_index_estimate() -> dict:
     return out
 
 
-_ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counted): that session parses whole as today
+_ASM_CKPT_CAP = _env_or("ROMP_ASM_CKPT_CAP_MB", 64 * 1024 * 1024, 1024 * 1024)   # a document past this is not written
+#                                   (counted, and its verdict kept: _asm_oversize_note): that session parses whole. 64 MiB since
+#                                   2026-11-12, was 16: a document runs about 106 compressed bytes per pre-cut record, linear in the
+#                                   records (a lab over synthetic Claude-Code-shaped transcripts at 3.4 KB a record: 5.1 MB for
+#                                   50,000 records, 160 MB of transcript; 30.4 MB for 300,000, 963 MB), so 16 MiB stopped at about
+#                                   160,000 records, half a GB, and a host's 994 MB session parsed whole at every open while its
+#                                   writer built and threw away a document for six minutes at a time. At 963 MB the whole parse took
+#                                   28 s and 3.2 GB peak and the restore from the 30 MB document 4.3 s and 0.5 GB; 64 MiB covers about
+#                                   630,000 records, two GB of transcript, and its restore stays a fraction of that parse in time and
+#                                   memory. ROMP_ASM_CKPT_CAP_MB sets it outright
 _ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
                    "hydratedHits": 0, "hydratedEvicted": 0,   # the hydrated-body memo's fills served without a read, and the
                    #                     entries its cap pushed out (2026-10-01): its gauge counts real bytes, so it no longer
@@ -7948,9 +7969,11 @@ _ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, 
                    #                     atoms-only form's build and identity), the lazy index, the adapter seed; each bumped on
                    #                     the return it names so a boot read names the mover; three decimals on /perf, floats inside
                    "hydratedBy": {},     # bytes per calling function: a whole-tree hydration anywhere shows here
-                   "converge": {"writes": 0, "bytes": 0, "deferred": 0, "candidates": 0, "skipped": {}}}   # the pass's writes for
+                   "converge": {"writes": 0, "bytes": 0, "deferred": 0, "candidates": 0, "skipped": {}},   # the pass's writes for
 #                                          idle leaves from the boot's own parse (T376): looked at, written, deferred for the budget,
 #                                          skipped per the writer's reason
+                   "oversizeHeld": 0}    # the writes and rebuilds an oversize verdict turned away before any build (2026-11-12;
+#                                          they also count under skipped.oversize, or rebuild.oversize for a rebuild never noted)
 _ASM_CKPT_LOCK = threading.Lock()
 _ASM_CKPT_SAID = set()             # (path, reason) said once per process
 _ASM_DOC_MEMO = {}                 # document path -> ((size, mtime_ns), decoded document): the seeded walk's and the restore road's
@@ -8349,6 +8372,106 @@ def _asm_ckpt_file(leaf_path):
     return Path(d) / (hashlib.sha1(os.path.realpath(str(leaf_path)).encode("utf-8")).hexdigest()[:20] + ".asm.json.gz")
 
 
+# THE OVERSIZE VERDICT (2026-11-12). A document past _ASM_CKPT_CAP is built whole and then thrown away, and the cut that makes it
+# moves with every settled turn, so the entry's own memo (docSkip, keyed on the cut) never held for a live session, and a fresh
+# entry (a new parse, a new process) held nothing at all: on a host whose 994 MB session's document ran past the cap, the single
+# document writer spent about 382 s on it at each settle and wrote no other document meanwhile, and the rebuild parsed it whole
+# at each kernel life. A document only grows as its transcript does (its rows are every record before a cut that only moves
+# forward), so the verdict is kept per transcript, on disk beside where its document would be (a deploy restarts the kernel
+# several times a day): {path, dev, ino, size, bytes, records, av}. It holds while the transcript is the same file (device and
+# inode), at least `size` long (the leaf's bytes before the refused cut), the document version is `av` and the cap is still
+# under `bytes`; a transcript rewritten or truncated, a version bump or a raised cap is looked at again. While it holds, the
+# writer turns the leaf away before it builds anything, a parse does not note it for a rebuild and a refresh is not claimed.
+_ASM_OVERSIZE = {}                # realpath -> the verdict as read from its file (None: no file), loaded once per leaf per process
+
+
+def _asm_oversize_file(leaf_path):
+    cp = _asm_ckpt_file(leaf_path)
+    return None if cp is None else cp.with_name(cp.name[:-len(".asm.json.gz")] + ".asm.oversize")
+
+
+def _asm_oversize_verdict(leaf_path):
+    """The leaf's recorded oversize verdict (memoized per process), or None."""
+    rp = os.path.realpath(str(leaf_path))
+    with _ASM_CKPT_LOCK:
+        if rp in _ASM_OVERSIZE:
+            return _ASM_OVERSIZE[rp]
+    f = _asm_oversize_file(rp)
+    v = None
+    if f is not None:
+        try:
+            v = json.loads(f.read_text(encoding="utf-8"))
+            if not (isinstance(v, dict) and v.get("path") == rp):
+                v = None
+        except (OSError, ValueError):
+            v = None
+    with _ASM_CKPT_LOCK:
+        _ASM_OVERSIZE.setdefault(rp, v)
+        return _ASM_OVERSIZE[rp]
+
+
+def asm_oversize_stands(leaf_path):
+    """The leaf's oversize verdict when it still holds (see above), else None. A dict read once the verdict is loaded, and one
+    stat of the leaf when a verdict exists."""
+    if _CKPT_DIR_FN is None:
+        return None
+    v = _asm_oversize_verdict(leaf_path)
+    if v is None:
+        return None
+    try:
+        if v.get("av") != _ASM_CKPT_V or int(v.get("bytes") or 0) <= int(_ASM_CKPT_CAP):
+            return None
+        st_ = os.stat(v["path"])
+        if (int(st_.st_dev), int(st_.st_ino)) != (int(v["dev"]), int(v["ino"])) or int(st_.st_size) < int(v["size"]):
+            return None
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
+    return v
+
+
+def _asm_oversize_note(leaf_path, size, nbytes, records):
+    """Keep the verdict on a document past the cap: the leaf's file identity, `size` (its bytes before the refused cut), the
+    document's compressed `nbytes` and its pre-cut `records`. Said once per leaf with the numbers; a file that cannot be written
+    still holds for this process."""
+    rp = os.path.realpath(str(leaf_path))
+    try:
+        st_ = os.stat(rp)
+    except OSError:
+        return None
+    v = {"path": rp, "dev": int(st_.st_dev), "ino": int(st_.st_ino), "size": int(min(size, st_.st_size)), "bytes": int(nbytes),
+         "records": int(records), "av": _ASM_CKPT_V, "t": time.time()}
+    with _ASM_CKPT_LOCK:
+        _ASM_OVERSIZE[rp] = v
+    f = _asm_oversize_file(rp)
+    if f is not None:
+        try:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _writer_tmp(f)
+            tmp.write_text(json.dumps(v), encoding="utf-8")
+            os.replace(tmp, f)
+        except OSError:
+            pass
+    _say_once("assembly checkpoint: %s gets no document: it would be %.1f MB (%d records), past the %.0f MB cap "
+              "(ROMP_ASM_CKPT_CAP_MB); it parses whole, and no document is built for it again until the transcript is replaced "
+              "or the cap rises" % (rp, nbytes / 1048576.0, records, _ASM_CKPT_CAP / 1048576.0))
+    return v
+
+
+def _asm_oversize_clear(leaf_path):
+    """A document was written for the leaf: any verdict against it is history."""
+    rp = os.path.realpath(str(leaf_path))
+    had = _asm_oversize_verdict(rp) is not None           # (loaded once per leaf per process: a file an earlier process kept)
+    with _ASM_CKPT_LOCK:
+        _ASM_OVERSIZE[rp] = None
+    if had:
+        f = _asm_oversize_file(rp)
+        try:
+            if f is not None:
+                f.unlink()
+        except OSError:
+            pass
+
+
 _ASM_LAST_WRITE_CUT = {}          # realpath -> the leaf's cut offset of the document the writer last published (under _ASM_CKPT_LOCK):
 #                                   the refusal road reads it after its offered rewrite to tell a rewrite that MOVED the cut (a new tail,
 #                                   proven afresh at the next restore) from one that reproduced the refused cut (marked; stage one b)
@@ -8655,6 +8778,10 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
         if reason_out is not None:
             reason_out.append(reason)
         return _asm_ckpt_skip(reason)
+    if asm_oversize_stands(leaf_path) is not None:
+        with _ASM_CKPT_LOCK:
+            _ASM_CKPT_STATS["oversizeHeld"] = _ASM_CKPT_STATS.get("oversizeHeld", 0) + 1
+        return _skip("oversize")                # its document was past the cap and can only have grown: nothing is built
     key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
     with (_DocWriterScope(key) if from_entry is None else _NO_LOCK):   # a private entry is nobody else's: the leaf's readers
         #                                                                  never wait on the refresh's write (they took the key
@@ -9151,7 +9278,10 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             return _skip("moot")
         data = gzip.compress(text.encode("utf-8"), compresslevel=6)   # identities and hashes compress about five to one; the
         if len(data) > _ASM_CKPT_CAP:                                  #  bytes a boot reads are the compressed ones
-            return skip("oversize")
+            _lf = files.get(Path(leaf_path).stem) or {}               # the verdict outlives this entry and this cut (see
+            _asm_oversize_note(leaf_path, int((_lf.get("cut") or [_lf.get("size") or 0])[0]), len(data), len(rows))   # _ASM_OVERSIZE),
+            entry["docSkip"] = (cut_uuid, "oversize")                 #  and says the numbers once
+            return _skip("oversize")
         try:
             cp.parent.mkdir(parents=True, exist_ok=True)
             tmp = _writer_tmp(cp)
@@ -9179,6 +9309,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
         except OSError:
             return skip("write")
         entry["docWritten"] = True
+        _asm_oversize_clear(leaf_path)                    # a document stands: a verdict a smaller cap or an older file left is history
         entry["docCut"] = (cut_uuid, int(cut_off_total), sum(1 for b_ in bounds if ad.seq_of.get(b_.get("uuid"), 0) < cut_seq), cut_seq,
                            int(((files.get(Path(leaf_path).stem) or {}).get("cut") or [0])[0]))
         with _ASM_CKPT_LOCK:
@@ -9240,6 +9371,8 @@ def asm_refresh_claim(leaf_path, rompuuid, sdk_human=False):
         return False
     if tail <= 0 or tail * _ASM_TAIL_SHARE < max(1, int(pre)):
         return False
+    if asm_oversize_stands(leaf_path) is not None:
+        return False                                      # its next document is past the cap: the standing one stands (2026-11-12)
     with _ASM_LOCK:
         if _ASM_REFRESH["inflight"] is not None or _ASM_CACHE.get(key) is not entry:
             return False
@@ -9329,9 +9462,6 @@ def asm_refresh_document(leaf_path, rompuuid, sdk_human=False, candidate_files=N
                 _ASM_REFRESH["inflight"] = None
             if rebuild is not None and _ASM_REFRESH["paused"] == key:
                 _ASM_REFRESH["paused"] = None             # (a rebuild that left its gate without the claim back: none is lent now)
-            lent = rebuild is None and _ASM_REFRESH["paused"] is not None
-        if lent:
-            _asm_bg_wake()                                # a refresh ran on a waiting rebuild's lent claim: the rebuild takes it back
         ms = (time.perf_counter() - t0) * 1000.0
         if rebuild is None:
             with _ASM_CKPT_LOCK:
@@ -9339,6 +9469,9 @@ def asm_refresh_document(leaf_path, rompuuid, sdk_human=False, candidate_files=N
                 _ASM_REFRESH_STATS["ms"] += ms
         else:
             _asm_rebuild_done(leaf_path, rompuuid, rebuild, outcome, st0, ms, reasons[-1] if reasons else None, tb=tb)
+        _asm_bg_wake()                                    # the claim is back: a waiting rebuild takes it (a refresh ran on its lent
+        #                                                   claim), and the rebuild starter starts the next one, a retry the outcome
+        #                                                   above put back on the table included (2026-11-12)
     return wrote
 
 
@@ -9363,7 +9496,7 @@ _ASM_REBUILD_MIN = _env_or("ROMP_ASM_REBUILD_MIN_KB", _CKPT_FOLD_CAP // 8, 1024)
 #                                 (_ASM_FIRST_DOC_MIN, an eighth of the fold cap, 1 MB by default) as a knob of its own, so the suite's
 #                                 floor-off knob does not make every small fixture a rebuild; below it a whole parse costs milliseconds
 _ASM_REBUILD_STATS = {"noted": 0, "claimed": 0, "written": 0, "declined": 0, "failed": 0, "retry": 0, "moot": 0, "gone": 0,
-                      "small": 0, "released": 0, "subagent": 0, "ms": 0.0, "bytes": 0,
+                      "small": 0, "released": 0, "subagent": 0, "oversize": 0, "ms": 0.0, "bytes": 0,
                       "yields": 0, "yieldMs": 0.0, "lent": 0}   # asmCheckpoint.rebuild on /perf (`pending` rides beside, a gauge);
 #                                 yields: the rebuild's waits at its chunk points for the pusher's next sleep, yieldMs their wall, lent:
 #                                 those a refresh's run on the lent claim prolonged (_asm_bg_yield)
@@ -9387,9 +9520,25 @@ _ASM_REBUILD_DRAIN = {"written": 0, "declined": 0, "failed": 0, "bytes": 0, "ms"
 # 26 MB parse that took 2.4 to 2.5 times as long beside a rebuild took 1.2 to 1.8 times. A waiting rebuild lends the shared claim
 # out (the review of PR #370: it held it through every wait, and a rebuild that waits for hours refused every settle's refresh of
 # every session for those hours), so a refresh runs meanwhile, and takes the claim back before it goes on.
+#
+# THE GATE'S OPENING STARTS THE NEXT REBUILD (2026-11-12). Until then a rebuild started only AT the pusher's cycle end, so a gate that
+# was shut at that one instant (a parse on another thread) waited for the next cycle end, and nothing looked again when it opened a
+# moment later: on a host whose cycles ran 88 to 565 s after a version bump, three cycle ends in 13.5 minutes each met the timeline
+# builder mid-parse, and no rebuild ran (79 noted, none claimed). Every opening of the gate, every leaf noted and every release of
+# the claim now bumps a generation (`gen`) and wakes the kernel's rebuild starter (asm_rebuild_wait), which starts the next rebuild
+# then. And the kernel's BACKGROUND loops (the timeline builder, the judges, the jobs pass, the boot's warm parses: _ASM_BG_STAGES)
+# no longer hold the gate shut: nobody waits on them, and their whole parses, which run for minutes exactly while the documents
+# are missing, kept the rebuild that would end them from starting or going on. A page's parse and a page connect's push still do.
 _ASM_BG_COND = threading.Condition()
-_ASM_BG = {"idle": False, "fg": 0, "waiting": 0}   # idle: the pusher is asleep, its last cycle ended and no cycle has begun since;
-#                                                     fg: foreground work in flight; waiting: rebuild threads waiting at the gate
+_ASM_BG = {"idle": False, "fg": 0, "waiting": 0, "gen": 0}   # idle: the pusher is asleep, its last cycle ended and no cycle has
+#                                                     begun since; fg: foreground work in flight; waiting: rebuild threads waiting at
+#                                                     the gate; gen: bumped (under the condition, with a notify) at every gate
+#                                                     opening, leaf noted and claim released, what the rebuild starter waits on
+_ASM_BG_STAGES = ("timeline.build", "judge.", "producer", "jobs.", "warm.", "rewind.")   # the kernel's stage marks (T401) of the
+#                                                     loops whose parses never shut the gate: the timeline builder, the judge tiers
+#                                                     and their pool workers (which carry the tier's mark), the producer, the jobs
+#                                                     pass, the boot's warm parses and its rewind passes. A thread with no mark, or
+#                                                     any other (a page's request, the pusher's cycle, a connect), is foreground
 _ASM_BG_TL = threading.local()   # .gated on the rebuild's own thread (asm_refresh_document with `rebuild`): its chunk points wait;
 #                                  .claim, the claim's key that thread holds and lends out while it waits
 _ASM_BG_EMIT_CHUNK = 4096        # atoms of the rebuild's emit between two chunk points (about 40 ms of a 27 MB leaf's emit)
@@ -9402,7 +9551,7 @@ def asm_background_idle(idle):
     with _ASM_BG_COND:
         _ASM_BG["idle"] = bool(idle)
         if idle and not _ASM_BG["fg"]:
-            _ASM_BG_COND.notify_all()
+            _asm_bg_kick_locked()
 
 
 class asm_foreground:
@@ -9422,7 +9571,7 @@ class asm_foreground:
             with _ASM_BG_COND:
                 _ASM_BG["fg"] = max(0, _ASM_BG["fg"] - 1)
                 if not _ASM_BG["fg"] and _ASM_BG["idle"]:
-                    _ASM_BG_COND.notify_all()
+                    _asm_bg_kick_locked()             # the gate opens HERE too: the rebuild starter looks now (2026-11-12)
         return False
 
 
@@ -9433,11 +9582,44 @@ def asm_background_open():
         return bool(_ASM_BG["idle"]) and not _ASM_BG["fg"]
 
 
+def _asm_bg_kick_locked():
+    """Under _ASM_BG_COND: something a rebuild's start or a waiting rebuild depends on changed (the gate opened, a leaf was
+    noted, the claim came back). The generation moves and every waiter looks again."""
+    _ASM_BG["gen"] += 1
+    _ASM_BG_COND.notify_all()
+
+
 def _asm_bg_wake():
-    """Wake the rebuild waiting at its gate to look again: the claim it lent out is back (a refresh released it). Never called
-    under _ASM_LOCK (the waiter takes _ASM_LOCK inside _ASM_BG_COND)."""
+    """Wake the rebuild waiting at its gate, and the rebuild starter, to look again: the claim is back (a refresh or a rebuild
+    released it) or a leaf was noted. Never called under _ASM_LOCK or _ASM_CKPT_LOCK (the waiter takes _ASM_LOCK inside
+    _ASM_BG_COND)."""
+    with _ASM_BG_COND:
+        _asm_bg_kick_locked()
+
+
+def asm_rebuild_wait(seen=None, stop=None):
+    """The kernel's rebuild starter's wait: block until the background gate is open and the generation has moved past `seen`
+    (the gate opened, a leaf was noted or the claim came back since the starter last looked), then return the generation, which
+    the caller hands back next time. An event, never a timer: a starter that found nothing to start waits for the next change.
+    `stop`, a threading.Event, ends the wait once set (asm_rebuild_wait_release wakes it); returns None then."""
+    with _ASM_BG_COND:
+        while not (_ASM_BG["idle"] and not _ASM_BG["fg"] and _ASM_BG["gen"] != seen):
+            if stop is not None and stop.is_set():
+                return None
+            _ASM_BG_COND.wait()
+        return _ASM_BG["gen"]
+
+
+def asm_rebuild_wait_release():
+    """Wake the rebuild starter's wait so it sees its stop (the kernel's loops are stopping)."""
     with _ASM_BG_COND:
         _ASM_BG_COND.notify_all()
+
+
+def _asm_background_stage():
+    """Whether the calling thread is one of the kernel's background loops (_ASM_BG_STAGES), by its stage mark."""
+    stage = _read_stage()
+    return isinstance(stage, str) and stage.startswith(_ASM_BG_STAGES)
 
 
 def _asm_claim_lend(key):
@@ -9519,8 +9701,17 @@ def asm_rebuild_note(leaf_path, rompuuid, why):
     with _ASM_CKPT_LOCK:
         if k in _ASM_REBUILD or _ASM_REBUILD_DECLINED.get(k) == st_:
             return False
+    if asm_oversize_stands(leaf_path) is not None:        # its document is past the cap: a rebuild would parse it whole for nothing
+        with _ASM_CKPT_LOCK:                              #  (2026-11-12: the declined memo above is keyed on the leaf's stat, which a
+            _ASM_REBUILD_STATS["oversize"] = _ASM_REBUILD_STATS.get("oversize", 0) + 1   # live session moves at every turn)
+            _ASM_CKPT_STATS["oversizeHeld"] = _ASM_CKPT_STATS.get("oversizeHeld", 0) + 1
+        return False
+    with _ASM_CKPT_LOCK:
+        if k in _ASM_REBUILD:
+            return False
         _ASM_REBUILD[k] = {"path": str(leaf_path), "why": str(why)}
         _ASM_REBUILD_STATS["noted"] += 1
+    _asm_bg_wake()                                        # the rebuild starter looks now, if the gate is open (2026-11-12)
     return True
 
 
@@ -9537,11 +9728,34 @@ def asm_rebuild_drop(leaf_path, rompuuid=None, why="released"):
     return len(keys)
 
 
+_ASM_REBUILD_WANT = {}          # rompuuid -> the sequence number of the latest time a page opened or switched to that session
+#                                 (asm_rebuild_prefer): the rebuild's order puts those sessions first, the most recent first
+_ASM_REBUILD_WANT_SEQ = [0]
+_ASM_REBUILD_WANT_MAX = 256
+
+
+def asm_rebuild_prefer(rompuuid):
+    """A page opened session `rompuuid` or switched to its tab (the kernel's connect and its activeTab message): a pending rebuild
+    of a leaf parsed under it goes before every other, the most recently opened first (2026-11-12: largest first alone left
+    the session the user was waiting on behind every larger idle one). A dict write; the oldest preference leaves past
+    _ASM_REBUILD_WANT_MAX."""
+    if not rompuuid:
+        return
+    with _ASM_CKPT_LOCK:
+        _ASM_REBUILD_WANT_SEQ[0] += 1
+        _ASM_REBUILD_WANT.pop(str(rompuuid), None)
+        _ASM_REBUILD_WANT[str(rompuuid)] = _ASM_REBUILD_WANT_SEQ[0]
+        while len(_ASM_REBUILD_WANT) > _ASM_REBUILD_WANT_MAX:
+            _ASM_REBUILD_WANT.pop(next(iter(_ASM_REBUILD_WANT)))
+
+
 def asm_rebuild_pending():
-    """The noted leaves still wanting a rebuild, LARGEST FIRST: [(leaf as handed, rompuuid, why, size)]. A leaf that is gone, has
-    shrunk under the floor, or has a document file standing (the settle, the converge pass or the rewrite after a chain refusal
-    wrote one, which that road answers for) leaves the table here, counted. When nothing is pending and no rebuild runs, a drain
-    that rebuilt or declined anything says its summary line once (the first after a boot is the boot's)."""
+    """The noted leaves still wanting a rebuild: those of a session a page opened first, the most recently opened first
+    (asm_rebuild_prefer), then LARGEST FIRST: [(leaf as handed, rompuuid, why, size)]. A leaf that is gone, has shrunk under
+    the floor, has a document file standing (the settle, the converge pass or the rewrite after a chain refusal wrote one,
+    which that road answers for), or carries an oversize verdict leaves the table here, counted. When nothing is pending and
+    no rebuild runs, a drain that rebuilt or declined anything says its summary line once (the first after a boot is the
+    boot's)."""
     with _ASM_CKPT_LOCK:
         items = list(_ASM_REBUILD.items())
     out, drop = [], []
@@ -9553,6 +9767,8 @@ def asm_rebuild_pending():
             drop.append((k, v, "small"))
         elif asm_document_stands(v["path"]):
             drop.append((k, v, "moot"))
+        elif asm_oversize_stands(v["path"]) is not None:
+            drop.append((k, v, "oversize"))               # a verdict kept since it was noted (another road built it past the cap)
         else:
             out.append((v["path"], k[1], v["why"], st_[0]))
     line = None
@@ -9560,7 +9776,7 @@ def asm_rebuild_pending():
         for k, v, why in drop:
             if _ASM_REBUILD.get(k) is v:
                 _ASM_REBUILD.pop(k, None)
-                _ASM_REBUILD_STATS[why] += 1
+                _ASM_REBUILD_STATS[why] = _ASM_REBUILD_STATS.get(why, 0) + 1
         d = _ASM_REBUILD_DRAIN
         if not out and not _ASM_REBUILD and not d["running"] and (d["written"] or d["declined"] or d["failed"]):
             line = "assembly checkpoint: rebuilt %d document%s (%.0f MB of transcripts, %.1f s)%s%s" % (
@@ -9573,8 +9789,10 @@ def asm_rebuild_pending():
             sys.stderr.write(line + "\n")
         except Exception:
             pass
-    out.sort(key=lambda r: -r[3])
-    return out
+    with _ASM_CKPT_LOCK:
+        want = dict(_ASM_REBUILD_WANT)
+    out.sort(key=lambda r: (-want.get(r[1], 0), -r[3]))   # a session a page opened first, the most recently opened before the
+    return out                                            #  rest (2026-11-12), then the largest
 
 
 def asm_refresh_running():
@@ -9616,6 +9834,7 @@ def asm_rebuild_abandon(leaf_path, rompuuid, sdk_human, why, err=None):
             return False
         _ASM_REFRESH["inflight"] = None
     _asm_rebuild_done(leaf_path, rompuuid, why, "failed", _asm_rebuild_stat(leaf_path), 0.0, err)
+    _asm_bg_wake()                                        # the claim is back: the rebuild starter looks again
     return True
 
 
@@ -10755,13 +10974,15 @@ def _orphan_rows_from(srows, candidate_files):
 
 def _in_the_foreground(parse):
     """`parse` (parse_session) as foreground work for the background gate (asm_foreground, _ASM_BG): no document rebuild starts
-    while a page's, a judge's or the boot's parse runs, and a running one waits at its next chunk point until it is done. The
-    rebuild's own parse (the private road, `private_entry_out`) is not. The whole call, not its whole-parse road alone: in a lab
-    the turns built after the assembly were a fifth of a page's 26 MB parse, and a rebuild that ran on through them still
-    doubled it. A served or folded parse holds the gate for its few milliseconds."""
+    while a page's parse runs, and a running one waits at its next chunk point until it is done. The rebuild's own parse (the
+    private road, `private_entry_out`) is not, and since 2026-11-12 neither is a parse on one of the kernel's background loops
+    (_ASM_BG_STAGES: the timeline builder, the judges, the jobs pass, the boot's warm parses), which nobody waits on and whose
+    whole parses kept the rebuild from ever starting on a host whose documents a version bump had refused. The whole call, not
+    its whole-parse road alone: in a lab the turns built after the assembly were a fifth of a page's 26 MB parse, and a rebuild
+    that ran on through them still doubled it. A served or folded parse holds the gate for its few milliseconds."""
     @functools.wraps(parse)
     def run(*a, **k):
-        if k.get("private_entry_out") is not None:
+        if k.get("private_entry_out") is not None or _asm_background_stage():
             return parse(*a, **k)
         with asm_foreground():
             return parse(*a, **k)
