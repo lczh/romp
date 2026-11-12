@@ -407,6 +407,78 @@ class RepeatedPromptAfterBoundary(unittest.TestCase):
 PID = "aaaaaaaa-1111-2222-3333-444444444444"
 
 
+def _attachment(t, uuid, parent, kind):
+    return {"type": "attachment", "timestamp": _iso(t), "uuid": uuid, "parentUuid": parent, "isSidechain": False,
+            "attachment": {"type": kind}}
+
+
+def _summary_under_attachments(t, tag, logical_parent, text, early=23):
+    """An automatic compaction as the CLI now writes most of them (2026-11-12, structure only, every uuid and text invented):
+    the boundary, three attachments chained under it (instructions, session context, date), and the summary hung under the
+    last of them, stamped `early` seconds BEFORE its boundary. Returns the records and the summary's uuid."""
+    b, s = "cb_" + tag, "cs_" + tag
+    return [_claude_boundary(t + early, b, logical_parent),
+            _attachment(t + early, "ci_" + tag, b, "instructions"),
+            _attachment(t + early, "cx_" + tag, "ci_" + tag, "session_context"),
+            _attachment(t + early, "cd_" + tag, "cx_" + tag, "date"),
+            dict(_claude_summary(t, s, "cd_" + tag), message={"role": "user", "content": text})], s
+
+
+class SummaryUnderAttachments(unittest.TestCase):
+    """The owner of a compaction summary is the boundary its attachment chain hangs off (2026-11-12). The CLI now writes most
+    automatic compactions with three attachments between the boundary and the summary, the summary hung under the last of
+    them and stamped seconds before its boundary (618 of 695 summaries on one machine's live sessions). The pre-pass looked
+    for a boundary parent and otherwise took the last boundary walked; walking (second, read order) it met the summary
+    before its boundary, so every such summary went to the PREVIOUS compaction's card, each card showing the next
+    compaction's summary, the newest card none, and a transcript's first summary nowhere (and its restore window never
+    opened). Synthetic transcript only: placeholder ids, invented text."""
+
+    def _cards(self, turns):
+        return {a.get("uuid"): a.get("summary") for t in turns for a in t["atoms"] if a.get("subtype") == "compact_boundary"}
+
+    def test_each_card_carries_its_own_summary(self):
+        now = int(time.time())
+        t0 = now - 7200
+        recs = [_user(t0, "u1", None, "index the notes-api search"), _assistant(t0 + 30, "a1", "u1", "indexed.")]
+        c1, s1 = _summary_under_attachments(t0 + 600, "one", "a1", "summary one: the search is indexed")
+        recs += c1 + [_assistant(t0 + 640, "a2", s1, "carrying on"),
+                      _user(t0 + 700, "u3", "a2", "now rank by title"), _assistant(t0 + 730, "a3", "u3", "ranked.")]
+        c2, s2 = _summary_under_attachments(t0 + 1300, "two", "a3", "summary two: titles rank first")
+        recs += c2 + [_assistant(t0 + 1340, "a4", s2, "carrying on")]
+        cards = self._cards(_turns(recs))
+        self.assertEqual(cards, {"cb_one": "summary one: the search is indexed", "cb_two": "summary two: titles rank first"},
+                         "each compaction's card carries the summary that hangs under it (before: the first card showed "
+                         "the second summary, the second card none, and the first summary nowhere)")
+
+    def test_the_first_compactions_restore_window_opens(self):
+        # The first compaction's summary had no owner at all (no boundary walked yet), so its restore window never opened:
+        # the copy of an earlier prompt the CLI replays after the summary rendered as a second ask
+        now = int(time.time())
+        t0 = now - 3600
+        recs = [_user(t0, "u1", None, "continue"), _assistant(t0 + 30, "a1", "u1", "done.")]
+        c1, s1 = _summary_under_attachments(t0 + 600, "one", "a1", "summary one")
+        recs += c1 + [_user(t0 + 624, "u1r", s1, "continue"), _assistant(t0 + 640, "a2", "u1r", "resuming")]
+        uuids = [a.get("uuid") for t in _turns(recs) for a in t["atoms"]]
+        self.assertNotIn("u1r", uuids, "the replayed copy is restored context, not a second ask")
+        self.assertIn("u1", uuids, "the original survives")
+
+    def test_a_summary_with_no_attachment_chain_keeps_the_older_rule(self):
+        # A summary under a record that is no attachment (here the reply before the compaction) has no owner by structure:
+        # it goes to the last boundary walked, as before
+        now = int(time.time())
+        t0 = now - 7200
+        recs = [_user(t0, "u1", None, "index the notes-api search"), _assistant(t0 + 30, "a1", "u1", "indexed."),
+                _claude_boundary(t0 + 600, "cb_one", "a1"),
+                dict(_claude_summary(t0 + 601, "cs_one", "cb_one"), message={"role": "user", "content": "summary one"}),
+                _assistant(t0 + 640, "a2", "cs_one", "carrying on"),
+                _claude_boundary(t0 + 1300, "cb_two", "a2"),
+                dict(_claude_summary(t0 + 1290, "cs_two", "a2"), message={"role": "user", "content": "summary two"}),
+                _assistant(t0 + 1340, "a4", "cs_two", "carrying on")]
+        cards = self._cards(_turns(recs))
+        self.assertEqual((cards.get("cb_one"), cards.get("cb_two")), ("summary two", None),
+                         "no chain to a boundary: the last boundary walked, the older rule, unchanged: %s" % cards)
+
+
 def _twin_recs(now, bare_text="/usage", with_wrapper=True, name="/usage"):
     """The CLI 2.1.215+ dual shape: a typed slash command lands TWICE — a raw-text user record (the
     submitted prompt verbatim, carrying promptId) and the <command-name> wrapper (same promptId),

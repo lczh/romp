@@ -3694,20 +3694,31 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   (2026-11-12; a boot's refusal rewrites as below). That restore is refused,
   and the whole parse heals the author instead, when the document was written
   while a postal author waited on the log (its own `postalWait`;
-  `restore:postalWait`). Every pre-cut boundary atom is held to the summary the tail's pre-pass
-  leaves it, as a cold parse emits it (`restore:summaryPatched`, counted only
-  when the document's frozen atom differs): a summary hung under attachments
-  and stamped before its own boundary (how the CLI now writes most automatic
-  compactions) goes to the previous boundary, one before the cut when the cut
-  opens at the compaction, so the atom changes when such a summary lands after
-  the document was written, or leaves the path after it (a fork at the
-  anchor); the writer records each boundary atom's row (`bnd`), and a document
-  without it is scanned (2026-11-12, replacing a refusal that parsed those
-  sessions whole). A kept tail user or assistant record stamped before the
-  carried watermark refuses the restore (`restore:stampOrder`), as the fold's
-  `ts` gate does for a delta: the carry holds only for a tail that sorts after
-  everything before the cut (none of the live host's 232 documents met it
-  when it shipped); a document written before the bit is unproven, so a standing
+  `restore:postalWait`). A compaction summary belongs to the boundary its
+  attachment chain hangs off (its parent, or the attachments between them, as
+  the CLI now writes most automatic compactions with the summary stamped
+  before its boundary), and only a summary with no such chain falls back to
+  the last boundary walked (2026-11-12; before, every summary of that shape
+  showed on the previous compaction's card). Every pre-cut boundary atom is
+  held to the summary the tail's pre-pass leaves it, as a cold parse emits it
+  (`restore:summaryPatched`, counted only when the document's frozen atom
+  differs, as when a summary that falls back lands on a boundary before the
+  cut, or leaves the path after the document was written); the writer records
+  each boundary atom's row (`bnd`), and a document without it is scanned. A
+  document written before the owner rule (no `sumOwner`) is corrected at its
+  restore: its pre-cut summaries are found from its rows (the user records
+  whose parent chain runs through attachments to a boundary), read from the
+  transcript a few lines past their boundary, and assigned again before the
+  pass, with no version bump and no whole parse; the derivation must agree
+  with every assignment the document's carry holds, and a moved summary that
+  changes whether a restore window opens must be followed by a reply before
+  any other user record, else the restore refuses once
+  (`restore:summaryOwnerRefused`) and the whole parse's document, written with
+  the rule, restores after. A kept tail user or assistant record stamped
+  before the carried watermark refuses the restore (`restore:stampOrder`), as
+  the fold's `ts` gate does for a delta: the carry holds only for a tail that
+  sorts after everything before the cut (none of the live host's 232
+  documents met it when it shipped); a document written before the bit is unproven, so a standing
   document is refused at its first restore after the change, booked
   `full:refused`, and rewritten from the whole parse that follows the
   refusal (`write:afterRefusal`), so the next restore takes it: then and
