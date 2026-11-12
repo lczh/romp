@@ -55,7 +55,7 @@ test("the kernel's verdict rides the link as data-preview; a link without it get
   assert.match(show, /if \(seq !== filePreviewSeq\) return;/, "a stale answer never fills a card that moved on");
   // the kernel's half: the preview map shipped beside pathLinks on both message paths, warming markdown
   assert.equal((KERNEL.match(/ev\["pathPreview"\] = pv/g) || []).length, 2, "both the assistant and the user message build ship it");
-  assert.match(KERNEL, /def _path_preview_verdicts\(links, sid\):/);
+  assert.match(KERNEL, /def _path_preview_verdicts\(links, sid, memo=None\):/);
   assert.match(RENDER, /p\.dataset\.renderMs = \(performance\.now\(\) - t0\)\.toFixed\(1\)/, "the card stamps dwell end to rendered content (the acceptance is latency)");
   assert.match(RENDER, /p\.dataset\.sliceHit = hit \? "1" : "0"/, "…and whether the slice was cached");
   assert.match(KERNEL, /hit=hit\)/, "the slice answer says whether it came from the cache");
