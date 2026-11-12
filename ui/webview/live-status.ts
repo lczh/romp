@@ -80,12 +80,14 @@ export function taskProgressText(p: TaskProgress | undefined, brief = false): st
 /** The thinking tokens of the turn reply `i` closes: the sum of the exact per-message figures on the thinking rows
  *  between the turn's trigger (the most recent user-role line, the worked footer's own start) and `i`. Null when the
  *  trigger is outside the events held (a windowed head), so a partial sum is never shown as the turn's. */
-export function turnThoughtTokens(events: readonly { kind: string; thinkTokens?: number }[], i: number): number | null {
+export function turnThoughtTokens(events: readonly { kind: string; thinkTokens?: number; narration?: boolean }[], i: number): number | null {
   let sum = 0;
   for (let j = i; j >= 0; j--) {
     const e = events[j];
     if (e.kind === "user") return sum;
-    if (e.kind === "thinking" && typeof e.thinkTokens === "number" && e.thinkTokens > 0) sum += e.thinkTokens;
+    // a progress note (an assistant row flagged narration) is a thinking block shown as prose: when it opens its API
+    // message's thinking, the message's figure rides it (kernel build_session), and the turn still thought those tokens
+    if ((e.kind === "thinking" || (e.kind === "assistant" && e.narration)) && typeof e.thinkTokens === "number" && e.thinkTokens > 0) sum += e.thinkTokens;
   }
   return null;
 }

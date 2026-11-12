@@ -5,9 +5,11 @@
 // still count as consecutive; tools separated by visible content (an assistant reply, a prompt, …) do not.
 // The rail timestamp logic runs over the RESULT of this, so the stamps reflect the compacted stream.
 // THINKING (the user 2026-10-23, who approved the design and with it the end of the 2026-06-30 rule that an
-// expanded tool group never shows thinking): a thinking block WITH WORDS (a reasoning summary, or a progress
-// note written for the person watching) is a THOUGHT, shown as one collapsed row; consecutive thoughts are one
-// row. A thought that opens a stretch of work (after a prompt, a mid-turn message, a reply) is its own unit; a
+// expanded tool group never shows thinking): a thinking block WITH WORDS that is not a progress note (a reasoning
+// summary; history from before romp recorded which blocks are notes) is a THOUGHT, shown as one collapsed row;
+// consecutive thoughts are one row. A PROGRESS NOTE (2026-11-06) is not a thought: the kernel ships it as an assistant
+// event flagged `narration`, prose like a reply (TOOLS UNDER PROSE below). A thought
+// that opens a stretch of work (after a prompt, a mid-turn message, a reply) is its own unit; a
 // thought after a tool in a run is a MEMBER of that run, drawn as a collapsed Thought row when the run expands,
 // so it never splits the run, and the run's head still counts only its tools. A textless (opaque) block stays
 // hidden, as every thinking block was before: it breaks nothing, and the turn's footer gives its tokens.
@@ -16,6 +18,13 @@
 // settle, a background report, a system reminder, a romp notice — collapses into one `noticegroup` head.
 // Which events are foldable is the caller's call (render.ts isFoldableNotice, passed per event): peers,
 // API errors, compaction/clear boundaries, asks, to-dos, dividers and every bubble stay standalone.
+// TOOLS UNDER PROSE (progress notes, 2026-11-06, compact mode only, on the caller's `notes`): every assistant prose row, a reply
+// or a note, text or thinking, stays a row of its own, whole; nothing the session says is folded or clipped. The TOOLS give way
+// instead: the stretch of tool calls after a prose row folds into one `attached` run drawn as a dim trailing line under that
+// row, which opens to the calls in place; a stretch of ONE call is that call's own row, `attached`, so it keeps its own label
+// and file link. A Thought row stays a row of its own as before (one after a tool in the stretch rides the run, as in any
+// run). Tools before a turn's first prose fold as they always did. A tool the caller keeps (`keep`: an Agent card) stays its
+// own row, and the tools after it attach to it.
 
 /** The events compact mode may sweep into a noticegroup: the low-stakes, self-similar rows (a recovery, an effort
  *  change, a model swap, a reload, an interrupt marker and its settle, an injected notice: a system reminder or a
@@ -40,8 +49,8 @@ export function isNoticeShape(ev: Parameters<typeof isFoldableNoticeShape>[0]): 
 }
 
 export type DisplayItem =
-  | { kind: "event"; index: number }            // a pass-through event, by its index in the source array
-  | { kind: "toolgroup"; indices: number[] }    // a collapsed run of ≥2 consecutive tool uses (a lone tool is an "event"), with the thoughts that came after a tool in it
+  | { kind: "event"; index: number; attached?: boolean }   // a pass-through event, by its index in the source array; `attached`: a lone tool call after a prose row, drawn as its own row tucked under that one
+  | { kind: "toolgroup"; indices: number[]; attached?: boolean }    // a collapsed run of ≥2 consecutive tool uses (a lone tool is an "event"), with the thoughts that came after a tool in it; `attached`: the tools after a prose row, any count, drawn as that row's trailing line
   | { kind: "thought"; indices: number[] }      // consecutive thoughts that open a stretch of work: ONE collapsed Thought row
   | { kind: "noticegroup"; indices: number[] }  // a collapsed run of ≥2 consecutive foldable notices (was the "retried"-only retrygroup)
   | { kind: "gap"; lo: number; hi: number; before: number };   // turns [lo, hi) the page does not hold (T386 stage 2): empty space before event `before`
@@ -57,23 +66,62 @@ export const STANDALONE_TOOLS = new Set<string>(["AskUserQuestion"]);
 // the tool name for a "tool" event, undefined otherwise. Without `notices`, only a bare "retried" run folds
 // (the pre-2026-09-08 behaviour, kept for callers that pass none); without `thoughts`, every thinking block
 // is hidden (the pre-2026-10-23 behaviour).
-export function compactDisplay(kinds: readonly string[], names?: readonly (string | undefined)[], notices?: readonly boolean[], thoughts?: readonly boolean[]): DisplayItem[] {
+/** The roles compact mode folds prose by (2026-11-06): `note[i]`, event i is assistant prose, a row the tools after it attach
+ *  to; `keep[i]`, tool event i stays a row of its own (an Agent card). */
+export interface NoteRoles { note: readonly boolean[]; keep: readonly boolean[] }
+
+/** Assistant prose a reader reads as the session speaking: a reply or a note, never the interrupt's settle (a seam marker)
+ *  or a slash command's output. */
+export function isProseShape(ev: { kind: string; interruptSettle?: unknown; command?: unknown }): boolean {
+  return ev.kind === "assistant" && !ev.interruptSettle && !ev.command;
+}
+
+/** Each turn's REPLY: the index of the last prose row (`prose(i)`) before each turn boundary (`boundary(i)`, default any user
+ *  row; the chat passes the user rows that are not delivered mid-turn, which open no turn) and before the end. A turn's last
+ *  thing said is its reply wherever it sits, tools after it or not (the fork spot anchors on it, fork-spots.ts). */
+export function segmentReplies(kinds: readonly string[], prose: (i: number) => boolean, boundary?: (i: number) => boolean): Set<number> {
+  const out = new Set<number>();
+  let last = -1;
+  for (let i = 0; i < kinds.length; i++) {
+    if (boundary ? boundary(i) : kinds[i] === "user") { if (last >= 0) out.add(last); last = -1; }
+    else if (prose(i)) last = i;
+  }
+  if (last >= 0) out.add(last);
+  return out;
+}
+
+export function compactDisplay(kinds: readonly string[], names?: readonly (string | undefined)[], notices?: readonly boolean[], thoughts?: readonly boolean[], notes?: NoteRoles): DisplayItem[] {
   const out: DisplayItem[] = [];
-  let run: number[] | null = null;                // a tool run: its tool uses, and the thoughts after a tool in it
+  let run: number[] | null = null;                // a tool run: its tool uses, and the thoughts in it
   let runTools = 0;
   let lead: number[] | null = null;               // a thought that opens a stretch: consecutive thoughts, one row
+  let afterProse = false;                         // the stretch since the last prose (or kept) row, with no boundary since
+  let runAttached = false;                        // the open run follows a prose row
   let noticeRun: number[] | null = null;          // consecutive foldable notices
+  const isNote = (i: number) => !!notes && !!notes.note[i];
+  // members that end up outside any run, in order: a stretch of thoughts as ONE Thought row
+  const loose = (ix: readonly number[]) => {
+    let th: number[] | null = null;
+    for (const i of ix) {
+      if (kinds[i] === "thinking") { (th ||= []).push(i); continue; }
+      if (th) { out.push({ kind: "thought", indices: th }); th = null; }
+      out.push({ kind: "event", index: i });
+    }
+    if (th) out.push({ kind: "thought", indices: th });
+  };
   // a LONE tool passes through as a normal event (its first-class inline tool line + fold); only a run of
   // TWO OR MORE collapses into a summary toolgroup (the user 2026-06-22). A lone tool has no group to hold the
   // thoughts that followed it, so they follow it as a Thought row of their own.
   const flush = () => {
     if (!run) return;
-    if (runTools >= 2) out.push({ kind: "toolgroup", indices: run });
-    else {
-      out.push({ kind: "event", index: run[0] });
-      if (run.length > 1) out.push({ kind: "thought", indices: run.slice(1) });
+    if (runAttached && runTools >= 2) out.push({ kind: "toolgroup", indices: run, attached: true });
+    else if (runAttached) {                       // one call is its own row, tucked under the prose; thoughts after it, rows
+      out.push({ kind: "event", index: run[0], attached: true });
+      if (run.length > 1) loose(run.slice(1));
     }
-    run = null; runTools = 0;
+    else if (runTools >= 2) out.push({ kind: "toolgroup", indices: run });
+    else loose(run);
+    run = null; runTools = 0; runAttached = false;
   };
   const flushLead = () => {
     if (!lead) return;
@@ -97,9 +145,27 @@ export function compactDisplay(kinds: readonly string[], names?: readonly (strin
       (lead ||= []).push(i);                        // opens a stretch: its own Thought row
       continue;
     }
+    if (isNote(i)) {                                // prose is always a row; the tools after it attach to it
+      flush(); flushLead(); flushNotices();
+      out.push({ kind: "event", index: i });
+      afterProse = true;
+      continue;
+    }
     // A standalone tool (AskUserQuestion) is NOT collapsed: it breaks the run and passes through as its
     // own event, so renderTool → renderAsk draws the first-class box instead of "+1" inside a group.
-    if (k === "tool" && !STANDALONE_TOOLS.has(names?.[i] ?? "")) { flushLead(); flushNotices(); (run ||= []).push(i); runTools++; continue; }
+    if (k === "tool" && notes && notes.keep[i]) {   // a kept tool (an Agent card) is a row; tools after it attach
+      flush(); flushLead(); flushNotices();
+      out.push({ kind: "event", index: i });
+      afterProse = true;
+      continue;
+    }
+    if (k === "tool" && !STANDALONE_TOOLS.has(names?.[i] ?? "")) {
+      flushLead(); flushNotices();
+      if (!run) runAttached = afterProse;           // the stretch after a prose row is that row's line
+      (run ||= []).push(i); runTools++;
+      continue;
+    }
+    afterProse = false;                             // any other row (a message, a notice, a standalone tool) ends the stretch
     if (foldable(i)) { flush(); flushLead(); (noticeRun ||= []).push(i); continue; }
     flush();
     flushLead();
