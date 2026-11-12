@@ -53,6 +53,7 @@ TOP_KEYS = {"now", "since", "uptime_s", "log", "process", "pusher", "jobs", "sta
             "goals", "memos", "judge", "http", "parses",   # parses: cold event-model parses (T323 stage 1)
             "checkpoints",                                 # checkpoints: the folds' checkpoints (T323 stage 3)
             "asmCheckpoint",                               # asmCheckpoint: the assembly documents (T323 stage 4a)
+            "docWorker",                                   # docWorker: document rebuilds in a worker process, every fallback and refusal (2026-11-12)
             "asmIndex",                                    # asmIndex: the lazy index's built atoms, by caller (T323 stage 4c)
             "recordCache",                                 # recordCache: the shared reader's byte budget and evictions (2026-09-11)
             "chatPages",                                   # chatPages: the pre-floor history pages cache (T323 stage 4b)

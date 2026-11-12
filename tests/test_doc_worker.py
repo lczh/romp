@@ -124,6 +124,13 @@ class Harness(T.Harness):
         super().setUp()
         _reset_worker()
         self.addCleanup(_reset_worker)
+        # The event model is ONE module for every kernel a test process loads, and its release hook is the last loaded
+        # kernel's: under the whole suite that is another module's kernel, whose worker table is empty, so a release
+        # here reached no worker (CI, 2026-11-12: green alone, the cancel tests red in the suite). The kernel under test
+        # is this module's, so its hook is the one installed for the test, and the prior one put back after.
+        prior = em._ASM_RELEASE_HOOK[0]
+        em.set_assembly_release_hook(km._doc_worker_released)
+        self.addCleanup(em.set_assembly_release_hook, prior)
         names = ("ROMP_DOC_WORKER_CMD", "FAKE_DOC_WORKER_MODE", "FAKE_DOC_WORKER_LOG", "FAKE_DOC_WORKER_MARK",
                  "FAKE_DOC_WORKER_GROW", "FAKE_DOC_WORKER_REAL")
         saved = {k: os.environ.get(k) for k in names}
@@ -143,7 +150,10 @@ class Harness(T.Harness):
         self.notices = []
         patch = mock.patch.object(km, "_sync_notice", lambda text, ok=True, kind="sync": self.notices.append((text, ok)))
         patch.start(); self.addCleanup(patch.stop)
-        self.addCleanup(self._end_held)
+
+    def tearDown(self):
+        self._end_held()                                  # before the base joins the rebuild's thread, which waits on it
+        super().tearDown()
 
     def _end_held(self):
         """A held stand-in a failed test left behind: ended by the pid it wrote, never by a pattern."""
@@ -670,11 +680,20 @@ class TheWorkerProcess(Harness):
     def test_the_worker_ends_when_the_process_that_started_it_does(self):
         """The worker asks for its own death signal: a starter that exits mid-job takes the worker with it. The job's states
         log here is a named pipe nobody writes, so the parse waits at its open for as long as the worker lives."""
+        self._the_starter_leaves()
+
+    def test_a_worker_started_with_sigterm_ignored_and_blocked_still_ends_with_its_starter(self):
+        """An ignored SIGTERM and a blocked one are both inherited across exec, and SIGTERM is how a worker is ended (its
+        starter's death, a cancel by pid): the worker gives itself the default disposition, unblocked, before it asks."""
+        self._the_starter_leaves("import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                                 "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})\n")
+
+    def _the_starter_leaves(self, prelude=""):
         self.write(T.transcript(260))
         fifo = str(self.root / "states.fifo")
         os.mkfifo(fifo)
         pidfile = self.root / "worker.pid"
-        starter = textwrap.dedent('''
+        starter = prelude + textwrap.dedent('''
             import json, os, subprocess, sys, time
             job = json.loads(sys.argv[2]); job["parent"] = os.getpid()
             p = subprocess.Popen([sys.executable, sys.argv[1]], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)

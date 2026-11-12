@@ -15071,15 +15071,17 @@ def _doc_worker_run(leaf, sid, human, why):
 def _doc_worker_stats():
     """The /perf docWorker block: counts and seconds, no paths. `switch` as the file reads now; `latched` once the kernel's own
     road took over for good; `spawned` workers started; `done` their done lines by outcome; `fallbacks` the jobs that ran in
-    this kernel with the switch on, by cause (spawn, crash, latched, noMemInfo, noCheckpointDir); `refused` the admission's refusals (a leaf
-    held for memory is refused at every start attempt) and `heldForMemory` how many leaves the last attempt left pending;
-    `cancelled` (the leaf's use ended), `stopped` (the kernel was leaving) and `memory` (failed for memory) the jobs that
-    ended without a document and without a fallback; `seconds` the workers' wall time; `peak` the last finished job's
-    transcript bytes, peak address space and resident peak beside its soft bound; `running` the job in flight."""
+    this kernel with the switch on, by cause (spawn, crash, latched, noMemInfo, noCheckpointDir); `refused` the admission's
+    refusals (a leaf held for memory is refused at every start attempt) and `heldForMemory` how many leaves the last
+    attempt left pending; `cancelled` (the leaf's use ended), `stopped` (the kernel was leaving) and `memory` (failed for
+    memory) the jobs that ended without a document and without a fallback; `seconds` the workers' wall time; `peak` the
+    last finished job's transcript bytes, peak address space and resident peak beside its soft bound; `running` the job
+    in flight. The clock is read for a job in flight alone: a snapshot with none reads no clock (the perf collector's
+    own tests count the pusher's reads around one)."""
     sw = _doc_worker_switch()
-    now = time.monotonic()
     with _DOC_WORKER_LOCK:
         st, j = _DOC_WORKER_STATS, _DOC_WORKER["job"]
+        now = time.monotonic() if j is not None else 0.0
         return {"switch": sw, "latched": bool(_DOC_WORKER["latched"]), "lostInARow": int(_DOC_WORKER["lost"]),
                 "spawned": st["spawned"], "done": dict(st["done"]), "fallbacks": dict(st["fallbacks"]),
                 "refused": st["refused"], "heldForMemory": int(_DOC_WORKER["held"]), "cancelled": st["cancelled"],

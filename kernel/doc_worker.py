@@ -72,8 +72,12 @@ def _say(text):
 def _die_with_parent(parent):
     """Ask the OS to end this process (SIGTERM) when the thread that started it ends (Linux: PR_SET_PDEATHSIG = 1), then
     check the parent is still the one the job names: one that left before the request was in place would never be noticed.
-    False when the request cannot be made or the parent is already gone."""
+    SIGTERM is also how the kernel ends a job on purpose, so this process first makes sure it takes one: the default
+    disposition, unblocked (an ignored SIGTERM and a blocked one are both inherited across exec, from whatever started
+    the kernel). False when the request cannot be made or the parent is already gone."""
     try:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
         import ctypes
         libc = ctypes.CDLL(None, use_errno=True)
         if libc.prctl(1, int(signal.SIGTERM), 0, 0, 0) != 0:
