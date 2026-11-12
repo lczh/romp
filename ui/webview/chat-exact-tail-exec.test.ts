@@ -310,9 +310,9 @@ test("compact mode: the window start is a unit and the plan wants an event index
   patch(v, s, 4, true, items);
   assert.ok(nodes[2].querySelector(":scope > .turn-elapsed"), "event 3 is unit 2: the footer lands on the reply's unit");
   assert.equal(v.stale, false);
-  // the reply itself folded into a COLLAPSED run as its last member (a run of tools, or under looks C and C2 its notes, that
-  // ends the segment): the footer rides the run's HEAD (closedRunFooter, 2026-11-06; until then a collapsed run's head carried
-  // none, and a segment that ended inside one lost its line), patched in this call, nothing rebuilt or repainted
+  // the segment's last event folded into a COLLAPSED run as its last member (a run of tools that ends the segment): the footer
+  // rides the run's HEAD (closedRunFooter, 2026-11-06; until then a collapsed run's head carried none, and a segment that ended
+  // inside one lost its line), patched in this call, nothing rebuilt or repainted
   const folded = [{ kind: "event", index: 0 }, { kind: "toolgroup", indices: [1, 2, 3] }, { kind: "event", index: 4 }];
   const w2 = footWorld(events, 3, 1);
   w2.v.painted = { sig: ["s0", "s1", "s2"] };

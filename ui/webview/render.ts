@@ -15741,16 +15741,6 @@ function appendTotals(line: HTMLElement, add: number, del: number): void {
   if (!add && !del) return;
   line.append(" ", diffTotals(add, del));
 }
-/** An assistant message's prose: markdown, highlighted code, the kernel-verified path links, the team's terms. A reply and a
- *  progress note draw it alike. */
-function assistantBody(ev: Extract<ChatEvent, { kind: "assistant" }>): HTMLElement {
-  const body = el("div", "assistant md");
-  body.innerHTML = md(ev.md);
-  highlight(body);
-  linkifyFileUris(body, undefined, ev.spacePaths, ev.pathLinks, ev.pathPins, ev.pathPreview, ev.pathPreviewWhy);   // bare file:// URLs + verified spaced filenames → clickable
-  linkTerms(body);   // the team's coinages (T351 stage 2)
-  return body;
-}
 function renderToolGroup(tools: Extract<ChatEvent, { kind: "tool" }>[], prevEpoch: number | null, key: string, open: boolean): HTMLElement {
   const turn = el("div", "turn turn-toolgroup" + (open ? " expanded" : ""));
   const anyErr = tools.some((t) => t.isError);

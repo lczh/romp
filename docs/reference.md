@@ -7377,21 +7377,21 @@ that thinking is billed.
 
 On Claude Opus 5.5 a note the model writes for you between tool calls (what it found, what it does next, an answer to a
 message you sent while it worked) comes back from the API as a thinking block once it runs past a sentence or two. The
-chat shows those notes as the session's own words, while reasoning summaries stay Thought lines. The full view shows each
-note as an ordinary assistant message.
+chat shows those notes as the session's own words, while reasoning summaries stay Thought lines. With Compact transcript
+off, each note is an ordinary assistant message.
 
-Compact view keeps everything the session says on a row of its own, whole: replies, notes, a question it asks between
+Compact transcript keeps everything the session says on a row of its own, whole: replies, notes, a question it asks between
 tool calls. What folds is the tool calls. One call after a row is that call's own row, dimmed and tucked under it, with its
 label and file link; several become one dim line, such as "Read 2 files, edited a file", which opens to the calls in place.
 A line says what its calls are doing: a call still running shows the working dot, "running…" and its time, a failed
 call the red dot and, on a line, how many failed, in red, and a call that can no longer get its result (its Claude Code
-stopped while it ran) the plain dot, with "no result" where the full view says it and, on a line, how many have none.
+stopped while it ran) the plain dot, with "no result" where its own row says it and, on a line, how many have none.
 Calls before a turn's first words fold into a run as they always did, an Agent card and a Thought row stay rows of their
 own, and a stretch of work that ends on a folded line keeps its "worked" line under it.
 
 A response's fork button sits in its turn's "worked" line, on the turn's last row before the next prompt, whatever lies
-between (its tool line, the calls of an open line, a question box and the work after it, a Thought row), in compact and
-in full view; a hover on the response or on any row after it in its turn shows it. The button overlays the line's
+between (its tool line, the calls of an open line, a question box and the work after it, a Thought row), with Compact
+transcript on or off; a hover on the response or on any row after it in its turn shows it. The button overlays the line's
 own height, so a line is as tall with it as without. A turn with no clock draws no "worked" line, and its button gets a
 line of its own with no words.
 
@@ -7416,8 +7416,9 @@ from a session whose stream romp did not read (a Codex session, a Claude Code se
 Thought line. When Claude Code sends a thinking block with words that it should have listed (under the updates
 display), the error center says so once per session and those blocks stay Thought lines.
 
-A note's thinking tokens still count in the turn's "worked" line. The other readers of what a session said are
-unchanged: the tab's hover shows the last reply, and the cards, the judges and notifications read the replies alone.
+A note's thinking tokens still count in the turn's "worked" line. The tab's hover shows the latest thing the session said,
+so during a turn it shows the newest note, and after it the reply. The other readers of what a session said are unchanged:
+the cards, the judges and notifications read the replies alone.
 
 Claude Code lists notes from version 2.1.260 on. When a session's Claude Code reports an older version at start, its
 thinking blocks with words stay Thought lines and the error center says why once. The record of a session's notes
