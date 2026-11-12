@@ -48555,6 +48555,10 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     _narr_rev = nar.narration_rev(jd.STATE, sid)                # read BEFORE the marks: a mark filed between is caught
     _narr = nar.narration_marks(jd.STATE, sid)
 
+    _pv_memo = {}   # per-BUILD-pass memo for _path_preview_verdicts: a file is judged once per pass however many
+    #                 messages name it. A local on purpose: it is gone when this build returns, so the next one judges
+    #                 every file afresh
+
     def _prose_paths(ev, txt, a):
         """The path fields an assistant message's prose carries, a reply's and a progress note's alike (`a`: its atom)."""
         sp = _space_paths(txt, sid, a.get("uuid"))
@@ -48563,7 +48567,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         pl = _path_links(txt, sid, a.get("uuid"), _pl_memo)
         if pl is not None:
             ev["pathLinks"] = pl    # path-shaped tokens, filesystem-verified/fixed → the client's link gate
-            pv, pw = _path_preview_verdicts(pl, sid)
+            pv, pw = _path_preview_verdicts(pl, sid, _pv_memo)
             if pl:
                 ev["pathPreview"] = pv   # the links a hover may preview, by kind; the markdown ones warmed (T351). The key rides EVERY event with links (empty when none previews): its presence is the verdict, and the fold refolds an event built without one (T364)
             if pw:
@@ -49102,7 +49106,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                             pl = _path_links(prompt, sid, a.get("uuid"), _pl_memo)
                             if pl is not None:
                                 ev["pathLinks"] = pl    # path-shaped tokens, filesystem-verified/fixed → the client's link gate
-                                pv, pw = _path_preview_verdicts(pl, sid)
+                                pv, pw = _path_preview_verdicts(pl, sid, _pv_memo)
                                 if pl:
                                     ev["pathPreview"] = pv   # the links a hover may preview, by kind; the markdown ones warmed (T351). The key rides EVERY event with links (empty when none previews): its presence is the verdict, and the fold refolds an event built without one (T364)
                                 if pw:
@@ -67859,11 +67863,34 @@ _SECRET_TEXT_RE = re.compile(
     r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
 
 
-def _secret_path(real):
+def _slice_root(which, sid=None, memo=None):
+    """One of the three REAL paths a preview verdict is judged against: "home" (the user's), "folder" (session `sid`'s,
+    "" when it has none) or "glossaries" (the user's glossaries folder). None of them depends on the file being judged,
+    so a pass that judges many files (a chat build, through _path_preview_verdicts) hands in `memo`, a dict of its own,
+    and each is resolved once for that pass, the session's folder read from the registry once. With no memo (the slice
+    route, a notice's attachment, the files list) each is resolved on the spot at every judgement, as it always was.
+    A build resolved all three again for every link of every message: 20,000 links cost 616,000 stat calls, 31 a
+    link, each one a turn at the interpreter lock in the process every page waits on (lab 2026-11-12)."""
+    seen = None if memo is None else memo.setdefault("root", {})
+    if seen is not None and (which, sid) in seen:
+        return seen[(which, sid)]
+    if which == "home":
+        v = os.path.realpath(os.path.expanduser("~"))
+    elif which == "folder":
+        base = _cwd_of(sid) if sid else None
+        v = os.path.realpath(base) if base else ""
+    else:
+        v = os.path.realpath(str(_glossary_dir()))
+    if seen is not None:
+        seen[(which, sid)] = v
+    return v
+
+
+def _secret_path(real, memo=None):
     """Does the REAL path name a secret store: by its own name, or by a directory on its way that holds nothing else."""
     if _SECRET_NAME_RE.search(os.path.basename(real)):
         return True
-    home = os.path.realpath(os.path.expanduser("~"))
+    home = _slice_root("home", None, memo)
     rel = real[len(home) + 1:] if real.startswith(home + os.sep) else real
     return bool(_SECRET_DIR_RE.search(rel.replace(os.sep, "/")))
 
@@ -67891,37 +67918,44 @@ def _slice_kind(fp):
     return None
 
 
-def _slice_confined(fp, sid):
+def _slice_confined(fp, sid, memo=None):
     """The popover renders only under the session's folder or the user's home (realpaths, so a symlink cannot walk
     out); anything else is shown as text with an "open" affordance and no fetch."""
-    real = os.path.realpath(fp)
-    roots = [os.path.realpath(os.path.expanduser("~"))]
-    base = _cwd_of(sid) if sid else None
+    return _real_confined(os.path.realpath(fp), sid, memo)
+
+
+def _real_confined(real, sid, memo=None):
+    """_slice_confined for a path that is ALREADY real: is it the user's home or the session's folder, or under one."""
+    roots = [_slice_root("home", None, memo)]
+    base = _slice_root("folder", sid, memo)
     if base:
-        roots.append(os.path.realpath(base))
+        roots.append(base)
     return any(real == r or real.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
 
 
-def _slice_allowed(fp, sid):
+def _slice_allowed(fp, sid, memo=None):
     """(kind, "") when the popover may fetch and render `fp` for session `sid`, else (None, why). Every judgement is of
     the REAL path (the review on this change: a symlink named notes.md pointing at a .env passed as markdown, and the
     build-time warm read the target): existence and a regular file, the secrets denylist on the real name and its
     directories (first, so the reason names the secret whatever the kinds say; a .env is a text kind by extension), the
     kind of the real name (and the link's name must agree, so a symlink cannot dress one kind as another), the
-    confinement, the size caps (text 2 MB, media 50 MB), in that order."""
+    confinement, the size caps (text 2 MB, media 50 MB), in that order. The path is resolved ONCE and every check reads
+    that one resolution (the confinement used to resolve the resolved path a second time, which finds the same path
+    for as many stat calls again). `memo` is _slice_root's: a pass's own dict, so the three roots are resolved once
+    for the pass; the file itself is resolved and stat'ed here on every call whatever the memo holds."""
     if not os.path.isabs(fp):
         return None, "not a file"
     real = os.path.realpath(fp)
     if not os.path.isfile(real):
         return None, "not a file"
-    if _secret_path(real):
+    if _secret_path(real, memo):
         return None, "a secrets-shaped name"
     kind = _slice_kind(real)
     if not kind:
         return None, "not a kind the preview shows"
     if _slice_kind(fp) != kind:
         return None, "a link dressed as another kind"
-    if not _slice_confined(real, sid) and not _glossary_owned(real):   # the glossaries folder is the user's own wherever the config dir points (T375)
+    if not _real_confined(real, sid, memo) and not _glossary_owned(real, memo):   # the glossaries folder is the user's own wherever the config dir points (T375)
         return None, "outside the session's folder and your home"
     try:
         size = os.path.getsize(real)
@@ -67994,13 +68028,13 @@ def _slice_headings(text):
     return out
 
 
-def _glossary_owned(real):
+def _glossary_owned(real, memo=None):
     """Whether `real` (a real path) is one of the user's own glossary files (a markdown file directly under the glossaries
     folder, _glossary_dir). The content belt does not apply there (T375): a glossary's every section already reaches the page
     whole through the index frame and the /glossary route, so a credential-shaped EXAMPLE line in a coinage's definition
     would refuse the slice of a file the page holds anyway, and the term's hover would fall to the text card."""
     try:
-        d = os.path.realpath(str(_glossary_dir()))
+        d = _slice_root("glossaries", None, memo)
     except Exception:
         return False
     return os.path.dirname(real) == d and real.endswith(".md")
@@ -68370,21 +68404,38 @@ def _glossary_lookup(sid, term):
     return 404, {"error": "no such term in the group's glossary: %r" % want, "tried": [_tilde(str(path))], "group": group}
 
 
-def _path_preview_verdicts(links, sid):
+def _path_preview_verdicts(links, sid, memo=None):
     """({token: kind}, {token: why}) for the verified links of session `sid`: the kinds the preview popover may fetch
     (shipped as pathPreview beside pathLinks; a token absent there is shown as text plus "open", with NO request), and
     for every token it may NOT, the exact condition that refused it (shipped as pathPreviewWhy, the text card's words:
     T364, the review of the laptop report, where the card blamed the confinement for whatever the reason was). The
     whys are _slice_allowed's, plus the markdown warm's content-belt refusals ("looks like a secret", "not text"). The
-    markdown ones are warmed here."""
+    markdown ones are warmed here.
+
+    `memo` is ONE BUILD PASS's own dict (build_session's _pv_memo). A history names the same few files in message
+    after message, and each mention was judged from nothing, about thirty stat calls: with the memo a target is
+    judged once per pass and the answer read back for the pass's later mentions, and the roots are resolved once
+    (_slice_root). What it holds is keyed on (sid, target) and is exactly what this function computed for that pair
+    earlier in the SAME pass, so it can hand back nothing _slice_allowed did not just say of that file for that
+    session. It dies with the pass: nothing module-level keeps a verdict, so the next build judges every file again
+    and sees one created, deleted, grown or re-pointed since. And it never reaches the slice route, which judges at the
+    moment it serves with no memo at all: a verdict here decides only whether the page asks. A markdown file is
+    warmed at its first mention of a pass, not at every one."""
     kinds, whys = {}, {}
+    seen = None if memo is None else memo.setdefault("verdict", {})
     for tok, target in (links or {}).items():
-        fp = _resolve_open_path(target, sid)
-        kind, why = _slice_allowed(fp, sid)
-        if kind and kind == "markdown":
-            why = _slice_warm_why(fp)
-            if why:
-                kind = None
+        hit = None if seen is None else seen.get((sid, target))
+        if hit is None:
+            fp = _resolve_open_path(target, sid)
+            kind, why = _slice_allowed(fp, sid, memo)
+            if kind and kind == "markdown":
+                why = _slice_warm_why(fp)
+                if why:
+                    kind = None
+            hit = (kind, why)
+            if seen is not None:
+                seen[(sid, target)] = hit
+        kind, why = hit
         if kind:
             kinds[tok] = kind
         else:
