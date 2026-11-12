@@ -8,7 +8,8 @@ it had no Opus 5.5 row, so a family fallback priced Opus 5.5 at Opus 4.8's rates
 guard read standard Opus 5.5 at about 1.6 times its price and fast Opus 5.5 at about 0.9 times.
 
 The source is Claude Code's baked-in model catalog (its `pricing_tiers` and each model's `pricing` tier, 2.1.282; the
-Fable and Mythos 5.2 rows from 2.1.322, which match Anthropic's published pricing page) and, for fast mode, the
+Fable and Mythos 5.2, Sonnet 5.5 and Haiku 5.5 rows from 2.1.322, which match Anthropic's published pricing page; 2.1.322
+resolves the `sonnet` and `haiku` aliases to the last two) and, for fast mode, the
 per-model fast rates in its cost code, which are not in the catalog. Read off the binary by hand,
 not at run time: the catalog is a minified script literal inside a 230 MB executable and the fast rates are code
 constants whose names change every build, so nothing romp could parse there is a contract. The table checks against
@@ -18,8 +19,10 @@ so when a result bills a model the table lacks, or a model's tokens at dollars i
 
 The arithmetic follows the CLI's: cache writes at the 1-hour rate for the tokens `cache_creation.ephemeral_1h_input_tokens`
 names and at the 5-minute rate for the rest; a call whose usage says `speed: "fast"` at the model's fast rates where it
-has them (a model without them stays at its standard rates, as the CLI does); `inference_geo: "us"` multiplies the
-token cost by 1.1; each web search request is a cent.
+has them (a model without them stays at its standard rates, as the CLI does); a call to a model with a long-prompt tier
+(Haiku 5.5) whose prompt (input, cache reads and cache writes together) is over LONG_PROMPT_TOKENS at that tier's rates
+for every category, output included, call by call; `inference_geo: "us"` multiplies the token cost by 1.1, the long
+tier's included; each web search request is a cent.
 
 stdlib only, loaded by path as `romp_cli_prices` from the kernel, the SDK backend and cli/spend_repair.py."""
 import re
@@ -28,8 +31,10 @@ import re
 _T_3_15, _T_5_25, _T_10_50 = (3, 15, 3.75, 6, 0.3), (5, 25, 6.25, 10, 0.5), (10, 50, 12.5, 20, 1)
 CLI_PRICES = {
     "claude-3-5-haiku": (0.8, 4, 1, 1.6, 0.08), "claude-haiku-4-5": (1, 5, 1.25, 2, 0.1),
+    "claude-haiku-5-5": (0.1, 0.5, 0.125, 0.2, 0.01),
     "claude-3-5-sonnet": _T_3_15, "claude-3-7-sonnet": _T_3_15, "claude-sonnet-4-0": _T_3_15,
     "claude-sonnet-4-5": _T_3_15, "claude-sonnet-4-6": _T_3_15, "claude-sonnet-5": (2, 10, 2.5, 4, 0.2),
+    "claude-sonnet-5-5": (2, 10, 2.5, 4, 0.1),
     "claude-opus-4-0": (15, 75, 18.75, 30, 1.5), "claude-opus-4-1": (15, 75, 18.75, 30, 1.5),
     "claude-opus-4-5": _T_5_25, "claude-opus-4-6": _T_5_25, "claude-opus-4-7": _T_5_25, "claude-opus-4-8": _T_5_25,
     "claude-opus-5": _T_5_25, "claude-opus-5-5": (4, 20, 5, 8, 0.2),
@@ -41,6 +46,10 @@ CLI_PRICES = {
 CLI_FAST_PRICES = {"claude-opus-5-5": (8, 40, 10, 16, 0.4), "claude-opus-5": _T_10_50, "claude-opus-4-8": _T_10_50,
                    "claude-opus-4-7": (30, 150, 37.5, 60, 3), "claude-opus-4-6": (30, 150, 37.5, 60, 3),
                    "claude-fable-5-2": (16, 80, 20, 32, 0.4), "claude-mythos-5-2": (16, 80, 20, 32, 0.4)}
+# the long-prompt tier: a call whose prompt (input + cache reads + cache writes) is strictly over LONG_PROMPT_TOKENS pays
+# these rates instead, every category, output included (Haiku 5.5: five times its standard rates); each call on its own
+CLI_LONG_PRICES = {"claude-haiku-5-5": (0.5, 2.5, 0.625, 1, 0.05)}
+LONG_PROMPT_TOKENS = 100_000
 WEB_SEARCH_USD = 0.01
 US_GEO_MULTIPLIER = 1.1
 
@@ -66,22 +75,42 @@ def _row(rates):
 
 def price_rows():
     """{model id: row} in $ per token, the shape the kernel's price map holds: in, out, cache_w (5 m), cache_w_1h,
-    cache_r, and `fast`, the same shape, for a model with fast rates. Newest model first within each family, so a
-    lookup that falls back to "any model of the family" lands on the newest one."""
+    cache_r, and `fast`, the same shape, for a model with fast rates, and `long`, the same shape, for a model with a
+    long-prompt tier. Newest model first within each family, so a lookup that falls back to "any model of the family"
+    lands on the newest one."""
     out = {}
     for mid in reversed(list(CLI_PRICES)):
         row = _row(CLI_PRICES[mid])
         if mid in CLI_FAST_PRICES:
             row["fast"] = _row(CLI_FAST_PRICES[mid])
+        if mid in CLI_LONG_PRICES:
+            row["long"] = _row(CLI_LONG_PRICES[mid])
         out[mid] = row
     return out
 
 
+def _rates(row, fast, prompt_tokens):
+    """The rates one call pays: the row's `fast` rates when the call ran fast and the row has them, else its `long` rates
+    when it has them and the call's prompt is over LONG_PROMPT_TOKENS, else the row itself."""
+    if fast and isinstance(row.get("fast"), dict):
+        return row["fast"]
+    if isinstance(row.get("long"), dict) and prompt_tokens > LONG_PROMPT_TOKENS:
+        return row["long"]
+    return row
+
+
 def cost_parts(row, tok_in, tok_out, cache_w, cache_r, cache_w_1h=0, fast=False, geo_us=False, web_searches=0):
     """One call's dollars from a price row ($ per token, price_rows' shape) and the call's counts. The row's `fast` rates
-    apply when `fast` and the row has them; `cache_w_1h` of the `cache_w` written tokens take the row's 1-hour rate
-    (its 5-minute rate when the row names none, as the CLI does for a model without one)."""
-    r = row.get("fast") if fast and isinstance(row.get("fast"), dict) else row
+    apply when `fast` and the row has them, its `long` rates when it has them and the call's prompt (input, cache reads
+    and cache writes) is over LONG_PROMPT_TOKENS; `cache_w_1h` of the `cache_w` written tokens take the 1-hour rate (the
+    5-minute rate when the row names none, as the CLI does for a model without one). One CALL: the long tier is decided
+    by that call's own prompt, so a sum of calls priced here at once can land on the wrong tier."""
+    prompt = float(tok_in or 0) + float(cache_r or 0) + float(cache_w or 0)
+    return _usd(_rates(row, fast, prompt), tok_in, tok_out, cache_w, cache_r, cache_w_1h, geo_us, web_searches)
+
+
+def _usd(r, tok_in, tok_out, cache_w, cache_r, cache_w_1h, geo_us, web_searches):
+    """Dollars for the counts at the rates `r` (one tier of a price row)."""
     w5 = float(r.get("cache_w") or 0)
     w1 = r.get("cache_w_1h")
     h = min(max(float(cache_w_1h or 0), 0.0), float(cache_w or 0))
@@ -116,15 +145,17 @@ _ROWS = price_rows()
 
 def cost_bounds(model, tok_in, tok_out, cache_r, cache_w, web_searches=0):
     """(lowest, highest) dollars the table's rates can bill a model's token totals at, whatever the calls' mix: lowest
-    every call at the standard rates with every cache write held 5 minutes, highest every call at the fast rates where
-    the model has them, every write held an hour and US inference; None for a model the table lacks. A per-model total
-    Claude Code billed outside these is a rate the table does not have (the SDK backend's drift check)."""
+    every call at the standard rates with every cache write held 5 minutes, highest every call at the dearest tier the
+    model has (its fast rates, or its long-prompt rates, which a total cannot rule out since the tier is decided call by
+    call), every write held an hour and US inference; None for a model the table lacks. A per-model total Claude Code
+    billed outside these is a rate the table does not have (the SDK backend's drift check)."""
     mid = model_id(model)
     if mid is None:
         return None
     row = _ROWS[mid]
-    lo = cost_parts(row, tok_in, tok_out, cache_w, cache_r, 0, False, False, web_searches)
-    hi = cost_parts(row, tok_in, tok_out, cache_w, cache_r, cache_w, "fast" in row, True, web_searches)
+    lo = _usd(row, tok_in, tok_out, cache_w, cache_r, 0, False, web_searches)
+    hi = max(_usd(r, tok_in, tok_out, cache_w, cache_r, cache_w, True, web_searches)
+             for r in (row, row.get("fast"), row.get("long")) if isinstance(r, dict))
     return lo, hi
 
 

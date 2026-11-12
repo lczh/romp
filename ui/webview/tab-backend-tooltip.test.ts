@@ -95,6 +95,7 @@ test("the tooltip still shows the full path + mode/model/effort — path and bra
   assert.match(RENDER, /rows\.push\(\["Mode", prettyMode\(s\.status\.mode\)/);
   // T372 (the user 2026-09-12): the model and effort VALUES wear the footer chip's colour, from the one helper the
   // footer calls (metaColor), as the row's third member; the labels stay dim
-  assert.match(RENDER, /rows\.push\(\["Model", s\.status\.model, metaColor\("model", s\.status\)\]\)/);
+  // (and a model pick waiting for its relaunch after the model, the review of #455: tab-tip-tones.test.ts runs it)
+  assert.match(RENDER, /rows\.push\(\["Model", s\.status\.model \+ \(modelWait \? ` \(\$\{modelWait\}\)` : ""\), metaColor\("model", s\.status\)\]\)/);
   assert.match(RENDER, /rows\.push\(\["Effort", s\.status\.effort, metaColor\("effort", s\.status\)\]\)/);
 });

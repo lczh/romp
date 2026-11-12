@@ -635,12 +635,12 @@ class PriceDrift(unittest.TestCase):
         self.assertIn("0.75x", said[0])
         self._run(s, _result_mu(1.801, {"claude-opus-5-5": ((0, 40000, 4000000, 0), 1.80), "claude-haiku-4-5-20251001": haiku}))
         self.assertEqual(len(self.said()), 1, "once per model")
-        # a model the table lacks
+        # a model the table lacks (claude-sonnet-5-5 has its own row since 2026-11-12; the version after it stands in)
         self._run(s, _result_mu(4.801, {"claude-opus-5-5": ((0, 40000, 4000000, 0), 1.80), "claude-haiku-4-5-20251001": haiku,
-                                        "claude-sonnet-5-5": ((10000, 1000, 0, 0), 3.0)}))
+                                        "claude-sonnet-5-6": ((10000, 1000, 0, 0), 3.0)}))
         said = self.said()
         self.assertEqual(len(said), 2, said)
-        self.assertIn("claude-sonnet-5-5", said[1])
+        self.assertIn("claude-sonnet-5-6", said[1])
         self.assertIn("does not have", said[1])
         self.assertAlmostEqual(self._day()["usd"], 4.801, msg="the check never touches the count")
 

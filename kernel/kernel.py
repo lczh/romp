@@ -25854,6 +25854,7 @@ def _sdk_live_norm(st):
             # record older than it describes an account the session left (_spend_record_stands)
             "authSwitchedAt": st.get("authSwitchedAt") or 0,
             "relaunchWaits": st.get("relaunchWaits") or "",   # what a pick's relaunch waits for ("2 background tasks"), "" when nothing
+            "modelWait": st.get("modelWait") or "",   # the model pick that relaunch carries ("Fable 5.2"), "" when none waits for one
             "relaunchCuts": st.get("relaunchCuts") or "",   # …and what Apply now would end to push it through ("" when nothing)
             "color": (st.get("color") or None), "mode": st.get("mode", ""), "backend": "sdk",
             "modePending": bool(st.get("modePending")),   # a bypass pick waiting for its relaunch → the mode badge's dots
@@ -49841,6 +49842,9 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   "authLoginLive": tm.get("authLoginLive"),
                   "authPending": bool(tm.get("authPending")),   # an /auth reconnect applying → badge dots
                   "relaunchWaits": tm.get("relaunchWaits") or "",   # …and what that relaunch waits for (the Billing row's sub-line says it)
+                  # a model pick waiting for its relaunch ("Fable 5.2", the review of #455): the model badge's dots stand for it, and
+                  # the badge's hover and the tab's say it with what the relaunch waits for
+                  "modelWait": tm.get("modelWait") or "",
                   "relaunchCuts": tm.get("relaunchCuts") or "",   # …and what Apply now would end to push it through (its row and confirm)
                   "modelPending": _model_pending_now(sid, tm),   # switching-dots on the model badge until the pick lands, from EITHER surface (the user 2026-07-03)
                   "effortPending": bool(tm.get("effortPending")),   # switching-dots on the effort badge while the /effort reconnect applies (SDK-only; the user 2026-07-06)
@@ -63620,7 +63624,7 @@ def _compact_boundary_scan(path, since, size):
 def _light_status(sid, path, tm, now):
     """A skeleton tab's status without a build, from the sources the built chip reads that need no parse: the backend's live
     row (its live-prompt, retrying, working and compacting words, its since, backend, model, effort, mode, a waiting bypass
-    pick's mark and what its relaunch waits for), the api-error
+    or model pick's mark and what its relaunch waits for), the api-error
     tail read (_api_error: cached, tail-first, the same call build_session makes, so blocked and its on-you legs paint as
     they would built), the awaiting stamps and rows (_session_awaiting with the judge's stamp, the built chip's own call),
     the backend's compaction bracket, and the retry ladder. What it cannot state is the transcript-derived open turn: the
@@ -63697,7 +63701,9 @@ def _light_status(sid, path, tm, now):
             "mode": tm.get("mode", ""),
             # a bypass pick waiting for its relaunch (2026-10-01), as build_session states it: a skeleton tab's hover says
             # the pick and what its relaunch waits for, never the bare mode
-            "modePending": bool(tm.get("modePending")), "relaunchWaits": tm.get("relaunchWaits") or ""}
+            "modePending": bool(tm.get("modePending")), "relaunchWaits": tm.get("relaunchWaits") or "",
+            # …and a model pick's the same way (the review of #455): the badge's dots and its wait words, built's signal
+            "modelPending": _model_pending_now(sid, tm), "modelWait": tm.get("modelWait") or ""}
 
 
 def _send_light_status(c, sid, light, wordless_only=False):

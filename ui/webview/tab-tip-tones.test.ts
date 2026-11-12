@@ -63,8 +63,9 @@ const prettyFast = (f) => f; const metaCurrent = (kind, st) => kind === "model" 
 const metaDots = () => el("span", "meta-dots"); const isMetaPending = () => false;
 const needsYouPhrase = (n) => n > 1 ? n + " things need you" : n === 1 ? "1 thing needs you" : "needs you";
 `;
-const SRC = PRELUDE + liftMod("metaColor") + liftMod("effortBadgeText") + liftMod("modeWaitText") + lift("showTabTip") + liftMod("metaButton") + liftMod("syncMetaControls")
-  + "\nreturn { showTabTip, metaButton, metaColor, syncMetaControls, modeWaitText };";
+const SRC = PRELUDE + liftMod("metaColor") + liftMod("effortBadgeText") + liftMod("modeWaitText") + liftMod("modelWaitText") + liftMod("modelBadgeTip")
+  + lift("showTabTip") + liftMod("metaButton") + liftMod("syncMetaControls")
+  + "\nreturn { showTabTip, metaButton, metaColor, syncMetaControls, modeWaitText, modelWaitText };";
 const js = esbuild.transformSync(SRC, { loader: "ts", format: "cjs", target: "es2020" }).code;
 const mod = new Function("pickTone", "readableRgb", "document", "window", js)(pickTone, readableRgb, (globalThis as any).document, (globalThis as any).window);
 
@@ -138,7 +139,8 @@ test("at source: the rows carry the colour as a third member, the value span tak
   const stt = RENDER.slice(RENDER.indexOf("function showTabTip("), RENDER.indexOf("\n}\n", RENDER.indexOf("function showTabTip(")));
   assert.match(stt, /const rows: Array<\[string, string, string\?\]> = \[\];/);
   assert.doesNotMatch(stt, /ve\.setAttribute\("aria-label"/, "no inert aria-label on the role-less value span (PR 2033 review)");
-  assert.match(stt, /rows\.push\(\["Model", s\.status\.model, metaColor\("model", s\.status\)\]\);/);
+  // the model, and a pick waiting for its relaunch after it (the review of #455), tinted by the footer's helper
+  assert.match(stt, /rows\.push\(\["Model", s\.status\.model \+ \(modelWait \? ` \(\$\{modelWait\}\)` : ""\), metaColor\("model", s\.status\)\]\);/);
   assert.match(stt, /rows\.push\(\["Effort", s\.status\.effort, metaColor\("effort", s\.status\)\]\);/);
   assert.match(stt, /if \(color\) ve\.style\.color = color;/);
   assert.doesNotMatch(stt, /addEventListener\("(resize|keydown|mousedown)"/, "no window listener inside the lifted slice");
@@ -221,4 +223,22 @@ test("a waiting bypass pick: the Mode row says the mode the CLI confirmed, then 
   // just after a kernel restart `mode` can read the pick itself (see the backend's _mode_pending): named once
   const seeded = { ...status, mode: "bypassPermissions", modePending: true, relaunchWaits: "1 background task" };
   assert.equal(modeValue(seeded), `bypassPermissions (${mod.modeWaitText(seeded)})`);
+});
+
+test("a model pick waiting for its relaunch: the Model row says the model the CLI runs, then the pick and what it waits for (the review of #455)", () => {
+  // the footer's model badge wears dots meanwhile; the words are modelWaitText's (status-controls.test.ts pins them), the value keeps its tint
+  const modelRow = (st: any) => {
+    mod.showTabTip(new El("div"), { ...session, status: st });
+    const tip = body.children[body.children.length - 1];
+    const row = tip.children.find((r) => r.className === "tab-tip-row" && r.children[0].textContent === "Model");
+    return row ? row.children[1] : null;
+  };
+  bodyClasses.clear();
+  const waiting = { ...status, model: "Opus 5.5", modelPending: true, modelWait: "Fable 5.2", relaunchWaits: "1 background task" };
+  assert.equal(mod.modelWaitText(waiting), "Fable 5.2 applies after 1 background task", "the premise: the kernel's words");
+  assert.equal(modelRow(waiting)!.textContent, "Opus 5.5 (Fable 5.2 applies after 1 background task)");
+  assert.equal(modelRow(waiting)!.style.color, mod.metaColor("model", waiting), "the value keeps the footer's tint");
+  assert.equal(modelRow({ ...waiting, relaunchWaits: "" })!.textContent, "Opus 5.5 (Fable 5.2 applying…)");
+  assert.equal(modelRow({ ...waiting, modelWait: "" })!.textContent, "Opus 5.5", "an ordinary pick resolving live: the model alone");
+  assert.equal(modelRow({ ...status, model: "Fable 5.2" })!.textContent, "Fable 5.2", "landed: the model alone");
 });

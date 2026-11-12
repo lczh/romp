@@ -14,6 +14,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from romp_load import load_source
 
@@ -250,6 +251,125 @@ class StaleCliModelPick(unittest.TestCase):
         s2._host_is_attach = True                          # it reattaches to the same old CLI
         self.assertFalse(s2._send_stale_pick())
         self.assertEqual(asks, ["model"], "the relaunch is asked again")
+
+    def test_a_kernel_restart_while_the_pick_waits_keeps_its_dots_and_arms_nothing(self):
+        """The review of #455, with Retry upgrades after downgrades on: the restart's heal of pending picks ran before the
+        saved pick was read, so the pick survived without its switching dots, the label stayed on the model before it,
+        the reattach armed a retry and logged a fallback that never happened, and the relaunch's first reply minted a
+        "Model back on Fable 5.2" card, a card moved with no new information. Now the dots are restored with the pick and
+        a session whose saved pick stands is waiting, not downgraded."""
+        Path(self.d, sb.RETRY_UPGRADE_STORE).write_text("on")
+        sid, s = self._live()
+        s.want_switch_reconnect = lambda why: None
+        self._pick_refused(s, sid)
+        self.be._update_reg(sid, liveModel="Opus 5.5", liveModelId="claude-opus-5-5")   # what the old CLI reported last
+        self.assertTrue(sb.read_reg(self.d, sid).get("modelPending"), "the premise: the waiting pick wears its dots")
+        cards = []
+        hooks = {k: getattr(sb.SdkBackend, k, None) for k in ("on_model_fallback", "on_model_restored")}
+        sb.SdkBackend.on_model_fallback = staticmethod(lambda sid_, frm, to: cards.append(("fallback", frm, to)))
+        sb.SdkBackend.on_model_restored = staticmethod(lambda sid_, frm, to: cards.append(("restored", frm, to)))
+        try:
+            # the kernel restarts: the next kernel's boot sweep over the registry, then the session's object
+            be2 = sb.SdkBackend(self.d, "/bin/false", lambda *a, **k: None)
+            logs = []
+            be2._log_cb = logs.append
+            be2.cli_version = lambda: "2.1.322"
+            with mock.patch.object(sb.subprocess, "run", return_value=mock.Mock(stdout="", returncode=0)), \
+                    mock.patch.object(sb.SdkSession, "start", lambda self_: None), \
+                    mock.patch.object(be2, "_lease_watch_start"), mock.patch.object(be2, "_start_test_root_sweep"):
+                be2._boot_reconcile([sb.read_reg(self.d, sid)])
+            self.assertTrue(sb.read_reg(self.d, sid).get("modelPending"), "the boot sweep keeps the waiting pick's dots")
+            s2 = sb.SdkSession(be2, sb.read_reg(self.d, sid))
+            s2.thread = type("T", (), {"is_alive": lambda self: True})()
+            be2.sessions[sid] = s2
+            self.assertEqual(s2._stale_pick["pick"], PICK)
+            self.assertEqual(s2._model_pending, PICK, "restored with its switching dots")
+            self.assertTrue(sb.read_reg(self.d, sid).get("modelPending"))
+            self.assertEqual(s2.model, "Opus 5.5", "the CLI it reattaches to runs the model from before the pick")
+            # the reattach to the same old CLI: the relaunch is asked again, and nothing reads the session as fallen
+            asks = []
+            s2.want_switch_reconnect = asks.append
+            s2._host_is_attach = True
+            self.assertFalse(s2._send_stale_pick())
+            self.assertEqual(asks, ["model"])
+            self.assertFalse(s2._arm_if_below_pick(), "waiting for its relaunch, not downgraded: no retry arm")
+            self.assertIsNone(s2._upgrade_retry)
+            self.assertFalse([m for m in logs if "fell back" in m], logs)
+            snap = s2.snapshot()
+            self.assertTrue(snap["modelPending"], "the badge's dots")
+            self.assertIsNone(snap["modelFallback"], "no fallback mark beside the pick")
+            self.assertEqual(be2.fallback_row_for_reg(sb.read_reg(self.d, sid)), None, "nor on the dormant row")
+            # the old CLI reports the model it runs (the attach's context refresh, a reply of a turn it opened itself)
+            s2._learn_model("Opus 5.5", raw="claude-opus-5-5", served=True)
+            self.assertEqual(s2._model_pending, PICK, "a report of the model before the pick ends nothing")
+            # the relaunch lands on the installed Claude Code, which takes the pick, and its first reply is served on it
+            s2._host_is_attach = False
+            s2.client = _Client(runs=PICK)
+
+            async def go():
+                s2.loop = asyncio.get_running_loop()
+                self.assertTrue(s2._send_stale_pick())
+                for _ in range(8):
+                    await asyncio.sleep(0)
+            asyncio.run(go())
+            s2._learn_model("Fable 5.2", raw=PICK, served=True)
+            self.assertEqual(s2._model_pending, "", "its dots end at its own report")
+            self.assertIsNone(s2._stale_pick)
+            self.assertEqual(cards, [], "no card: the pick landed, nothing fell back or came back")
+            self.assertFalse([m for m in logs if "retry upgrade" in m], logs)
+        finally:
+            for k, v in hooks.items():
+                if v is None:
+                    try:
+                        delattr(sb.SdkBackend, k)
+                    except AttributeError:
+                        pass
+                else:
+                    setattr(sb.SdkBackend, k, v)
+
+    def test_a_restart_without_retry_upgrades_shows_the_dots_not_the_fallback_mark(self):
+        """With Retry upgrades off the restart minted no card, but the picker's requested-model mark (the yellow fallback
+        tick) showed where the pick's switching dots belong. An earlier kernel's heal that already dropped the flag gets
+        it back from the saved pick."""
+        sid, s = self._live()
+        s.want_switch_reconnect = lambda why: None
+        self._pick_refused(s, sid)
+        self.be._update_reg(sid, liveModel="Opus 5.5", modelPending=False)   # healed by a kernel before this fix
+        s2 = sb.SdkSession(self.be, sb.read_reg(self.d, sid))
+        self.assertEqual(s2._model_pending, PICK)
+        self.assertTrue(sb.read_reg(self.d, sid).get("modelPending"), "the flag is back with the saved pick")
+        snap = s2.snapshot()
+        self.assertTrue(snap["modelPending"])
+        self.assertIsNone(snap["modelFallback"])
+
+    def test_a_thread_death_while_the_pick_waits_keeps_its_dots(self):
+        """The thread's death clears a pick in flight so its dots are not trapped; a pick waiting for its relaunch is not in
+        flight to a CLI that died with them, it waits for the launch this death brings sooner."""
+        sid, s = self._live()
+        s.want_switch_reconnect = lambda why: None
+        self._pick_refused(s, sid)
+        s.ended = True                                    # the session is ending: no heal relaunches it here
+        self.be._on_session_gone(s)
+        self.assertEqual(s._model_pending, PICK)
+        self.assertTrue(sb.read_reg(self.d, sid).get("modelPending"))
+
+    def test_the_snapshot_names_the_waiting_pick_for_the_badge(self):
+        """What the badge's dots wait for (the review of #455): the pick, beside relaunchWaits, while it waits for its
+        relaunch; nothing once the relaunch's CLI has it, nor for an ordinary live pick still resolving."""
+        sid, s = self._live()
+        s.inflight = 1                                     # a turn is running: the relaunch waits for it
+        s.request_reconnect = lambda **k: None
+        self._pick_refused(s, sid)
+        snap = s.snapshot()
+        self.assertTrue(snap["modelPending"])
+        self.assertEqual(snap["modelWait"], "Fable 5.2")
+        self.assertEqual(snap["relaunchWaits"], "the running turn")
+        s._stale_pick["phase"] = "relaunched"
+        self.assertEqual(s.snapshot()["modelWait"], "", "handed to the relaunch's CLI: no longer waiting for a relaunch")
+        sid2, s2 = self._live(cli_seen="2.1.322", refuse=None)
+        self.assertTrue(self.be.set_model(sid2, PICK))     # a live pick the CLI takes, its answer not yet in
+        self.assertTrue(s2.snapshot()["modelPending"])
+        self.assertEqual(s2.snapshot()["modelWait"], "", "an ordinary pick resolves live: no relaunch to wait for")
 
 
 if __name__ == "__main__":
