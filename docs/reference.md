@@ -7221,6 +7221,16 @@ page is behind the kernel, so you know the reload is what puts it right. A resta
 kernel onto the same build changes nothing on screen: the panes reconnect, and no line
 appears.
 
+### The note on a message sent mid-turn
+
+A message you type while a session works reaches it at its next step, and the model
+sometimes answers it only in its thinking and carries on, so no answer shows. When a
+message you typed into the page (the message box, a card's reply, a comment thread)
+reaches a turn already running, romp adds one short note beside it, labelled from romp,
+asking the session to answer it in a sentence or two before carrying on. A message that
+starts a turn, a `romp send`, a relay, the Continue, Nudge and Check status buttons and
+anything romp sends itself get no note.
+
 ### Opening a markdown document
 
 A markdown link in the chat opens in the file viewer,
