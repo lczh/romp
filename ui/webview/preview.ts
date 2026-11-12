@@ -373,7 +373,13 @@ export function openLightbox(src: LightboxSource, from?: Element | null): void {
     // position matches the source (sameSource), a file falling back to its path alone for pre-pin
     // history. A URL that failed to load, or a glyph-sized one (mdImgTiny), is no stop: no click opens it
     nav = (lightboxNav ? lightboxNav("url" in src ? null : src.sid, from) : [])
-      .filter((e) => "url" in e ? !mdImgFailed.has(e.url) && !mdImgTiny.has(e.url) : previewKind(e.path) === "img" || previewKind(e.path) === "video");
+      .filter((e) => {
+        if ("url" in e) return !mdImgFailed.has(e.url) && !mdImgTiny.has(e.url);
+        if (previewKind(e.path) !== "img" && previewKind(e.path) !== "video") return false;
+        let u = lightboxSrc(e);   // a markdown picture of a file is known by the address it loaded from (md-images.ts mdImgFileSrc)
+        try { u = new URL(u, location.href).href; } catch { /* as written */ }
+        return !mdImgFailed.has(u) && !mdImgTiny.has(u);
+      });
     at = nav.findIndex((e) => sameSource(e, src));
     if (at < 0 && !("url" in src)) at = nav.findIndex((e) => !("url" in e) && e.path === src.path);
     // a picture that shows a srcset's candidate opens on what it shows (currentSrc), while the sequence, read off the
@@ -915,9 +921,10 @@ export function refreshSettledPreviews(): void {
   }
 }
 
-// Markdown-inline <img> (a figure written as markdown in a message body): marked leaves `![fig](path)` as
-// <img src="path"> (the chat rewrites no image source), the browser resolves the path against the page's
-// origin, and the kernel answers 404, so the img fails and the browser shows its alt text. The 2026-08-24
+// Markdown-inline <img> (a figure written as markdown in a message body): when its source fails (an outside host
+// that is down; a file the kernel cannot serve yet, since a path src loads through /file, md-images.ts
+// mdImgPathPass, 2026-11-12; before that the path resolved against the page's origin and always 404'd), the
+// browser shows its alt text. The 2026-08-24
 // heal re-set that img's src on every kernel message; each reset hid the alt text while the reload was in
 // flight and the 404 showed it again, so a streaming turn flipped every such caption on and off at the
 // push rate (T291c, the user 2026-09-09: three captions, two to four lines each, ten times a second). A
@@ -1127,7 +1134,11 @@ export function installMdImgZoom(): void {
     const img = t as HTMLImageElement | null;
     if (!img || img.tagName !== "IMG" || !mdImgZoomable(img)) return;
     e.preventDefault(); e.stopPropagation();
-    openLightbox({ url: img.currentSrc || img.src, alt: img.alt }, img);
+    // a picture whose src named a file (md-images.ts mdImgPathPass) opens on that FILE, as a path's figure does: its path in
+    // the bar, its download, and the arrows' stop for it (render.ts chatImagesFor names it so); any other on its URL
+    const file = img.dataset.mdPath || "";
+    openLightbox(file && previewKind(file) === "img" ? { path: file, sid: img.dataset.mdSid || null, pin: img.dataset.mdPin || undefined }
+      : { url: img.currentSrc || img.src, alt: img.alt }, img);
   }, true);
 }
 

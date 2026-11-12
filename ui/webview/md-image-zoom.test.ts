@@ -559,11 +559,11 @@ test("the hook: ONE pair of document listeners, installed once, web only; load m
   assert.match(body, /document\.addEventListener\("loadedmetadata", \(e\) => \{[\s\S]*?videoDims\.set\(url, \{ w: v\.videoWidth, h: v\.videoHeight \}\);[\s\S]*?\}, true\);/,
     "a clip's size is remembered the moment its metadata lands, so its next render is laid out at that size");
   assert.match(body, /document\.addEventListener\("click", \(e\) => \{[\s\S]*?\}, true\);/, "capture: a fold or a bubble around the picture never toggles under it");
-  assert.match(body, /e\.preventDefault\(\); e\.stopPropagation\(\);\s*\n\s*openLightbox\(\{ url: img\.currentSrc \|\| img\.src, alt: img\.alt \}, img\);/,
-    "the URL the picture SHOWS (a srcset's candidate, else its src; 2026-10-20 review: a srcset alone opened an empty lightbox), with the element the chat reads its transcript off");
+  assert.match(body, /e\.preventDefault\(\); e\.stopPropagation\(\);[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*const file = img\.dataset\.mdPath \|\| "";\s*\n\s*openLightbox\(file && previewKind\(file\) === "img" \? \{ path: file, sid: img\.dataset\.mdSid \|\| null, pin: img\.dataset\.mdPin \|\| undefined \}\s*\n\s*: \{ url: img\.currentSrc \|\| img\.src, alt: img\.alt \}, img\);/,
+    "the URL the picture SHOWS (a srcset's candidate, else its src; 2026-10-20 review: a srcset alone opened an empty lightbox), with the element the chat reads its transcript off; a picture whose src named a file opens on that file (md-images.ts mdImgPathPass, 2026-11-12)");
   assert.equal((RENDER.match(/installMdImgZoom\(\);/g) || []).length, 1, "render.ts installs it once, beside the heal");
-  assert.match(PREVIEW, /\.filter\(\(e\) => "url" in e \? !mdImgFailed\.has\(e\.url\) && !mdImgTiny\.has\(e\.url\) : previewKind\(e\.path\) === "img" \|\| previewKind\(e\.path\) === "video"\);/,
-    "the sequence skips a URL that failed or loaded glyph-sized: no click opens one; a file is a picture or a video");
+  assert.match(PREVIEW, /\.filter\(\(e\) => \{\s*\n\s*if \("url" in e\) return !mdImgFailed\.has\(e\.url\) && !mdImgTiny\.has\(e\.url\);\s*\n\s*if \(previewKind\(e\.path\) !== "img" && previewKind\(e\.path\) !== "video"\) return false;\s*\n\s*let u = lightboxSrc\(e\);[^\n]*\n\s*try \{ u = new URL\(u, location\.href\)\.href; \} catch \{[^\n]*\}\s*\n\s*return !mdImgFailed\.has\(u\) && !mdImgTiny\.has\(u\);\s*\n\s*\}\);/,
+    "the sequence skips a URL that failed or loaded glyph-sized: no click opens one; a file is a picture or a video, and a markdown picture of a file that failed or is a glyph is skipped by the address it loaded from");
   assert.match(PREVIEW, /img\.onclick = \(ev\) => \{ ev\.stopPropagation\(\); openLightbox\(\{ path, sid, pin \}, img\); \};/, "a path preview opens the same lightbox, with its element");
 });
 
