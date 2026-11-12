@@ -189,9 +189,9 @@ class LiveTailBeforeParse(unittest.TestCase):
     def test_source_order_the_tail_is_snapshotted_before_the_parse(self):
         i = KERNEL_SRC.index("def build_session(")
         body = KERNEL_SRC[i:i + 20000]
-        snap = body.index("_live_snap = None if path_override else be.live_atoms(sid)")
+        snap = body.index("_live_snap = None if _dark else be.live_atoms(sid)")       # _dark: an override render, or the tail-first shadow's builds
         parse = body.index("parsed = _parse(sess[\"path\"], sid, now)")
-        rev = body.index("_wm_live = None if path_override else Sessions.live_rev(sid, be)")
+        rev = body.index("_wm_live = None if _dark else Sessions.live_rev(sid, be)")
         self.assertLess(rev, snap, "the watermark's revision is read before the tail (a lower bound)")
         self.assertLess(snap, parse, "the tail before the transcript")
         self.assertIn("_merge_live_atoms(parsed, sid, shown_texts=queued, live=_live_snap)", body, "the merge folds the snapshot")
@@ -424,6 +424,10 @@ BUILD_SESSION_SITES = {
     "build_episode": "a closed episode's render (path_override: no live merge, no chat tab frame)",
     "_chat_history_page": "one history page of turns [lo, hi) (no live overlays, no chat tab frame)",
     "_dispatch_ws": "the proto-1 loadOlder slice (index clients' history; sends no session frame)",
+    "_tail_first_frame": "the tail-first shadow's provisional build (tail_first: every live input dark, no live merge, nothing cached; "
+                         "compared and dropped, sends no frame)",
+    "_tail_first_reference": "the tail-first shadow's reference build over the tree the real build parsed (tail_first: the same dark "
+                             "inputs; compared and dropped, sends no frame)",
 }
 PUSH_SESSION_NOW_CALLERS = {"_create_sdk_session_inner", "_create_codex_session_inner", "_fork_session_inner", "_comment_promote_inner"}
 

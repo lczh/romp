@@ -33,6 +33,7 @@ KERNEL_ALLOWED = {
     # live SDK atoms and echoes (constructed in-process, never lazy)
     "_merge_live_atoms", "_interrupt_marks_atoms", "_stamp_agents", "_ask_fill_answers", "_ask_fill_chosen", "_patch_rows",
     "_claudemd_paths", "_stamp_steps", "_hydrate_postal", "build_subagent", "_agent_alive",
+    "_tail_first_shadow_job",                           # reads a body only of an atom with no lazy marker; a lazy one skips the comparison (2026-11-12)
 }
 EVENT_MODEL_ALLOWED = {
     # the emit and the adapter build atoms from raw records (never lazy); the readers of atoms hydrate first
@@ -59,6 +60,8 @@ EVENT_MODEL_ALLOWED = {
     "_lineage_closure", "_load_states", "_read_jsonl", "_read_jsonl_incremental", "_tail_read", "_pinned_entry",
     "_SeededGraph._loc",                                # reads a restored atom's lazy sentinel for its source_path slot, never a
     #                                                     body: the comment cut reads the RAW record by offset (2026-10-01)
+    "_tail_prompt_shaped", "_tail_sync_point", "_tail_refusal", "tail_window",   # the tail-first window's rules, over the raw
+    #                                                     records of the bytes tail_window itself read (2026-11-12), never atoms
 }
 SDK_BACKEND_ALLOWED = None        # the backend builds live atoms and reads raw records only: every site allowed, listed for the record
 

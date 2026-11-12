@@ -133,7 +133,7 @@ class Harness(unittest.TestCase):
         em._LAZY_FILES.clear()
         with km._chat_fold_lock:
             km._chat_fold.clear()
-        jd._PARSE_CACHE.clear()
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
         km._parse_mode.clear()
         km._built_chat.clear()
         km._prev_chat_events.clear()
@@ -266,7 +266,7 @@ class TestTheParseTakesTheWindowsOwnRecords(Harness):
         self.assertEqual((tree["turns"][0]["trigger"] or {}).get("uuid"), self.win.uuid)
 
     def test_tail_parse_opens_at_the_boundary_and_stores_nothing(self):
-        tree = em.tail_parse(self.win, rompuuid=SID, now=NOW)
+        tree = em.tail_parse(self.win, rompuuid=SID, now=NOW, postal_log=str(jd.MESSAGES))   # this root's log, as the kernel passes
         self.assertEqual([t["trigger"]["uuid"] for t in tree["turns"]], ["u6", "u7"])
         self.assertIsNone(em.tail_scope_window(), "the scope ended with the parse")
         with em._JSONL_CACHE_LOCK:
@@ -520,8 +520,12 @@ class TestTheShadowNeverRunsBesideABuild(Harness):
     def setUp(self):
         super().setUp()
         self.gate = dict(em._ASM_BG)
+        self.stage_fns = (em._READ_STAGE_FN[0], em._SET_STAGE_FN[0])
+        em.set_read_stage_provider(km._current_read_stage)   # several kernel loads share one event model in a pytest process:
+        em.set_stage_provider(km._set_stage)                 #  the providers must be THIS load's, whose thread-local the marks set
 
     def tearDown(self):
+        em._READ_STAGE_FN[0], em._SET_STAGE_FN[0] = self.stage_fns
         with em._ASM_BG_COND:
             em._ASM_BG.update(self.gate)
             em._ASM_BG_COND.notify_all()
@@ -577,8 +581,9 @@ class TestTheShadowNeverRunsBesideABuild(Harness):
         saved = em._load_states
         em._load_states = lambda states: seen.append(em._ASM_BG["fg"]) or saved(states)
         try:
-            km._stage_marked("warm.tailFirstShadow")(lambda: em.tail_parse(self.win, rompuuid=SID, now=NOW))()
-            em.tail_parse(self.win, rompuuid=SID, now=NOW)
+            log = str(jd.MESSAGES)
+            km._stage_marked("warm.tailFirstShadow")(lambda: em.tail_parse(self.win, rompuuid=SID, now=NOW, postal_log=log))()
+            em.tail_parse(self.win, rompuuid=SID, now=NOW, postal_log=log)
         finally:
             em._load_states = saved
         self.assertEqual(seen, [self.gate["fg"], self.gate["fg"] + 1])

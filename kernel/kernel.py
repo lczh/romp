@@ -49675,6 +49675,8 @@ def _tail_first_shadow_job(sid, now=None, live_map=None, wait=None, min_events=N
         return done("skipped", "before-cut")           # the turns under the document's cut are lazy: rendering them is the page's to pay
     for t in turns[k:]:
         for a in t.get("atoms") or ():
+            if a.get("lazy") is not None:
+                return done("skipped", "before-cut")   # a body still under the cut (the cut falls inside the last turn): unread here too
             if a.get("type") == "user" and isinstance(a.get("author"), dict) and \
                     not em._author_final(a["author"], em._text_of(em._content(a.get("message")))):
                 return done("skipped", "postal-unsettled")   # a sender the postal log had not resolved at the whole parse: the tail's fresher read is no difference

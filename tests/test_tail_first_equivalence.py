@@ -545,7 +545,7 @@ class Harness(unittest.TestCase):
             em._READ_BYTES.clear()
         with km._chat_fold_lock:
             km._chat_fold.clear()
-        jd._PARSE_CACHE.clear()
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
         km._parse_mode.clear()
         km._built_chat.clear()
         km._prev_chat_events.clear()
@@ -1078,6 +1078,25 @@ class TestEachRule(Harness):
             self.assertEqual(km._tail_first_shadow_job(sid, now=NOW, live_map={}, min_events=3), ("matched", None))
         finally:
             km._launch_error = saved
+
+    def test_a_body_still_under_the_documents_cut_is_left_unread(self):
+        """A tree a restart restored keeps the bodies before its cut on disk, and when the cut falls inside the last turn the
+        window's own turn holds one. The job reads no such body and fills none in (that read is the page's to pay): it
+        skips, as it does for a boundary under the cut."""
+        sid = "aaaaaaaa-7196-4222-8333-666666666666"
+        leaf = self.install(sid, self.three())
+        self.whole(sid)
+        self.assertEqual(km._tail_first_shadow_job(sid, now=NOW, live_map={}, min_events=1), ("matched", None))
+        tree, _ = self.tree(sid, leaf)
+        a = next(a for a in tree["turns"][-1]["atoms"] if a.get("type") == "assistant")
+        body = a["message"]
+        a["lazy"], a["message"] = {"i": 0, "at": None}, em._LazyBody(a["uuid"])   # the restore's shape: a marker, a body that refuses every read
+        try:
+            self.assertEqual(km._tail_first_shadow_job(sid, now=NOW, live_map={}, min_events=1), ("skipped", "before-cut"))
+            self.assertTrue(em.is_lazy(a), "the body is still unread")
+        finally:
+            a.pop("lazy", None)
+            a["message"] = body
 
 
 class TestWhatOnlyTheShadowSees(Harness):
