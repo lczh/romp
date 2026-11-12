@@ -2900,8 +2900,9 @@ function renderTreeNode(box: HTMLElement, it: AskItem, node: AskTreeNode, byId: 
       stat.title = "ask the session where this item stands right now — the reply files back onto this sub-goal";
       stat.onclick = (ev) => {
         ev.stopPropagation();
+        // canned: romp's words behind a button, not typed, so the kernel adds no arrival note to them (the review of #412)
         vscodeApi?.postMessage({ type: "askFollowUp", itemId: node.id, title: node.text || "(sub-goal)",
-                                 text: statusAskOne(node.text || "this sub-goal"), sid: it.sid });
+                                 text: statusAskOne(node.text || "this sub-goal"), sid: it.sid, canned: "status" });
         stat.disabled = true; stat.textContent = "Asked";   // instant ack; the ↻ Followed up chip takes over on the next push
         optimisticFollowMove(it.itemId);
       };
@@ -3287,7 +3288,8 @@ function renderModalNow() {
       csEl.onclick = () => {
         const sweep = statusSweepText(it);
         if (!sweep.n) return;
-        vscodeApi?.postMessage({ type: "askFollowUp", itemId: it.itemId, text: sweep.text, sid: it.sid });
+        // canned: romp's sweep behind a button, not typed: no arrival note (its "one line each" must not be squashed)
+        vscodeApi?.postMessage({ type: "askFollowUp", itemId: it.itemId, text: sweep.text, sid: it.sid, canned: "status" });
         csEl.disabled = true; csEl.textContent = "Asked";
         csEl.title = contTitle(true, "a status ask", null);
         optimisticFollowMove(it.itemId);

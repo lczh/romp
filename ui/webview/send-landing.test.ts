@@ -124,6 +124,20 @@ test("landed-missing: the kernel's copies are gone, no landed turn is resident, 
   assert.deepEqual(late.map((r) => [r.what, r.data.ms]), [["landed", 9000]]);
 });
 
+test("landed-missing: a progress note below the copy is not the answer; the reply after it is (2026-11-06)", () => {
+  const w = new LandingWatch();
+  w.send(SID, KEY, T0);
+  const pending = new Set([KEY]);
+  const withEcho = [...BASE, echo(KEY, { hiddenByPending: true }), ours(KEY)];
+  w.apply(SID, BASE, withEcho, ctx({ pending }));
+  const note: LandEvent = { kind: "assistant", uuid: "note", narration: true };
+  const gone = [...BASE, tool("s2"), note, ours(KEY)];
+  assert.deepEqual(w.apply(SID, withEcho, gone, ctx({ pending })), [], "a note mid-turn is not a reply: no row");
+  const rows = w.apply(SID, gone, [...gone, asst("ans")], ctx({ pending }));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].data.answer, "ans");
+});
+
 test("landed-missing says whether the frame carried the record: the page dropped it, or the kernel never sent it", () => {
   const w = new LandingWatch();
   w.send(SID, KEY, T0);

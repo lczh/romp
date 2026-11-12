@@ -286,6 +286,36 @@ class Gates(_Fold):
         card = next(ev for ev in inc["events"] if ev.get("kind") == "tool")
         self.assertEqual(card.get("output"), "edited late")
 
+    def test_a_progress_note_marked_after_the_seal_demotes_and_a_mark_in_the_tail_does_not(self):
+        # A host's journal replayed to a restarted kernel files the progress-note marks (kernel/narration.py) of turns the
+        # boot build already sealed. A thinking block sealed as a thinking row must come back as the note it is: the
+        # narration gate demotes. A mark for the open tail's block is read by the tail's own build: no demote.
+        s = self.s
+
+        def note(t, text, uuid, parent):
+            r = aline(t, "", uuid, parent, stop="tool_use")
+            r["message"]["content"] = [{"type": "thinking", "thinking": text, "signature": "c3ludGhldGlj"}]
+            return r
+        u1 = s.uid(); s.append([uline(s.tick(), "page the notes list", u1, None)])
+        n1 = s.uid(); s.append([note(s.tick(), "The list returns every row; adding a cursor on the note id.", n1, u1)])
+        a1 = s.uid(); s.append([aline(s.tick(), "Paged.", a1, n1)])
+        u2 = s.uid(); s.append([uline(s.tick(), "and the search route", u2, a1)])
+        n2 = s.uid(); s.append([note(s.tick(), "Search builds the same query, so it takes the same cursor.", n2, u2)])
+        self.equiv("a sealed turn whose note is still a thinking row")
+        self.assertIn(n1, km._chat_fold_get(SID)["narr_think"])
+        self.assert_folding()
+        km.nar.record_narration(km.jd.STATE, SID, n2, [0], [0])          # the open tail's note: no demote
+        f0, g0 = km._CHAT_FOLD_STATS["fold"], km._CHAT_FOLD_STATS.get("g:narration", 0)
+        tail = self.s.build()
+        self.assertEqual((km._CHAT_FOLD_STATS["fold"], km._CHAT_FOLD_STATS.get("g:narration", 0)), (f0 + 1, g0))
+        self.assertEqual(next(ev for ev in tail["events"] if ev.get("uuid") == n2).get("narration"), True)
+        km.nar.record_narration(km.jd.STATE, SID, n1, [0], [0])          # the sealed turn's note, filed late
+        inc = self._demotes("narration", "a sealed note's mark filed after the seal")
+        ev = next(ev for ev in inc["events"] if ev.get("uuid") == n1)
+        self.assertEqual((ev["kind"], ev.get("narration")), ("assistant", True))
+        self.assertNotIn(n1, km._chat_fold_get(SID)["narr_think"])
+        self.assert_folding()
+
     def test_a_side_store_note_inside_the_prefix_demotes(self):
         self.grow(3)
         st = jd.STATE / "states"; st.mkdir(exist_ok=True)

@@ -2288,6 +2288,14 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   display: flex; align-items: center; gap: 8px; min-width: 0;
 }
 .turn-elapsed .fork-spot { margin-top: 0; }   /* inline: the row's own alignment rules, no extra drop */
+/* the button overlays the line's own height (a spot of no height, centred on the line, the button centred on it), so a line is
+   as tall with its button as without: a spot landing at a turn's end, or going when a later turn takes the tip, moves no row,
+   and a line without one is no taller than it ever was (round seven) */
+.turn-elapsed .fork-spot, .fork-line .fork-spot { height: 0; align-self: center; align-items: center; }
+.turn-elapsed .msg-fork, .fork-line .msg-fork { margin-top: 0; align-self: center; }   /* centred on the spot, not the shared button rule's foot */
+/* a turn with no clock draws no worked line: its spot gets the line's twin, with the line's box and no words */
+.fork-line { margin: 6px 0 2px; font-size: 0.72em; display: flex; align-items: center; min-width: 0; }
+.fork-line::before { content: "\200b"; width: 0; }   /* the line's height: one line of its text, as the worked line's */
 /* the button must not inherit the footer's 0.7 opacity ceiling — hover reveal still governs via .msg-fork */
 .turn-elapsed .msg-fork { font-size: 11px; }
 /* tool success = a BLUE disc with a white ✓ — the romp "check" blue used everywhere else (the feed,
@@ -2379,6 +2387,11 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .msg-fork { display: inline-flex; align-items: center; gap: 4px; }   /* the fork glyph beside the word (T381) */
 .msg-fork svg { display: block; width: 12px; height: 12px; }
 .turn-assistant:hover .msg-fork, .msg-fork:focus-visible { opacity: 0.9; }
+/* the spot rides the last row of the work after its response (applyForkSpots): a hover on the response or on any of those rows
+   (a tool line, its calls open, a Thought row) shows it. The rows carry .fork-tail; a tail after a row of another kind (a
+   prompt, a notice; never a day's divider, which a turn may straddle) is a later response's */
+.fork-tail:hover .msg-fork, .fork-tail:hover ~ .fork-tail .msg-fork { opacity: 0.9; }
+.fork-tail:hover ~ :not(.fork-tail):not(.day-divider) ~ .fork-tail .msg-fork { opacity: 0; }
 .msg-fork:hover { color: var(--fg); border-color: var(--accent); }   /* non-destructive: accent, never the rewind red */
 /* armed = one click from rolling back: destructive red, holds until blur/pointerleave/re-render */
 .msg-del.armed, .msg-restorefiles.armed { color: #ff6a6a; border-color: #ff6a6a; opacity: 0.95; }
@@ -2687,6 +2700,25 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
   color: var(--dim); font-size: 0.92em; line-height: 1.4; cursor: pointer; user-select: none; }
 .thought-line:hover { color: var(--fg); }
 .turn-thought > .dot.ring { background: var(--dim); }   /* the dim ink, flat: a thought sits under a reply's dot */
+/* Progress notes (2026-11-06), compact mode: the tools after a prose row fold into one dim line under it, the row's own, tucked
+   up to the prose it follows; it opens to the calls in place. A lone call is its own row (its label, its file link), dimmed the
+   same. No time of its own, and a rail dot only when the line has something to say: a call still running (the working dot,
+   "running…" and its time), one that failed (the red dot, "failed" in red), or one cut before its result (the plain dot, "no
+   result"), as a tool's own row says them */
+.turn-toolgroup.toolgroup-attached, .turn-tool.tool-attached { padding-top: 0; margin-top: -3px; }
+/* the dot sits on its label where a tool row's own sits (those rows place it 10px down a 7px top pad; these rows have no pad,
+   and a lone call's label is the line's size) */
+.turn-toolgroup.toolgroup-attached > .dot { top: 6px; }
+.turn-tool.tool-attached > .dot { top: 5px; }
+/* the rail dot shows whenever the call says more than "done": running (the working dot), failed (the red ✗), or cut before its
+   result could come (the plain dot), exactly as a tool's own row draws them; a done call's ✓ and the time stay off */
+.toolgroup-attached > .dot.green, .toolgroup-attached > .time-marker, .tool-attached > .dot.green, .tool-attached > .time-marker { visibility: hidden; }
+.tool-attached:not(.tool-err) .tool-label { color: var(--dim); }
+/* a lone call wears the line's size (the font rule: one kind of information, one size); its code face compensates the nesting */
+.tool-attached > .tool-head { font-size: 0.92em; }
+.tool-attached > .tool-head .tool-label-code { font-size: 1em; }
+.toolgroup-failed { color: var(--err); }
+.toolgroup-running + .tool-elapsed { margin-left: 4px; }
 .thought-line .thought-caret { margin-right: 0; flex: none; }
 .thought-caret::before { content: "▸"; }
 .turn-thought.expanded .thought-caret::before { content: "▾"; }

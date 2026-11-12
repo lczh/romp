@@ -10,11 +10,11 @@ import { hostOf, bareId } from "./host-prefix";
 import { mediaSrc } from "./media";
 import { ICON_DOWNLOAD, ICON_COPY, ICON_CHECK, ICON_CROSS, ICON_POPOUT } from "./icons";   // the shared stroke-family glyphs (T367; the popout for a URL picture's original)
 import * as pz from "./pinch";
-import { opensInLightbox, VIDEO_EXT } from "./md-images";   // the schemes a picture or a video opens on: the click's and the arrows' one rule
+import { opensInLightbox, VIDEO_EXT, IMG_EXT } from "./md-images";   // the schemes a picture or a video opens on: the click's and the arrows' one rule; the picture and video extensions
 
-// Extensions the kernel's _PREVIEW_MIME serves — keep the two lists in step (tests pin both). Video's are VIDEO_EXT
-// (md-images.ts), the kernel's _VIDEO_MIME.
-const IMG_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
+// Extensions the kernel's _PREVIEW_MIME serves — keep the lists in step (tests pin both). Pictures' are IMG_EXT and videos'
+// VIDEO_EXT (md-images.ts, which reads the picture list too: a markdown picture loads only a picture file), the kernel's
+// _IMG_MIME and _VIDEO_MIME.
 
 export type PreviewKind = "img" | "pdf" | "video";
 
@@ -960,17 +960,53 @@ function parkMdImg(img: HTMLImageElement, url: string): void {
  *  mark the zoom hook below reads, so a picture the file viewer or a hover card draws is never its business. One whose
  *  URL already loaded, and that will show picture-sized, takes .md-img-zoom here too, so a re-render draws it in the
  *  picture box at once (mdImgDims and shownHeightOf, below); one alone on its line takes .md-solo, the box's block
- *  form (mdSolo). Its videos become the chat's still (mdVideoPostPass). */
+ *  form (mdSolo). A picture of a file whose pin has not loaded yet shows what already did meanwhile (pinStandIn). Its
+ *  videos become the chat's still (mdVideoPostPass). */
 export function mdImgPostPass(root: ParentNode): void {
   for (const img of Array.from(root.querySelectorAll("img")) as HTMLImageElement[]) {
     img.classList.add("md-img");                     // a picture the message's markdown embeds: the zoom hook's mark (installMdImgZoom)
     if (mdSolo(img)) img.classList.add("md-solo");   // alone on its line: the box as a block, when it zooms (2026-10-21)
+    if (img.dataset.mdPin) pinStandIn(img);
     const u = img.src || "";
     const d = u ? mdImgDims.get(u) : undefined;
     if (u && mdImgFailed.has(u)) parkMdImg(img, u);
     else if (d && shownHeightOf(img, d) >= ZOOM_MIN_H && !img.closest("a, summary") && opensInLightbox(u)) img.classList.add("md-img-zoom");
   }
   mdVideoPostPass(root);                             // and its videos become the still that opens the lightbox (2026-10-21)
+}
+// A picture of a file (md-images.ts mdImgPathPass) can show BEFORE the kernel pins it: the file appeared after the message
+// was drawn, the bounded probe below loaded it unpinned, and only the kernel's next build latches the pin (kernel.py
+// _path_links retries a miss on every build). The pin changes the picture's address, and the turn's repaint draws a fresh
+// <img> on it, empty and zero-height until those bytes arrive: the picture loaded twice and blinked out between (the review
+// of #454, which caught the served test measuring inside that blink). So the address that already showed stands in, as a
+// path image's unpinned picture does while its pinned ask is out (render.ts fillPathImg): the repaint draws the picture the
+// page has (no fetch, no blink), marks it data-md-pinned, and ONE detached load of the pinned address, per address, puts it
+// on every stand-in on the page when it lands, the same re-query probeMdImgUrl does. A pinned load that fails is put on them
+// too, so the failure takes the ordinary path (parked, probed) and the stand-in never silently outlives it. Event-driven
+// throughout: the load or the error, never a timer.
+const mdImgPinLoading = new Set<string>();           // pinned addresses with their detached load in flight
+function pinStandIn(img: HTMLImageElement): void {
+  const pinned = img.src || "", tail = "&pin=" + encodeURIComponent(img.dataset.mdPin || "");
+  if (!pinned || !pinned.endsWith(tail) || mdImgDims.has(pinned) || mdImgFailed.has(pinned)) return;   // the pinned bytes showed already, or failed: as it is
+  const bare = pinned.slice(0, -tail.length);        // the same file's address without the pin, as md-images.ts mdImgFileSrc writes both
+  if (!mdImgDims.has(bare) || mdImgFailed.has(bare)) return;   // nothing showed unpinned: nothing to keep
+  img.src = bare;
+  img.dataset.mdPinned = pinned;
+  if (mdImgPinLoading.has(pinned)) return;
+  mdImgPinLoading.add(pinned);
+  const pre = new Image();
+  const land = (): void => {
+    mdImgPinLoading.delete(pinned);
+    if (pre.naturalWidth > 0) mdImgDims.set(pinned, { w: pre.naturalWidth, h: pre.naturalHeight });   // a repaint from here draws it pinned
+    for (const el of Array.from(document.querySelectorAll("img[data-md-pinned]")) as HTMLImageElement[]) {
+      if (el.dataset.mdPinned !== pinned) continue;
+      delete el.dataset.mdPinned;
+      el.src = pinned;                               // in the browser's cache now: the element keeps its picture until this one decodes
+    }
+  };
+  pre.onload = land;
+  pre.onerror = land;
+  pre.src = pinned;
 }
 /** A URL the kernel actually answers (/file, a remote relay's /file, /media): a file an agent is still writing or a
  *  relay behind a blip may come back with no reconnect event, so those get a BOUNDED probe on the per-message path
