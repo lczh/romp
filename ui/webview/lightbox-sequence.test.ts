@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { Marked } from "marked";
-import { mdLayout, opensInLightbox, mdImgFile, mdImgFileSrc } from "./md-images";
+import { mdLayout, opensInLightbox, mdImgFile } from "./md-images";
 import { keyOf } from "./chat-window";
 import { chatMdExtensions } from "./chat-md";
 
@@ -39,8 +39,8 @@ function lift(sessions: Map<string, { events: Ev[] }>, thread: { sid: string; th
   `;
   const H = { sessions, thread };
   const counting = { lexer: (src: string) => { lexed.n++; return marked.lexer(src); } };
-  return (new Function("H", "marked", "mdLayout", "keyOf", "opensInLightbox", "mdImgFile", "mdImgFileSrc", prelude + code + "\nreturn chatImagesFor;") as
-    (h: unknown, m: unknown, f: unknown, k: unknown, o: unknown, mf: unknown, ms: unknown) => (sid: string | null, from?: Fake | null) => Entry[])(H, counting, mdLayout, keyOf, opensInLightbox, mdImgFile, mdImgFileSrc);
+  return (new Function("H", "marked", "mdLayout", "keyOf", "opensInLightbox", "mdImgFile", prelude + code + "\nreturn chatImagesFor;") as
+    (h: unknown, m: unknown, f: unknown, k: unknown, o: unknown, mf: unknown) => (sid: string | null, from?: Fake | null) => Entry[])(H, counting, mdLayout, keyOf, opensInLightbox, mdImgFile);
 }
 // a clicked element, as far as the scope reads it: which ancestor it sits under
 function inside(sel: Record<string, unknown>): Fake {
@@ -171,12 +171,13 @@ test("a picture written as a path is its file's stop where it is written, with t
     pathPins: { "/tmp/notes-api/split.png": "v1", "docs/figure.png": "v2" } };
   const nav = lift(new Map([[WEB, { events: [ev] }]]))(WEB);
   assert.deepEqual(show(nav), ["path:/tmp/notes-api/split.png@v1", "path:~/notes-api/hit.png", "path:figs/p95.png", "path:docs/figure.png@v2",
-    "url:wide.png", "url:https://dash.example.test/file?path=%2Ftmp%2Fnotes-api%2Fplot&sid=" + WEB],
-    "the pictures where they are written, the paragraph's figure after it; a path with no picture extension loads by its file URL, as the page has it");
+    "url:wide.png", "url:https://dash.example.test/tmp/notes-api/plot"],
+    "the pictures where they are written, the paragraph's figure after it; a path with no picture extension is no file (md() leaves its src " +
+    "as written, the review of #454), so it stands as the page resolves it, and a load that fails drops it from the arrows");
   assert.ok(nav.slice(0, 3).every((e) => e.sid === WEB), "each resolves in the session's folder");
   const remote = lift(new Map([["gpu1:" + WEB, { events: [ev] }]]))("gpu1:" + WEB);
   assert.equal(remote[0].sid, "gpu1:" + WEB, "a remote session's picture is its machine's file");
-  assert.equal(remote.at(-1)!.url, "https://dash.example.test/remote/gpu1/file?path=%2Ftmp%2Fnotes-api%2Fplot&sid=" + WEB);
+  assert.equal(remote.at(-1)!.url, "https://dash.example.test/tmp/notes-api/plot", "…and a path to no picture is nobody's file, here or there");
 });
 
 test("a user's attached pictures follow the text, and the attached path's mention in the text is no second stop", () => {
