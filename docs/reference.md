@@ -4225,7 +4225,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   boot, appended tails only once the persisted index holds a file), `filesIndexed`, and
   `checked` (prompt anchors known not to be a wrapper, never read again).
 - `tailFirst`: the tail-first shadow (2026-11-12), a measurement that serves
-  nothing. After the pusher builds a session's chat, a low-priority thread
+  nothing. After the pusher builds a session's chat following a turn end (the
+  Stop hook's stamp, else a stopped states row), and only when the transcript
+  moved since that session's last comparison, a low-priority thread
   builds a provisional page from the end of the transcript alone and compares
   it, event for event and field for field, with the whole build's events from
   the same boundary on; a field may differ only where the provisional build
@@ -4233,11 +4235,14 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   file `tail-first-shadow` under the state directory, statted per ask and read
   again when its stat moves: `shadow`, `on`, `1`, `true` or `yes` turn it on;
   no file, an empty one or any other word is off, the default. `offered`
-  (builds the pusher handed over), `dropped` (sessions pushed out of a queue
-  of 64 unlooked-at) and `queued`; `attempts`; `refused`, by reason (no window
+  (turn ends the pusher handed over), `dropped` (sessions pushed out of a queue
+  of 64 unlooked-at), `unmoved` (turn ends whose transcript had not moved since
+  the last comparison, so none ran) and `queued`; `attempts`; `refused`, by reason (no window
   whose equality the records prove, so nothing was compared: the boundary
-  rules' own names, such as `compaction-in-window`, `chain` or `clock`, and
-  the build's, such as `orphan-marker`); `skipped`, by reason (nothing to
+  rules' own names, such as `compaction-in-window`, `chain` or `clock`,
+  `high-water` when a record written before the bytes read is stamped after
+  the reply the boundary follows, and the build's, such as `orphan-marker`);
+  `skipped`, by reason (nothing to
   compare against: `stale` when the transcript moved between the two builds);
   `matched`; `mismatched`, each also filed in the error center, once per
   session and set of differing fields, with ids and field names and never

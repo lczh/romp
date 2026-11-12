@@ -41018,6 +41018,10 @@ def _task_store_known(fsid):
     d = _task_store_dir("session-" + fsid[:8])
     if d.is_dir():
         return d
+    if em.tail_scope_window() is not None:
+        # the hint is the content join's answer, a join over the transcript's WHOLE task record: a tail-first build that
+        # reached here shows the to-do list as a pending piece, warm or cold alike (TAIL-FIRST PAGES)
+        raise em.WholeHistoryRead("the task store's content-join memo inside the tail-first scope")
     hint = _task_dir_hint.get(fsid)
     if hint:
         d = _task_store_dir(hint)
@@ -49370,17 +49374,21 @@ def _provisional_row(sid, name, light):
 # CONSISTENT means: for a window that starts at boundary record B, the provisional build's events from B's event on equal
 # the whole build's events from B's event on, event for event and field for field, except the fields of a piece the
 # provisional build DECLARES pending. Four mechanisms, each closing one way that could fail:
-#   1. em.tail_window: an exact boundary, or a named refusal. A window is accepted only when the records in hand prove the
-#      whole parse would emit them the same way (every record chains onto B, B opens a turn right after a reply that ended
-#      one, no compaction, replay or carried state crosses B). Refusing costs speed, never correctness.
+#   1. em.tail_open (the one road; em.tail_window is its search): an exact boundary, or a named refusal. A window is
+#      accepted only when the records in hand prove the whole parse would emit them the same way (every record chains onto
+#      B, B opens a turn right after a reply that ended one, no compaction, replay or carried state crosses B), no record
+#      written before B, in the bytes read or not, nor in another file of the conversation, is stamped after the reply B
+#      follows (the high-water stamps, em.tail_stamps), no rollback is armed and no other file was written inside the
+#      window. A scope takes no window that did not come this road. Refusing costs speed, never correctness.
 #   2. em.tail_scope: inside it the shared transcript readers do not answer for the window's file AT ALL, memo hits
 #      included (the check sits ahead of every cache lookup), and raise em.WholeHistoryRead, a BaseException so that no
 #      `except Exception` on the way up can turn a refused read into a quiet default. The provisional build is the window's
 #      own records or nothing.
 #   3. _piece: the one place that exception is caught. A piece the tail cannot derive becomes {"pending": name}: a
 #      placeholder a reader can see, never a guess.
-#   4. The shadow (_tail_first_shadow_job): after a real build, the same window rendered both ways and compared; what the
-#      first three cannot prove from the records in hand (a clock that stepped back before the bytes read) is measured.
+#   4. The shadow (_tail_first_shadow_job): after a real build that follows a turn end, the same window rendered both ways
+#      and compared, once per turn end and transcript state; what the first three cannot prove (a record past the bytes read
+#      that reuses a uuid of the window's) is measured.
 # Nothing here writes a parse, a fold entry, a built-chat cache or a render floor, and nothing reaches a client.
 TAIL_FIRST_FILE = "tail-first-shadow"         # a bare value under the state directory, beside session-hosts: an on word runs the
 _TAIL_FIRST_ON_WORDS = ("on", "1", "true", "yes", "shadow")   # shadow; no file, an empty one or any other word is off (the default)
@@ -49393,14 +49401,16 @@ _TAIL_FIRST_QUEUE_MAX = 64                    # sessions waiting for a compariso
 _TAIL_FIRST_ALWAYS = ("turnNumbers", "ledger", "firstSeen", "scrollBack", "status", "queued", "liveTail")
 # The event fields a pending piece owns: on an event that names the piece in its `pending`, these are not compared.
 _TAIL_FIRST_FIELDS = {"agentLaunches": ("output", "isError", "agentRunning", "agentGist", "running"),
-                      "taskOutputs": ("taskOutputs",), "eventKey": ("uuid", "key")}
+                      "taskOutputs": ("taskOutputs",), "eventKey": ("uuid", "key"), "captions": ("summary",)}
 _TAIL_FIRST = {"mode": "off", "modeKey": object()}
-_TAIL_FIRST_STATS = {"offered": 0, "dropped": 0, "attempts": 0, "refused": {}, "skipped": {}, "matched": 0, "mismatched": 0,
-                     "ms": 0.0, "msMax": 0.0}
+_TAIL_FIRST_STATS = {"offered": 0, "dropped": 0, "unmoved": 0, "attempts": 0, "refused": {}, "skipped": {}, "matched": 0,
+                     "mismatched": 0, "ms": 0.0, "msMax": 0.0}
 _TAIL_FIRST_LOCK = threading.Lock()           # the counters and the queue below; never held across a read or a build
 _TAIL_FIRST_QUEUE = collections.OrderedDict() # sid -> True, in the order offered; an offer for a waiting sid changes nothing
 _TAIL_FIRST_WAKE = threading.Event()          # set by an offer and by the loops' stop: the shadow thread's one wait
 _TAIL_FIRST_SAID = set()                      # (sid, the differing fields): a difference is reported once, counted every time
+_TAIL_FIRST_ENDS = {}                         # sid -> the turn end (_turn_end_key) last offered: one comparison per turn end
+_TAIL_FIRST_LAST = {}                         # sid -> the transcript's (path, mtime ns, size, inode) at its last comparison
 
 
 class _Pending(dict):
@@ -49473,12 +49483,23 @@ def _tail_first_report():
 
 
 def _tail_first_offer(sid):
-    """The pusher's one touch: a session whose chat it just built joins the shadow's queue. A stat of the switch when the
-    shadow is off; a dict write when it is on. Never raises, never waits, holds nothing of the build's."""
+    """The pusher's one touch: a session whose chat it just built joins the shadow's queue, when a TURN ENDED since its last
+    offer (its turn-end key moved: the Stop hook's lastStopAt, else a stopped states transition, _turn_end_key). A comparison
+    re-walks every earlier turn in its reference build (a quarter to half a second on an 8,000-turn session), so it runs
+    once per turn end, never per build: a streaming turn builds its chat at most once a cycle. The build that follows the
+    end is the one offered: it is what the shadow compares against, and a turn end that writes nothing to the transcript
+    still moves the chat's status. A stat of the switch when the shadow is off; when on, the registry read of the turn-end
+    key and a dict write. Never raises, never waits, holds nothing of the build's."""
     try:
         if _tail_first_mode() != "shadow":
             return False
+        end = _turn_end_key(sid)
         with _TAIL_FIRST_LOCK:
+            if not end or _TAIL_FIRST_ENDS.get(sid) == end:
+                return False                      # no turn ended since the last offer: the build is a streaming one
+            _TAIL_FIRST_ENDS[sid] = end
+            while len(_TAIL_FIRST_ENDS) > 4096:
+                _TAIL_FIRST_ENDS.pop(next(iter(_TAIL_FIRST_ENDS)))
             _TAIL_FIRST_STATS["offered"] += 1
             if sid not in _TAIL_FIRST_QUEUE:
                 _TAIL_FIRST_QUEUE[sid] = True
@@ -49489,6 +49510,37 @@ def _tail_first_offer(sid):
         return True
     except Exception:
         return False
+
+
+def _tail_first_open(sid, path, min_events=None):
+    """The kernel's one road to a window, em.tail_open (the only window a tail scope takes), with what the gates there need
+    from the kernel: every transcript file the session's whole parse reads (its candidates closed over the resume lineage
+    its states log records, as parse_session closes them) and whether a rollback is armed."""
+    files = em._lineage_closure(path, jd._judge_candidates(sid, [path]), _anchor_links(sid))
+    return em.tail_open(path, files=files, cut_armed=bool(jd._pending_cut(sid)),
+                        min_events=min_events or _TAIL_FIRST_MIN_EVENTS, max_bytes=_TAIL_FIRST_MAX_BYTES)
+
+
+def _tail_first_due(sid):
+    """Whether `sid`'s transcript moved since its last comparison (its path, mtime, size and inode), recording it as compared
+    when it did: one comparison per transcript state, whatever that comparison answers. A turn end that wrote nothing (a
+    second Stop on the same bytes) is not compared again; it is counted under `unmoved`."""
+    path = _path_of(sid)
+    if not path:
+        return True                               # the job says why (no-transcript)
+    try:
+        st = os.stat(str(path))
+        seen = (str(path), st.st_mtime_ns, st.st_size, st.st_ino)
+    except OSError:
+        return True
+    with _TAIL_FIRST_LOCK:
+        if _TAIL_FIRST_LAST.get(sid) == seen:
+            _TAIL_FIRST_STATS["unmoved"] += 1
+            return False
+        _TAIL_FIRST_LAST[sid] = seen
+        while len(_TAIL_FIRST_LAST) > 4096:
+            _TAIL_FIRST_LAST.pop(next(iter(_TAIL_FIRST_LAST)))
+    return True
 
 
 def _tail_first_parse(win, sid, now):
@@ -49644,7 +49696,7 @@ def _tail_first_shadow_job(sid, now=None, live_map=None, wait=None, min_events=N
     path = str(path)
     if not wait():
         return done("skipped", "stopping")
-    win, why = em.tail_window(path, min_events=min_events or _TAIL_FIRST_MIN_EVENTS, max_bytes=_TAIL_FIRST_MAX_BYTES)
+    win, why = _tail_first_open(sid, path, min_events)
     if win is None:
         return done("refused", why)
     states = str(jd.STATE / "states" / (sid + ".jsonl"))
@@ -49652,17 +49704,6 @@ def _tail_first_shadow_job(sid, now=None, live_map=None, wait=None, min_events=N
     tree, key, cands = jd.parsed_session_peek(sid, [path], states=states, sdk_human=human)
     if tree is None:
         return done("skipped", "no-tree")              # the real build's tree is not the files' now: they moved since
-    if jd._pending_cut(sid):
-        return done("refused", "pending-cut")          # a rollback is armed: the whole parse reads a cut the file does not show
-    for c in cands:
-        if os.path.realpath(str(c)) == os.path.realpath(path):
-            continue
-        try:
-            if os.stat(c).st_mtime >= win.t:
-                return done("refused", "sibling-file-active")   # another file of this conversation was written inside the window
-        except OSError:
-            pass
-    win.also(cands)
     turns = tree.get("turns") or []
     k = next((i for i in range(len(turns) - 1, -1, -1)
               if (turns[i].get("trigger") or {}).get("uuid") == win.uuid), None)
@@ -49766,7 +49807,8 @@ def _tail_first_shadow_loop():
                 if sid is None or _tail_first_mode() != "shadow":
                     break
                 try:
-                    _tail_first_shadow_job(sid, wait=gate)
+                    if _tail_first_due(sid):
+                        _tail_first_shadow_job(sid, wait=gate)
                 except Exception as e:               # Exception, never BaseException: a deliberate loop stop passes
                     kind = type(e).__name__
                     if kind not in _TAIL_FIRST_LOOP_SAID:
@@ -50044,8 +50086,16 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     _msum_slot = [None]
     def _msum():
         if _msum_slot[0] is None:
-            _msum_slot[0] = _msg_summaries_scoped()
+            if _tf_prov:
+                # tail-first: the caption map is a memo of every captioned session's whole parse (_msg_summaries), refused
+                # inside the scope; the cards that asked for a caption are marked pending below, and show none meanwhile
+                got = _piece("captions", _msg_summaries_scoped)
+                _msum_slot[0] = {} if isinstance(got, _Pending) else got
+                _msum_pending[0] = isinstance(got, _Pending)
+            else:
+                _msum_slot[0] = _msg_summaries_scoped()
         return _msum_slot[0]
+    _msum_pending = [False]
     # The sealed cards' recorded values are trusted only when this build read names from the pusher's
     # cycle snapshot (_live_scope.names): a handler-thread build reads the registry per card, so the values
     # it embeds and the values it would record are two reads, not one. Such a build records None.
@@ -50688,6 +50738,10 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         _chat_dep_scope.deps["postal_any"] = _chat_dep_scope.deps["postal_any"] or any(_chat_postal_relevant(_e) for _e in _raw_tail)
         _chat_dep_scope.deps["postal_key"], _chat_dep_scope.deps["pidx"], _chat_dep_scope.deps["msum"] = _pk, _pidx, _msum
     events = _hydrate_postal(events, _pidx, sid, captions=_msum)   # swap postal traffic for clean in/out cards (no boilerplate)
+    if _msum_pending[0]:
+        for _e in events:                       # tail-first: every card that joined a message id asked for its caption
+            if _e.get("kind") == "postal-service" and _e.get("mid"):
+                _e["pending"] = sorted(set(_e.get("pending") or ()) | {"captions"})
     _stamp_interrupt_causes(events, _tail_cuts)           # a restart/crash resume notice, or the spend guard's own cut
     #                                                       record, names the seam's cause
     # The parse's turn index of each turn in this build's list, for the `turn` stamp below. The list is the live-merged one, which
@@ -60067,7 +60121,16 @@ def _msg_summaries():
     per chat-open. Now each session's submap is cached against its OWN inputs (_msg_sum_key: the parse's
     key and the captions file and goal store the scan joins through): a build re-scans only the sessions
     whose inputs changed (usually just the one being viewed) and unions the rest from cache. The parses are
-    _parse-cached too, so an unchanged session costs nothing but the key's stats."""
+    _parse-cached too, so an unchanged session costs nothing but the key's stats.
+
+    A derived memo of every captioned session's WHOLE parse, so a tail-first build never reads it (TAIL-FIRST PAGES): inside
+    a scope this raises em.WholeHistoryRead at its first statement, before a submap is looked up or a session scanned, and
+    the build shows the caption as a pending piece. And the union is dropped before the first submap moves and rebuilt at the
+    end, so a call that leaves early (a BaseException past the `except Exception` below) never leaves a union that misses
+    a submap already stored: the next call rebuilds it, whatever it finds changed. (It was rebuilt only when that next
+    call itself changed a submap, so a session that raised and then ended left the others' new captions out for good.)"""
+    if em.tail_scope_window() is not None:
+        raise em.WholeHistoryRead("the message-caption map inside the tail-first scope")
     now = time.time()
     try:
         sess = _sessions(now)
@@ -60088,21 +60151,25 @@ def _msg_summaries():
         except Exception as e:
             # keep last-known on a transient error, under no key: the next build retries the scan (the held turns make a
             # retry cheap) instead of serving the pre-raise map until an input moves; counted and said (_msg_scan_fault)
+            _msg_sum_cache.pop("map", None)          # before a submap moves: the union is rebuilt from the table (above)
             _msg_scan_fault(sid, e, per, ent[1] if ent else {})
             dirty = True
             continue
+        _msg_sum_cache.pop("map", None)
         _msg_scan_clean(sid, per, key, sub)
         dirty = True
     for sid in [k for k in per if k not in live]:    # forget dead sessions so `per` can't grow unbounded
+        _msg_sum_cache.pop("map", None)
         del per[sid]
         dirty = True
     _msg_scan_forget(live)                           # and their held turn records with them
-    if dirty or "map" not in _msg_sum_cache:         # rebuild the union only when a submap changed
+    m = _msg_sum_cache.get("map")
+    if dirty or m is None:                           # rebuild the union when a submap changed, or a call left it dropped
         m = {}
         for _mt, sub in per.values():
             m.update(sub)
         _msg_sum_cache["map"] = m
-    return _msg_sum_cache["map"]
+    return m
 
 
 _MSGSUM_UNSET = object()                          # the cycle slot's "not fetched yet" mark (_msg_summaries_scoped)
@@ -60119,6 +60186,8 @@ def _msg_summaries_scoped():
     caption appended mid-cycle is seen next cycle, the staleness every _live_scope memo tolerates by
     construction (see _sessions). A thread with no scope, a handler-thread build, takes the direct path
     (2026-09-09)."""
+    if em.tail_scope_window() is not None:           # the cycle's slot holds the same whole-history map (_msg_summaries)
+        raise em.WholeHistoryRead("the message-caption map inside the tail-first scope")
     slot = getattr(_live_scope, "msgsum", None)
     if slot is None:
         return _msg_summaries()

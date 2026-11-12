@@ -11,16 +11,21 @@ calls, compactions with and without a replayed tail, a manual compact's detached
 earlier reply with the abandoned turns left in the file, /clear, a session born as a fork, prompts queued and spliced in
 mid-turn or dequeued after a reply, salvaged replies the transcript kept and did not keep, background agents whose
 return lands turns after their launch, retry and effort notes from the side store, a stop, a slash command, API errors
-flushed late, a record written twice, a clock that stepped back):
-  * for EVERY candidate window of every transcript, em.tail_window refuses, or a later gate does, or the provisional
-    frame equals the whole build three ways (against the reference build the shadow compares with, against the whole
-    build's own events, and the reference against the whole build), with only declared pieces pending;
+flushed late, a record written twice, a clock that stepped back, a to-do list whose task store is named after the session
+or found only by the content join, peer messages with captions written for the segments that bore them):
+  * for EVERY candidate window of every transcript (the kernel's one road, km._tail_first_open), it is refused, or a later
+    gate refuses it, or the provisional frame equals the whole build three ways (against the reference build the shadow
+    compares with, against the whole build's own events, and the reference against the whole build), with only declared
+    pieces pending; and the frame built BEFORE the session's whole build is the frame built after it, byte for byte, so
+    no memo a whole build fills (a parse, a fold, the caption map, the task store's join) reaches it;
   * the shadow job over the same corpus never reports a difference, and how often it refuses, by reason, is printed
     (run with -s) and bounded, so a boundary rule that started refusing everything would fail here;
   * the rewound-branch case that broke a naive tail parse, by name: a tail cut at a prompt with no boundary rule shows
     turns the person abandoned, and the same check that passes for tail_window fails for it;
-  * a clock that stepped back further back than the bytes a search reads is what the first three mechanisms cannot see
-    and the shadow's comparison measures: it is reported through the error center with ids and field names only.
+  * a record stamped after the boundary's reply but written further back than the bytes a search reads (a clock that
+    stepped back, a splice or a model-fallback notice stamped ahead, or a record of the conversation's other file) is
+    refused by the high-water stamp (em.tail_stamps), each case shown first as a page that differs without it; records
+    that never become atoms (a reminder stamped a month ahead) refuse nothing.
 Synthetic transcripts only: invented prompt text, placeholder ids, the demo names (a notes-api with web, api and tests)."""
 import collections
 import json
@@ -51,7 +56,8 @@ SEEDS = range(40)                                             # the corpus: one 
 # what a placeholder excuses is a decision this file has to be changed for.
 OWNED = {"agentLaunches": {"output", "isError", "agentRunning", "agentGist", "running"},
          "taskOutputs": {"taskOutputs"},
-         "eventKey": {"uuid", "key"}}
+         "eventKey": {"uuid", "key"},
+         "captions": {"summary"}}
 ALWAYS = {"turnNumbers", "ledger", "firstSeen", "scrollBack", "status", "queued", "liveTail"}
 TOPICS = ("the notes list", "the tag filter", "the export job", "the retry cap", "the digest file", "the search index",
           "the archive view", "the share link", "the rate limiter", "the import path")
@@ -138,9 +144,13 @@ class Script:
         self.kinds = collections.Counter()
         self.fork = None
         self.enqueued = None         # a prompt queued during the running turn, dequeued after its reply
+        self.tasks, self.task_store = [], None   # the to-do list a turn created, and where its store lives (do_tasks)
+        trnd = random.Random(seed * 7919 + 1)    # the to-do list's own stream: the other shapes of a seed are as they were
         steps = steps if steps is not None else self.rnd.randint(9, 16)
         self.turn()
         self.turn()
+        if trnd.random() < 0.7:
+            self.do_tasks(trnd)
         menu = (("turn", 12), ("rewind", 3), ("clear", 1), ("compact", 2), ("compact_replay", 2), ("compact_manual", 1),
                 ("compact_broken", 1), ("splice", 3), ("queue_next", 2), ("orphan", 3), ("agent", 3), ("agent_back", 3),
                 ("notes", 3), ("idle", 2), ("stop", 1), ("command", 1), ("api_error", 1), ("eclipse", 1), ("model", 2),
@@ -470,6 +480,27 @@ class Script:
         self.mail.append({"t": self.t + 1, "ev": "sent", "id": mid, "from": "api", "from_id": PEER, "to_id": self.sid, "body": body})
         self.turn(text=body + "\n<!-- romp-msg-id: %s -->" % mid, ps="sdk")
 
+    def do_tasks(self, trnd):
+        """A turn that makes a to-do list (two TaskCreate calls and the CLI's 'Task #N created' results), with the task store
+        Claude Code keeps beside it: under the session's own id (found by name) or under a team name only the content join
+        over the transcript's whole task record can find. Built from `trnd` alone, ticks included."""
+        self.kinds["tasks"] += 1
+        subjects = ["%s %s" % (trnd.choice(VERBS), trnd.choice(TOPICS)) for _ in range(2)]
+        self.t += trnd.randint(1, 40)
+        tip = self.emit(U(self.t, "plan the work on " + trnd.choice(TOPICS), self.u("u"), self.tip, ps="typed"))
+        for n, subj in enumerate(subjects, 1):
+            a = self.u("a")
+            self.t += trnd.randint(1, 9)
+            self.emit(A(self.t, a, tip, tools=[("TaskCreate", {"subject": subj, "description": "synthetic"})], stop="tool_use",
+                        model=self.model))
+            self.t += 1
+            tip = self.emit(R(self.t, "tu_%s_0" % a, self.u("r"), a, content="Task #%d created successfully: %s" % (n, subj)))
+            self.tasks.append((str(n), subj))
+        self.t += trnd.randint(1, 9)
+        self.tip = self.emit(A(self.t, self.u("a"), tip, text="the plan is in the list", model=self.model))
+        self.path.append(self.tip)
+        self.task_store = trnd.choice(("own", "team"))
+
     def do_twice(self):
         """A record written twice, as a resume re-splice writes it: the same uuid, the same stamp."""
         prompts = [r for r in self.recs if r.get("type") == "user" and isinstance(r["message"]["content"], str)
@@ -513,6 +544,8 @@ class Harness(unittest.TestCase):
         em.set_checkpoint_dir(lambda: jd.STATE / "checkpoints")
         self.proj = self.td / "proj"
         self.proj.mkdir()
+        self.saved_config = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(self.td / "claude")   # the task stores (km._tasks_base): this test's own root
         self.rows = []
         self.saved = (km._sessions, km._live_map, km._TAIL_FIRST_MAX_BYTES)
         km._sessions = lambda now, **kw: list(self.rows)
@@ -520,12 +553,18 @@ class Harness(unittest.TestCase):
         self.fresh()
         with km._TAIL_FIRST_LOCK:
             km._TAIL_FIRST_QUEUE.clear()
-            km._TAIL_FIRST_STATS.update(offered=0, dropped=0, attempts=0, refused={}, skipped={}, matched=0, mismatched=0,
-                                        ms=0.0, msMax=0.0)
+            km._TAIL_FIRST_STATS.update(offered=0, dropped=0, unmoved=0, attempts=0, refused={}, skipped={}, matched=0,
+                                        mismatched=0, ms=0.0, msMax=0.0)
+            km._TAIL_FIRST_ENDS.clear()
+            km._TAIL_FIRST_LAST.clear()
         km._TAIL_FIRST_SAID.clear()
 
     def tearDown(self):
         km._sessions, km._live_map, km._TAIL_FIRST_MAX_BYTES = self.saved
+        if self.saved_config is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self.saved_config
         em.set_checkpoint_dir(None)
         jd._rebind_state(self.saved_state)
         shutil.rmtree(self.td, ignore_errors=True)
@@ -552,6 +591,11 @@ class Harness(unittest.TestCase):
         km._RENDER_FLOOR.clear()
         with em._MAT_LOCK:
             em._MAT_LRU.clear()
+        with em._TAIL_STAMPS_LOCK:
+            em._TAIL_STAMPS.clear()
+        km._msg_sum_cache.clear()                # the message-caption map and its held turns
+        km._task_dir_hint.clear()                # the task store's content-join answers
+        km._task_join_miss.clear()
 
     def install(self, sid, recs, rows=(), mail=(), fork=None, leaf=None):
         """Put one synthetic session on disk: its transcript, its side-store rows, its postal rows, its registry record."""
@@ -570,7 +614,36 @@ class Harness(unittest.TestCase):
 
     def script(self, seed, **kw):
         sc = Script(seed, **kw)
-        return sc, self.install(sc.sid, sc.recs, sc.rows, sc.mail, sc.fork)
+        leaf = self.install(sc.sid, sc.recs, sc.rows, sc.mail, sc.fork)
+        self.task_store(sc)
+        if sc.mail:
+            self.captions(sc.sid, leaf)
+        return sc, leaf
+
+    def task_store(self, sc):
+        """The to-do list's store, as Claude Code keeps it: <tasks>/<the session's id>/N.json, or under a team name."""
+        if not sc.tasks:
+            return
+        d = km._tasks_base() / (sc.sid if sc.task_store == "own" else "team-" + sc.tag)
+        d.mkdir(parents=True, exist_ok=True)
+        for tid, subj in sc.tasks:
+            (d / (tid + ".json")).write_text(json.dumps({"id": tid, "subject": subj, "description": "synthetic",
+                                                         "status": "pending", "blocks": [], "blockedBy": []}))
+
+    def captions(self, sid, leaf):
+        """A caption for every segment that bore a peer's message, as the judge writes them (captions/<sid>.jsonl): the
+        segment ids are the kernel's own walk over the whole parse (km._msg_mid_turn), the captions invented. Then a fresh
+        start, so the whole build reads them anew."""
+        session = km._parse(leaf, sid, NOW)
+        store = jd.load_goals_shared(sid)
+        rows = []
+        for t in session["turns"]:
+            for seg_id, _mids in km._msg_mid_turn(t, store):
+                rows.append({"id": seg_id, "grain": "segment", "t": int(seg_id.split(":")[-2]),
+                             "caption": "peer asks for a bump, %d" % len(rows)})
+        jd.CAPDIR.mkdir(parents=True, exist_ok=True)
+        (jd.CAPDIR / (sid + ".jsonl")).write_text("".join(json.dumps(r) + "\n" for r in rows))
+        self.fresh()
 
     def whole(self, sid):
         """The whole build's events (a client's full page), and the tree it parsed."""
@@ -641,13 +714,22 @@ class Harness(unittest.TestCase):
                 out.append("piece %s is a placeholder the frame does not declare" % name)
         return out
 
-    def windows(self, leaf):
-        """Every answer em.tail_window gives for `leaf`, asked for each window size from one record to the whole file:
-        ({start offset: window}, Counter of refusal reasons, one per size refused, the sizes answered with a window)."""
-        n = sum(1 for ln in open(leaf) if '"type": "user"' in ln or '"type": "assistant"' in ln)
+    def opened(self, sid, leaf, me):
+        """The window the kernel's one road hands out (km._tail_first_open: em.tail_open with the session's files and its
+        rollback state), the only kind a scope takes."""
+        win, why = km._tail_first_open(sid, leaf, me)
+        self.assertIsNone(why)
+        return win
+
+    def windows(self, leaf, sid):
+        """Every answer the kernel's one road to a window (km._tail_first_open, em.tail_open: tail_window's search with the
+        high-water stamps, and the gates past it) gives for `leaf`, asked for each window size from one record to the whole
+        file: ({start offset: window}, Counter of refusal reasons, one per size refused, the sizes answered with a window)."""
+        with open(leaf) as fh:
+            n = sum(1 for ln in fh if '"type": "user"' in ln or '"type": "assistant"' in ln)
         wins, why, got = {}, collections.Counter(), 0
         for me in range(1, n + 2):
-            win, reason = em.tail_window(leaf, me)
+            win, reason = km._tail_first_open(sid, leaf, me)
             if win is None:
                 why[reason] += 1
             else:
@@ -668,10 +750,12 @@ def naive_window(leaf, at):
             off += len(ln)
     st = os.stat(leaf)
     prev = next((r for r in reversed(recs[:at]) if r.get("uuid")), None) or {}
-    return em.TailWindow(leaf, offs[at], off, (st.st_mtime_ns, st.st_size, st.st_ino), recs[at:], recs[at]["uuid"],
-                         em.parse_z(recs[at]["timestamp"]), prev.get("uuid"), em.parse_z(prev.get("timestamp")) or 0,
-                         (prev.get("message") or {}).get("model") if isinstance(prev.get("message"), dict) else None,
-                         sum(1 for r in recs[at:] if r.get("type") in ("user", "assistant")))
+    win = em.TailWindow(leaf, offs[at], off, (st.st_mtime_ns, st.st_size, st.st_ino), recs[at:], recs[at]["uuid"],
+                        em.parse_z(recs[at]["timestamp"]), prev.get("uuid"), em.parse_z(prev.get("timestamp")) or 0,
+                        (prev.get("message") or {}).get("model") if isinstance(prev.get("message"), dict) else None,
+                        sum(1 for r in recs[at:] if r.get("type") in ("user", "assistant")))
+    win.opened = True                 # deliberately past em.tail_open's gates: this is the hazard the gates exist for
+    return win
 
 
 class TestGeneratedCorpus(Harness):
@@ -681,27 +765,41 @@ class TestGeneratedCorpus(Harness):
         gate with a reason; and the corpus is not vacuous: windows are accepted after every shape the script writes, and
         with the shapes a window may hold inside them."""
         accepted = refused_later = asked = answered = 0
-        why_window, why_gate, pend = collections.Counter(), collections.Counter(), collections.Counter()
+        why_window, why_gate, pend, pieces = collections.Counter(), collections.Counter(), collections.Counter(), collections.Counter()
         kinds, behind, inside = collections.Counter(), collections.Counter(), collections.Counter()
+        frame = lambda win: json.dumps(_strip(km._tail_first_frame(sc.sid, NOW, {}, win)), sort_keys=True)
         for seed in SEEDS:
             sc, leaf = self.script(seed)
             kinds.update(sc.kinds)
-            whole = self.whole(sc.sid)
-            wins, why, got = self.windows(leaf)
+            wins, why, got = self.windows(leaf, sc.sid)
             asked += sum(why.values()) + got
             answered += got
             why_window.update(why)
+            cold = {}                    # each window's frame BEFORE any whole build of the session: a restarted kernel's
+            for start, win in wins.items():
+                try:
+                    cold[start] = frame(win)
+                except em.TailRefused as e:
+                    cold[start] = ("refused", e.reason)
+            whole = self.whole(sc.sid)
             for start, win in sorted(wins.items()):
                 try:
                     diffs = self.differences(sc.sid, leaf, win, whole)
                 except em.TailRefused as e:
+                    self.assertEqual(cold[start], ("refused", e.reason), "seed %d: refused alike cold and warm" % seed)
                     refused_later += 1
                     why_gate[e.reason] += 1
                     continue
                 self.assertEqual(diffs, [], "seed %d, the window at %s (byte %d)" % (seed, win.uuid, start))
+                # nothing a whole build left behind (a parse, a fold, a memo derived from either) reaches the frame: the
+                # one built before the whole build and the one built after it are the same bytes
+                self.assertEqual(frame(win), cold[start], "seed %d, the window at %s: the frame warm is the frame cold"
+                                 % (seed, win.uuid))
                 accepted += 1
                 prov = km._tail_first_frame(sc.sid, NOW, {}, win)
                 pend.update(n for e in prov["events"] for n in (e.get("pending") or ()))
+                pieces.update(("%s:%s" % (n, "pending" if isinstance(v, km._Pending) else "real"))
+                              for n, v in prov.items() if n in ("todo", "cwd", "docs", "episodes", "forks", "flags"))
                 # what stands BEFORE this window (the history a tail never reads), and what it holds INSIDE
                 tail = win.records
                 held = {r.get("uuid") for r in tail}
@@ -737,10 +835,10 @@ class TestGeneratedCorpus(Harness):
         print("\ntail-first corpus: %d generated transcripts, %d window sizes asked for: %d answered with a window (%.1f%%; "
               "%d distinct windows), %d refused by em.tail_window: %r\n  of the %d distinct windows, %d built and equal to the "
               "whole build, %d refused by a later gate: %r\n  placeholders on events: %r\n  shapes written: %r\n  accepted "
-              "windows with, in the history BEFORE them: %r\n  accepted windows holding: %r"
+              "windows with, in the history BEFORE them: %r\n  accepted windows holding: %r\n  the frame's pieces: %r"
               % (len(SEEDS), asked, answered, 100.0 * answered / asked, accepted + refused_later, refused, rate(why_window, asked),
                  accepted + refused_later, accepted, refused_later, dict(why_gate), dict(pend), dict(kinds), dict(behind),
-                 dict(inside)))
+                 dict(inside), dict(sorted(pieces.items()))))
         self.assertGreater(accepted, 4 * len(SEEDS), "the corpus accepts windows: several per transcript")
         for shape in ("rewind", "clear", "compact", "compact_replay", "compact_manual", "compact_broken", "splice", "queue_next",
                       "orphan", "agent", "agent_back", "notes", "idle", "stop", "command", "api_error", "eclipse", "postal",
@@ -755,6 +853,9 @@ class TestGeneratedCorpus(Harness):
             self.assertGreater(inside[what], 0, "windows are accepted holding %s" % what)
         self.assertGreater(pend["agentLaunches"] + pend["taskOutputs"], 0,
                            "a background agent launched before a window shows as a placeholder in it")
+        self.assertGreater(pend["captions"], 0, "a peer's message in a window shows its caption as a placeholder")
+        self.assertGreater(pieces["todo:real"], 0, "a to-do list whose store is named after the session is read from it")
+        self.assertGreater(pieces["todo:pending"], 0, "one only the content join finds is a placeholder")
 
     def test_the_shadow_job_never_reports_a_difference_on_the_corpus(self):
         """The kernel's own job over the corpus, at the sizes a page would ask for: matched or refused, never mismatched, and
@@ -847,7 +948,7 @@ class TestRewoundBranch(Harness):
             km._tail_first_frame(self.SID, NOW, {}, naive_window(leaf, 2))
         self.assertEqual(cm.exception.reason, "boundary-not-opener")
         # THE REAL BOUNDARY, the same check: every size asked is refused or equal, and no window starts inside the branch
-        wins, why, _ = self.windows(leaf)
+        wins, why, _ = self.windows(leaf, self.SID)
         self.assertEqual(sorted(w.uuid for w in wins.values()), ["u5", "u6"], "the windows that start after the rewind's last trace")
         for win in wins.values():
             self.assertEqual(self.differences(self.SID, leaf, win, whole), [])
@@ -1023,6 +1124,7 @@ class TestEachRule(Harness):
         whole = self.whole(sid)
         win, why = em.tail_window(leaf, 3)
         self.assertEqual((win.uuid, win.prev_uuid, win.prev_t, win.prev_model, win.n, why), ("u2", "a1", T0 + 30, MODELS[0], 4, None))
+        win = self.opened(sid, leaf, 3)
         self.assertEqual(self.differences(sid, leaf, win, whole), [])
         self.assertEqual(em.tail_window(leaf, 5), (None, "whole-file"))
         self.assertEqual(em.tail_window(leaf, 7), (None, "too-short"))
@@ -1041,6 +1143,7 @@ class TestEachRule(Harness):
         whole = self.whole(sid)
         win, why = em.tail_window(leaf, 3)
         self.assertEqual((win.uuid, win.prev_uuid, win.prev_t, win.prev_model, why), ("u2", "a1", T0 + 30, MODELS[0], None))
+        win = self.opened(sid, leaf, 3)
         self.assertEqual(self.differences(sid, leaf, win, whole), [])
         self.assertEqual(km._tail_first_shadow_job(sid, now=NOW, live_map={}, min_events=3), ("matched", None))
 
@@ -1070,7 +1173,7 @@ class TestEachRule(Harness):
         try:
             whole = self.whole(sid)
             self.assertEqual((whole[-1].get("kind"), whole[-1].get("uuid")), ("apiError", "apiError"), "the whole page ends on the card")
-            win, _ = em.tail_window(leaf, 3)
+            win = self.opened(sid, leaf, 3)
             prov = km._tail_first_frame(sid, NOW, {}, win)
             self.assertIn("liveTail", prov["provisional"])
             self.assertNotIn("apiError", [e.get("kind") for e in prov["events"]])
@@ -1099,19 +1202,42 @@ class TestEachRule(Harness):
             a["message"] = body
 
 
-class TestWhatOnlyTheShadowSees(Harness):
+class TestTheHighWaterStamp(Harness):
+    """A record written before the bytes a search reads but stamped after the reply the boundary follows sorts INTO the
+    window in the whole build (atoms are ordered by stamp), and the records in hand cannot show it. Claude Code does write
+    stamps out of order. em.tail_open refuses such a window by construction: each transcript keeps, from one pass over its
+    bytes, the highest stamp of the records that become atoms placed by their stamp, written before each prompt that could
+    open a window (em.tail_stamps). Each case below shows the hole first (tail_window alone, its window forced past the
+    gates, builds a page that differs from the whole build), then the gate closing it."""
     SID = "aaaaaaaa-7002-4222-8333-666666666666"
 
-    def records(self):
-        """Eight turns, the SECOND stamped two hours ahead of the rest (the clock stepped back after it): chronologically it
-        sorts after everything, and it lies far behind the last turns in the file."""
+    def records(self, ahead=None):
+        """Eight turns; `ahead` (a record builder over the second prompt's uuid) adds one record after the second prompt
+        stamped two hours ahead of the rest. Without it, the SECOND turn itself is stamped two hours ahead (the clock stepped
+        back after it): chronologically it sorts after everything, and it lies far behind the last turns in the file."""
         m, recs, prev = MODELS[0], [], None
         for i in range(8):
-            t = T0 + i * 100 + (7200 if i == 1 else 0)
+            t = T0 + i * 100 + (7200 if i == 1 and ahead is None else 0)
             recs.append(U(t, "step %d of the export job" % i, "u%d" % i, prev))
-            recs.append(A(t + 30, "a%d" % i, "u%d" % i, text="step %d done" % i, model=m))
+            last = "u%d" % i
+            if i == 1 and ahead is not None:
+                recs.append(ahead(last))
+                last = recs[-1]["uuid"]
+            recs.append(A(t + 30, "a%d" % i, last, text="step %d done" % i, model=m))
             prev = "a%d" % i
         return recs
+
+    def last_five(self, recs):
+        """A search that reads the last five records only (the bytes a long transcript's search reads, in miniature)."""
+        km._TAIL_FIRST_MAX_BYTES = sum(len(json.dumps(r)) + 1 for r in recs[-5:])
+        return km._TAIL_FIRST_MAX_BYTES
+
+    def hole(self, sid, leaf, recs, whole):
+        """What tail_window's search alone accepts over the last five records, and what its page gets wrong."""
+        win, why = em.tail_window(leaf, 2, max_bytes=self.last_five(recs))
+        self.assertIsNone(why, "the records in hand show nothing wrong")
+        win.opened = True                                              # past tail_open's gates, on purpose: the hole they close
+        return self.differences(sid, leaf, win, whole)
 
     def test_a_clock_step_inside_the_bytes_read_is_refused(self):
         leaf = self.install(self.SID, self.records())
@@ -1121,33 +1247,126 @@ class TestWhatOnlyTheShadowSees(Harness):
             self.assertIsNone(win, "no window: a record before every boundary is stamped after it")
         self.assertEqual(em.tail_window(leaf, 2), (None, "clock"))
 
-    def test_a_clock_step_beyond_the_bytes_read_is_reported_by_the_shadow(self):
-        """The limit the first three mechanisms have, and the fourth one's reason: a search that read only the file's last
-        bytes cannot see the earlier record stamped in the future. The window is accepted, the two builds differ, and the
-        shadow says so: counted, and filed once in the error center with ids and field names, never a word of the text."""
+    def test_a_clock_step_beyond_the_bytes_read_is_refused_by_the_high_water_stamp(self):
+        """The limit the records in hand have: a search that read only the file's end cannot see the earlier turn stamped in
+        the future, and the window it accepts differs from the whole build. The kernel's road refuses it by the stamp, the
+        shadow compares nothing and reports nothing."""
         recs = self.records()
         leaf = self.install(self.SID, recs)
         whole = self.whole(self.SID)
-        km._TAIL_FIRST_MAX_BYTES = sum(len(json.dumps(r)) + 1 for r in recs[-5:])   # the search reads the last five records only
+        diffs = self.hole(self.SID, leaf, recs, whole)
+        self.assertTrue(diffs, "without the stamp the page is wrong: the whole build sorts the turn stamped ahead after the window's")
+        self.assertEqual(km._tail_first_open(self.SID, leaf, 2), (None, "high-water"))
         said = []
         saved, km._sdk_problem = km._sdk_problem, lambda text: said.append(str(text))
         try:
-            first = km._tail_first_shadow_job(self.SID, now=NOW, live_map={}, min_events=2)
-            again = km._tail_first_shadow_job(self.SID, now=NOW, live_map={}, min_events=2)
+            self.assertEqual(km._tail_first_shadow_job(self.SID, now=NOW, live_map={}, min_events=2), ("refused", "high-water"))
         finally:
             km._sdk_problem = saved
-        self.assertEqual(first, ("mismatched", [("window", ["count"])]),
-                         "the whole build sorts the turn stamped ahead after the window's turns; the tail never read it")
-        self.assertEqual(again[0], "mismatched")
-        self.assertEqual(len(said), 1, "reported once, counted every time")
-        rep = km._tail_first_report()
-        self.assertEqual((rep["attempts"], rep["mismatched"], rep["matched"]), (2, 2, 0))
-        self.assertIn(self.SID[:8], said[0])
-        for r in recs:                                                 # ids and field names only
-            body = r["message"]["content"] if isinstance(r["message"]["content"], str) else r["message"]["content"][0].get("text", "")
-            self.assertNotIn(body, said[0])
-        self.assertNotIn(str(self.td), said[0], "no path either")
-        self.assertTrue(whole)
+        self.assertEqual(said, [])
+        stamps = em.tail_stamps(leaf)
+        self.assertEqual(stamps["before"]["u7"], T0 + 100 + 7200 + 30, "the stamp before the last prompt: the second reply's")
+        self.assertEqual(stamps["hw"], T0 + 100 + 7200 + 30)
+
+    def test_a_splice_or_a_model_fallback_notice_stamped_ahead_refuses_too(self):
+        """Not only prompts and replies: a queued-command splice lands no earlier than its own stamp, and the model's fallback
+        notice is an atom at its stamp, so either one stamped ahead moves into the window in the whole build. Both count."""
+        kinds = {"splice": lambda p: ATT(T0 + 7200, "also check the retry cap", "q1", p),
+                 "fallback": lambda p: SYS(T0 + 7200, "model_refusal_fallback", "f1", p, content="a synthetic fallback notice",
+                                           originalModel=MODELS[0], fallbackModel=MODELS[1])}
+        for n, (kind, ahead) in enumerate(sorted(kinds.items())):
+            with self.subTest(kind=kind):
+                sid = "aaaaaaaa-73%02d-4222-8333-666666666666" % n
+                self.fresh()
+                recs = self.records(ahead)
+                leaf = self.install(sid, recs)
+                whole = self.whole(sid)
+                self.assertTrue(self.hole(sid, leaf, recs, whole), "the record stamped ahead is in the whole build's window")
+                self.assertEqual(km._tail_first_open(sid, leaf, 2), (None, "high-water"))
+
+    def test_records_that_never_become_atoms_refuse_nothing(self):
+        """The out-of-order stamps found in real transcripts are on records like the token reminder attachment, stamped up to
+        a month ahead. Neither it nor a system notice the parse does not place by stamp moves anything into the window, so
+        the stamp does not count them, and the window stands and equals the whole build."""
+        kinds = {"reminder": lambda p: {"type": "attachment", "timestamp": iso(T0 + 30 * 86400), "uuid": "m1", "parentUuid": p,
+                                        "isSidechain": False, "attachment": {"type": "total_tokens_reminder"}},
+                 "api_error": lambda p: SYS(T0 + 7200, "api_error", "e1", p, level="error", retryAttempt=1, maxRetries=10,
+                                            retryInMs=1000, error={"status": 429, "message": "synthetic rate limit"}),
+                 "local_command": lambda p: SYS(T0 + 7200, "local_command", "c1", p,
+                                                content="<local-command-stdout>ok</local-command-stdout>")}
+        for n, (kind, ahead) in enumerate(sorted(kinds.items())):
+            with self.subTest(kind=kind):
+                sid = "aaaaaaaa-74%02d-4222-8333-666666666666" % n
+                self.fresh()
+                recs = self.records(ahead)
+                leaf = self.install(sid, recs)
+                whole = self.whole(sid)
+                self.assertEqual(self.hole(sid, leaf, recs, whole), [])
+                win, why = km._tail_first_open(sid, leaf, 2)
+                self.assertEqual((win.uuid if win else None, why), ("u7", None))
+                self.assertEqual(self.differences(sid, leaf, win, whole), [])
+
+    def test_the_entry_is_kept_and_a_new_process_reads_only_what_was_appended(self):
+        recs = self.records()
+        leaf = self.install(self.SID, recs)
+        first = em.tail_stamps(leaf)
+        kept = [n for n in os.listdir(jd.STATE / "checkpoints") if n.endswith(".tail-stamps")]
+        self.assertEqual(len(kept), 1, "kept beside the file's checkpoint")
+        with open(leaf, "a") as fh:
+            fh.write(json.dumps(U(T0 + 900, "step 8 of the export job", "u8", "a7")) + "\n")
+            fh.write(json.dumps(A(T0 + 930, "a8", "u8", text="step 8 done", model=MODELS[0])) + "\n")
+        appended = os.path.getsize(leaf) - first["end"]
+        self.fresh()                                                   # a restart: nothing in memory
+        key = os.path.realpath(leaf)
+        with em._READ_BYTES_LOCK:
+            r0 = em._READ_BYTES.get(key, 0)
+        got = em.tail_stamps(leaf)
+        with em._READ_BYTES_LOCK:
+            self.assertEqual(em._READ_BYTES.get(key, 0) - r0, appended, "the bytes appended since, and no others")
+        self.assertEqual(got["before"]["u8"], T0 + 100 + 7200 + 30)
+        os.remove(jd.STATE / "checkpoints" / kept[0])
+        self.fresh()
+        scratch = em.tail_stamps(leaf)                                 # the same file from byte zero
+        self.assertEqual((got["hw"], got["before"], got["end"]), (scratch["hw"], scratch["before"], scratch["end"]))
+
+    def test_a_file_rewritten_under_the_entry_is_scanned_again(self):
+        """The append guard (the bytes before the entry's end): a file rewritten in place, its length unchanged, holds other
+        stamps, and the entry kept for its old bytes is not believed."""
+        recs = self.records()
+        leaf = self.install(self.SID, recs)
+        self.assertEqual(em.tail_stamps(leaf)["hw"], T0 + 100 + 7200 + 30)
+        calm = self.records()
+        calm[2], calm[3] = U(T0 + 100, calm[2]["message"]["content"], "u1", "a0"), A(T0 + 130, "a1", "u1", text="step 1 done", model=MODELS[0])
+        body = "".join(json.dumps(r) + "\n" for r in calm)
+        old = open(leaf).read()
+        body = body + " " * (len(old) - len(body)) if len(body) < len(old) else body
+        with open(leaf, "r+") as fh:                                   # in place: the same inode
+            fh.write(body)
+            fh.truncate()
+        self.fresh()
+        got = em.tail_stamps(leaf)
+        self.assertEqual(got["hw"], T0 + 730, "the rewritten file's own stamps")
+        self.assertEqual(km._tail_first_open(self.SID, leaf, 2)[1], None, "and its windows stand")
+
+    def test_the_reader_entry_seeds_a_first_scan_without_a_read(self):
+        recs = self.records()
+        leaf = self.install(self.SID, recs)
+        self.whole(self.SID)                                           # the reader holds the whole file
+        key = os.path.realpath(leaf)
+        with em._READ_BYTES_LOCK:
+            r0 = em._READ_BYTES.get(key, 0)
+        got = em.tail_stamps(leaf)
+        with em._READ_BYTES_LOCK:
+            self.assertEqual(em._READ_BYTES.get(key, 0), r0, "stepped over the records the reader holds")
+        self.assertEqual(got["end"], os.path.getsize(leaf))
+        self.assertEqual(got["hw"], T0 + 100 + 7200 + 30)
+
+    def test_the_sweep_removes_the_entry_with_its_transcript(self):
+        leaf = self.install(self.SID, self.records())
+        em.tail_stamps(leaf)
+        os.remove(leaf)
+        em.checkpoint_sweep()
+        self.assertEqual([n for n in os.listdir(jd.STATE / "checkpoints") if n.endswith(".tail-stamps")], [])
 
 
 class TestSecondFile(Harness):
@@ -1155,9 +1374,9 @@ class TestSecondFile(Harness):
     SID = "aaaaaaaa-7003-4222-8333-666666666666"
     LAST = "bbbbbbbb-7003-4222-8333-666666666666"
 
-    def lay(self):
+    def lay(self, ahead=0):
         m = MODELS[0]
-        first = [U(T0, "start the notes export", "u1", None), A(T0 + 30, "a1", "u1", text="export started", model=m)]
+        first = [U(T0, "start the notes export", "u1", None), A(T0 + 30 + ahead, "a1", "u1", text="export started", model=m)]
         leaf, prev = [], "a1"
         for i in range(2, 7):
             leaf.append(U(T0 + i * 100, "export step %d" % i, "u%d" % i, prev))
@@ -1173,11 +1392,23 @@ class TestSecondFile(Harness):
         whole = self.whole(self.SID)
         self.assertEqual([e["md"] for e in whole if e.get("kind") == "user"][:2], ["start the notes export", "export step 2"],
                          "the whole build reads both files")
-        wins, why, _ = self.windows(leaf)
+        wins, why, _ = self.windows(leaf, self.SID)
         self.assertEqual(sorted(w.uuid for w in wins.values()), ["u3", "u4", "u5", "u6"])
         for win in wins.values():
             self.assertEqual(self.differences(self.SID, leaf, win, whole), [])
         self.assertEqual(km._tail_first_shadow_job(self.SID, now=NOW, live_map={}, min_events=2), ("matched", None))
+
+    def test_a_first_file_holding_a_record_stamped_after_the_boundary_refuses(self):
+        """The high-water stamp over the session's OTHER files: every record of the first file is before the window, so one
+        stamped after the reply the boundary follows sorts into the window in the whole build, though the file was last
+        written long before. The kernel's road refuses (sibling-high-water)."""
+        anchor, leaf = self.lay(ahead=7200)
+        whole = self.whole(self.SID)
+        win, why = em.tail_window(leaf, 2)
+        win.opened = True                                              # past tail_open's gates, on purpose: the hole they close
+        self.assertTrue(self.differences(self.SID, leaf, win, whole), "the first file's late reply is in the whole build's window")
+        self.assertEqual(km._tail_first_open(self.SID, leaf, 2), (None, "sibling-high-water"))
+        self.assertEqual(km._tail_first_shadow_job(self.SID, now=NOW, live_map={}, min_events=2), ("refused", "sibling-high-water"))
 
     def test_a_first_file_written_inside_the_window_refuses(self):
         anchor, leaf = self.lay()

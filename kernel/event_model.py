@@ -657,18 +657,30 @@ class TailRefused(Exception):
         self.reason = reason
 
 
-_TAIL_SCOPE = threading.local()   # .win: the TailWindow the calling thread builds a provisional page from (tail_scope)
+class _TailScopeLocal(threading.local):
+    """The calling thread's tail-first scope. `win` is a class attribute, so a thread that never opened a scope reads None
+    off the class: the guard every reader runs first is one attribute read (about 0.25 us against 1.3 us for getattr
+    with a default on a plain threading.local)."""
+    win = None
+
+
+_TAIL_SCOPE = _TailScopeLocal()   # .win: the TailWindow the calling thread builds a provisional page from (tail_scope)
 
 
 class tail_scope:
     """`with tail_scope(win):` the calling thread reads `win`'s transcript (and the session's other transcript files the
-    window names) only through the window's own records until the block ends. Nested scopes stack; None clears it."""
+    window names) only through the window's own records until the block ends. Nested scopes stack; None clears it. A window
+    tail_open did not hand out is refused on entry (TailRefused "unopened"): the gates that entry point runs (an armed
+    rollback, another file of the conversation written inside the window, the stamps written before the bytes read)
+    cannot be skipped by building from tail_window's answer directly."""
 
     def __init__(self, win):
         self.win = win
 
     def __enter__(self):
-        self.prev = getattr(_TAIL_SCOPE, "win", None)
+        if self.win is not None and not self.win.opened:
+            raise TailRefused("unopened")
+        self.prev = _TAIL_SCOPE.win
         _TAIL_SCOPE.win = self.win
         return self
 
@@ -679,21 +691,27 @@ class tail_scope:
 
 def tail_scope_window():
     """The window of the calling thread's tail-first scope, or None outside one."""
-    return getattr(_TAIL_SCOPE, "win", None)
+    return _TAIL_SCOPE.win
 
 
 def _tail_guard(path, what):
     """Refuse `what` (a reader's name) over `path` when the calling thread's tail-first scope holds that file. The first
     statement of every transcript reader below, ahead of its memo and cache lookups, so a hit a whole read left behind is
     refused the same as a fresh read; outside a scope it is one thread-local read."""
-    win = getattr(_TAIL_SCOPE, "win", None)
+    win = _TAIL_SCOPE.win
     if win is not None and win.holds(path):
         raise WholeHistoryRead("%s inside the tail-first scope" % what)
 
 
 def _read_jsonl(path):
-    """Yield parsed json objects from a .jsonl file; [] on any error."""
+    """The parsed json objects of a .jsonl file, as an iterator; nothing on any error. The tail-first guard runs at the
+    CALL, before an iterator exists: a generator's body, the guard with it, would wait for the first next(), so a caller
+    that took the iterator inside a scope and drained it outside would have read the whole file."""
     _tail_guard(path, "_read_jsonl")
+    return _read_jsonl_iter(path)
+
+
+def _read_jsonl_iter(path):
     try:
         with open(path, errors="replace") as fh:
             for line in fh:
@@ -2528,8 +2546,9 @@ def checkpoint_sweep():
                 aside.unlink(); gone += 1
             except OSError:
                 pass
-    for ov in list(Path(d).glob("*.asm.oversize")) + list(Path(d).glob("*.asm.memory")):   # an oversize verdict (_ASM_OVERSIZE)
-        #                                                   or a memory verdict (the document worker's) leaves with its transcript
+    for ov in list(Path(d).glob("*.asm.oversize")) + list(Path(d).glob("*.asm.memory")) + list(Path(d).glob("*.tail-stamps")):
+        #                                                   an oversize verdict (_ASM_OVERSIZE), a memory verdict (the document
+        #                                                   worker's) or a high-water entry (tail_stamps) leaves with its transcript
         try:
             v = json.loads(ov.read_text(encoding="utf-8"))
             keep = isinstance(v, dict) and isinstance(v.get("path"), str) and os.path.exists(v["path"])
@@ -11461,12 +11480,14 @@ class TailWindow:
     reply written before B (`prev_uuid`, `prev_t`, `prev_model`: the turn-ending assistant record, whose time and model
     are the only two facts of the earlier file a chat build carries across the boundary) and `n`, the user and assistant
     records it holds. `records` is the pass for parse_session's tail road inside tail_scope: that list, by identity."""
-    __slots__ = ("leaf", "key", "keys", "start", "end", "stat", "records", "uuid", "t", "prev_uuid", "prev_t", "prev_model", "n")
+    __slots__ = ("leaf", "key", "keys", "start", "end", "stat", "records", "uuid", "t", "prev_uuid", "prev_t", "prev_model", "n",
+                 "opened")
 
     def __init__(self, leaf, start, end, stat, records, uuid, t, prev_uuid, prev_t, prev_model, n):
         self.leaf = str(leaf)
         self.key = os.path.realpath(self.leaf)
         self.keys = {self.key}
+        self.opened = False           # set by tail_open alone, once its gates passed: tail_scope refuses a window without it
         self.start, self.end, self.stat, self.records = start, end, stat, records
         self.uuid, self.t, self.prev_uuid, self.prev_t, self.prev_model, self.n = uuid, t, prev_uuid, prev_t, prev_model, n
 
@@ -11629,7 +11650,211 @@ def _tail_refusal(recs, ts, i, j):
     return None
 
 
-def tail_window(leaf, min_events=1, max_bytes=None):
+# THE HIGH-WATER STAMP (the review of step 1, 2026-11-12). tail_window proves its rules over the bytes it read, and a record
+# written before those bytes but stamped after the reply before B sorts into the window in the whole build (segment_turns
+# orders atoms by stamp), which a search that read only the file's end cannot see. Claude Code does write stamps out of order:
+# a scan of real transcripts found a reminder attachment stamped up to a month ahead of the records written after it. So each
+# transcript keeps, from one pass over its bytes, the highest stamp among the records that become atoms placed by their own
+# stamp (user and assistant records, the two system records the emit loop keeps, the compaction boundary and the model's
+# fallback notice, and the queued-command splice, which lands no earlier than its own stamp), and, for each of its newest
+# prompts that could open a window, that highest stamp over the records written before it. tail_window refuses a boundary
+# whose stamp-before is past the reply it follows ("high-water"). Attachments and bookkeeping that never become atoms are not
+# counted, so a reminder stamped a month ahead refuses nothing. The pass is incremental and proved the way the reader proves
+# its entries: a longer file by the bytes before the entry's end (an append leaves them as they were), a file of the same
+# length under a new time by the crc32 of every byte the entry covers; anything else is scanned from byte zero. The entry
+# is kept beside the file's checkpoint, so a new process scans only what was appended since.
+_TAIL_STAMP_PROMPTS = 512         # the prompts an entry keeps a stamp-before for, newest: a window opens at one of the last
+#                                   _TAIL_TRIES prompts within the search's bytes, so an older one is never asked about
+_TAIL_STAMP_GUARD = 64            # the bytes before an entry's end it keeps: a file whose bytes there moved was not only appended to
+_TAIL_STAMP_V = 1
+_TAIL_STAMPS = {}                 # realpath -> this process's entry: {path, dev, ino, mtime, end, guard, crc, hw, before}; never
+#                                   mutated in place
+_TAIL_STAMPS_LOCK = threading.Lock()
+
+
+def _tail_stamp_counts(r):
+    """Whether record `r`'s stamp places an atom of the whole parse (the high-water stamp's records)."""
+    typ = r.get("type")
+    if typ in ("user", "assistant"):
+        return True
+    if typ == "system":
+        return r.get("subtype") in ("compact_boundary", "model_refusal_fallback")
+    return typ == "attachment" and (r.get("attachment") or {}).get("type") == "queued_command"
+
+
+def _tail_stamps_step(ent, r):
+    """Fold one record, in file order, into high-water entry `ent`: a prompt that could open a window records the stamp
+    written before it, then a counted record raises the mark."""
+    if not isinstance(r, dict) or not r.get("uuid"):
+        return
+    if _tail_prompt_shaped(r):
+        before = ent["before"]
+        before.pop(r["uuid"], None)               # a record written twice: the later copy is the one a window can open at
+        before[r["uuid"]] = ent["hw"]
+        while len(before) > _TAIL_STAMP_PROMPTS:
+            before.pop(next(iter(before)))
+    if _tail_stamp_counts(r):
+        t = parse_z(r.get("timestamp"))
+        if t is not None and t > ent["hw"]:
+            ent["hw"] = t
+
+
+def _tail_stamps_file(key):
+    d = _ckpt_dir()
+    if d is None:
+        return None
+    return Path(d) / (hashlib.sha1(key.encode("utf-8")).hexdigest()[:20] + ".tail-stamps")
+
+
+def _tail_stamps_guard_ok(ent, key, st):
+    """Whether entry `ent` still describes a prefix of file `key` (stat `st`), proved as the reader proves its own entries:
+    the same file (device and inode) and at least as long; then unchanged since the scan (the same length and time), or
+    longer with the bytes before the entry's end as they were (the append guard), or the same length under a new time with
+    the crc32 of every byte the entry covers unchanged (a writer that reopened the file and wrote nothing, against an
+    in-place rewrite)."""
+    if ent.get("dev") != st.st_dev or ent.get("ino") != st.st_ino or st.st_size < ent["end"]:
+        return False
+    if st.st_size == ent["end"]:
+        if st.st_mtime_ns == ent.get("mtime"):
+            return True
+        if ent.get("crc") is None:
+            return False
+        crc = 0
+        try:
+            with open(key, "rb") as fh:
+                left = ent["end"]
+                while left > 0:
+                    chunk = fh.read(min(left, 1 << 20))
+                    if not chunk:
+                        return False
+                    crc = zlib.crc32(chunk, crc)
+                    left -= len(chunk)
+        except OSError:
+            return False
+        return crc == ent["crc"]
+    g = ent["guard"]
+    if not g:
+        return ent["end"] == 0
+    try:
+        with open(key, "rb") as fh:
+            fh.seek(ent["end"] - len(g))
+            return fh.read(len(g)) == g
+    except OSError:
+        return False
+
+
+def _tail_stamps_load(key):
+    """The entry kept beside the file's checkpoint, as written (its guard not yet checked), or None."""
+    f = _tail_stamps_file(key)
+    if f is None:
+        return None
+    try:
+        v = json.loads(f.read_text(encoding="utf-8"))
+        if not isinstance(v, dict) or v.get("v") != _TAIL_STAMP_V or v.get("path") != key:
+            return None
+        return {"path": key, "dev": int(v["dev"]), "ino": int(v["ino"]), "mtime": int(v["mtime"]), "end": int(v["end"]),
+                "guard": bytes.fromhex(v["guard"]), "crc": None if v["crc"] is None else int(v["crc"]), "hw": float(v["hw"]),
+                "before": {str(u): float(t) for u, t in v["before"]}}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _tail_stamps_save(ent):
+    f = _tail_stamps_file(ent["path"])
+    if f is None:
+        return
+    doc = {"v": _TAIL_STAMP_V, "path": ent["path"], "dev": ent["dev"], "ino": ent["ino"], "mtime": ent["mtime"], "end": ent["end"],
+           "guard": ent["guard"].hex(), "crc": ent["crc"], "hw": ent["hw"], "before": [[u, t] for u, t in ent["before"].items()]}
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _writer_tmp(f)
+        tmp.write_text(json.dumps(doc, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, f)
+    except OSError:
+        pass                                      # kept in memory all the same; the next process scans the file again
+
+
+def _tail_stamps_seed(key, path, st):
+    """A fresh entry for file `key`: stepped over the records of the reader's WHOLE entry for it when one stands and still
+    describes the file (no read, no decode), else empty at byte zero."""
+    ent = {"path": key, "dev": st.st_dev, "ino": st.st_ino, "mtime": st.st_mtime_ns, "end": 0, "guard": b"", "crc": 0, "hw": 0.0,
+           "before": {}}
+    with _JSONL_CACHE_LOCK:
+        held = _JSONL_CACHE.get(str(path)) or _JSONL_CACHE.get(key)
+    if held is None or len(held) < 11 or held[5] != 0 or held[8] != st.st_ino or not held[3] or held[9] != 0 or held[10] is None:
+        return ent                    # no WHOLE entry with its crc: nothing proves the bytes before its offset
+    unchanged = held[0] == st.st_mtime and held[1] == st.st_size   # the reader's own hit test: it proved this entry
+    trial = dict(ent, end=int(held[2]), guard=bytes(held[3][-_TAIL_STAMP_GUARD:]), crc=int(held[10]),
+                 mtime=st.st_mtime_ns if unchanged else None)
+    if not _tail_stamps_guard_ok(trial, key, st):
+        return ent
+    for r in held[4]:
+        _tail_stamps_step(trial, r)
+    return trial
+
+
+def tail_stamps(path):
+    """The high-water entry of transcript `path`, current to its last complete line, or None when it cannot be statted:
+    {"hw": the highest counted stamp in the file, "before": {prompt uuid: the highest counted stamp written before it}, ...}.
+    Brought forward from this process's entry, else the one kept beside the checkpoint, else the reader's whole entry, else
+    byte zero, whichever still passes the append guard, by scanning the bytes past it; the entry is kept again when it moved.
+    A whole-history read by nature, so refused inside a tail-first scope over the file."""
+    _tail_guard(path, "tail_stamps")
+    key = os.path.realpath(str(path))
+    try:
+        st = os.stat(key)
+    except OSError:
+        return None
+    with _TAIL_STAMPS_LOCK:
+        ent = _TAIL_STAMPS.get(key)
+    if ent is None or not _tail_stamps_guard_ok(ent, key, st):
+        ent = _tail_stamps_load(key)
+        if ent is not None and not _tail_stamps_guard_ok(ent, key, st):
+            ent = None
+    ent = dict(ent, before=dict(ent["before"])) if ent is not None else _tail_stamps_seed(key, path, st)
+    start = ent["end"]
+    ent["mtime"] = st.st_mtime_ns
+    if st.st_size > start:
+        try:
+            with open(key, "rb") as fh:
+                fh.seek(start)
+                nread, end, crc = 0, start, ent["crc"]
+                remaining = st.st_size - start
+                while remaining > 0:
+                    line = fh.readline(remaining)
+                    if not line or not line.endswith(b"\n"):
+                        nread += len(line)
+                        break                     # a line still being written: the next scan takes it whole
+                    remaining -= len(line)
+                    nread += len(line)
+                    end += len(line)
+                    if crc is not None:
+                        crc = zlib.crc32(line, crc)
+                    for piece in line.splitlines(keepends=True):   # the reader's boundaries (_scan_jsonl_stream)
+                        piece = piece.strip()
+                        if piece:
+                            try:
+                                _tail_stamps_step(ent, json.loads(piece.decode("utf-8", "replace")))
+                            except ValueError:
+                                pass
+                if end > start:
+                    fh.seek(max(0, end - _TAIL_STAMP_GUARD))
+                    ent["guard"] = fh.read(min(_TAIL_STAMP_GUARD, end))
+                    ent["end"], ent["crc"] = end, crc
+        except OSError:
+            return None
+        if nread:
+            _count_read(key, nread)
+    with _TAIL_STAMPS_LOCK:
+        was = _TAIL_STAMPS.get(key) or {}
+        moved = (ent["end"], ent["mtime"]) != (was.get("end"), was.get("mtime"))
+        _TAIL_STAMPS[key] = ent
+    if moved:
+        _tail_stamps_save(ent)
+    return ent
+
+
+def tail_window(leaf, min_events=1, max_bytes=None, stamps=None):
     """(window, None) for the tail of transcript `leaf` from the boundary nearest its end that holds at least `min_events`
     user and assistant records and passes every rule above, or (None, reason) when none does: the search REFUSES, it never
     relaxes a rule. Reads back from the end of the file, 256 KiB and then four times as much again while a boundary may
@@ -11638,7 +11863,9 @@ def tail_window(leaf, min_events=1, max_bytes=None):
     to start at), whole-file (the boundary is the file's first record: the whole parse is the tail parse), no-predecessor,
     predecessor-not-assistant, turn-open, predecessor-model, parent-not-predecessor, clock, uuid-repeat, stamp-floor, chain,
     compaction-in-window, tool-result-before-window, carry, command-twin, no-boundary (the tries or the bytes ran out),
-    and empty or unreadable for the file itself."""
+    and empty or unreadable for the file itself. With `stamps` (tail_stamps' entry, as tail_open passes it) a boundary that
+    passed every rule is also refused when a record before it, read or not, is stamped after the reply it follows
+    (high-water), or when the entry has not reached it (high-water-unknown: appended after the scan)."""
     leaf = str(leaf)
     try:
         st = os.stat(leaf)
@@ -11696,6 +11923,9 @@ def tail_window(leaf, min_events=1, max_bytes=None):
                     return None, why or "no-boundary"
                 deep += 1
                 reason = _tail_refusal(recs, ts, i, j)
+                if reason is None and stamps is not None:
+                    hw = stamps["before"].get(r["uuid"])
+                    reason = "high-water-unknown" if hw is None else "high-water" if hw > ts[j] else None
                 if reason is None:
                     p = recs[j]
                     return TailWindow(leaf, offs[i], end, (st.st_mtime_ns, st.st_size, st.st_ino), recs[i:], r["uuid"], ts[i],
@@ -11711,6 +11941,45 @@ def tail_window(leaf, min_events=1, max_bytes=None):
                 why = "no-prompt" if not prompts else "too-short" if whole else "no-boundary"
             return None, why
         span = min(cap, span * 4)
+
+
+def tail_open(leaf, *, files, cut_armed, min_events=1, max_bytes=None):
+    """(window, None) or (None, reason): THE way to a window tail_scope takes (it refuses any other, "unopened"), so a caller
+    cannot build from a window whose gates it forgot. tail_window's search, given the leaf's high-water entry, then the gates
+    that need more than the records in hand, each a refusal by name:
+      pending-cut           `cut_armed`: a rollback is armed, and the whole parse reads a cut the file does not show;
+      high-water            (tail_window) a record written before the boundary, read or not, is stamped after the reply before
+                            it; high-water-unknown, the boundary was appended after the scan;
+      sibling-file-active   another file of `files` (every transcript file the whole parse reads: the leaf's candidates closed
+                            over the resume lineage) was written at or after the boundary's stamp;
+      sibling-high-water    another file holds a counted record stamped after the reply before the boundary (it would sort
+                            into the window).
+    The window then names `files` (TailWindow.also), so its scope refuses a whole read of any of them, and is marked opened.
+    Keyword-only, with no default for `files` or `cut_armed`: a caller states both. Refused inside a scope over the leaf, like
+    every whole read (its stamps are one)."""
+    _tail_guard(leaf, "tail_open")
+    if cut_armed:
+        return None, "pending-cut"
+    stamps = tail_stamps(leaf)
+    if stamps is None:
+        return None, "unreadable"
+    win, why = tail_window(leaf, min_events, max_bytes, stamps=stamps)
+    if win is None:
+        return None, why
+    for c in files or ():
+        if os.path.realpath(str(c)) == win.key:
+            continue
+        try:
+            if os.stat(c).st_mtime >= win.t:
+                return None, "sibling-file-active"
+        except OSError:
+            continue
+        other = tail_stamps(c)
+        if other is None or other["hw"] > win.prev_t:
+            return None, "sibling-high-water"
+    win.also(files)
+    win.opened = True
+    return win, None
 
 
 def tail_parse(win, rompuuid=None, states=None, postal_log=None, now=None, sdk_human=False, name=None):
@@ -11793,7 +12062,7 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
                      _thread_tail_parse), never the parent's history the fork copied in front of them.
     """
     leaf_path = Path(leaf_path)
-    _tf = getattr(_TAIL_SCOPE, "win", None)         # a tail-first scope over this leaf: only the window's own records parse
+    _tf = _TAIL_SCOPE.win                           # a tail-first scope over this leaf: only the window's own records parse
     if _tf is not None and not _tf.holds(leaf_path):
         _tf = None
     if _tf is not None and tail_records is not _tf.records:

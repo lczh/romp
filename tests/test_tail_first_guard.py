@@ -14,8 +14,12 @@ Pinned here:
   * the scope is the calling thread's, and ends on exit and on a raise;
   * the provisional build keeps nothing: no parse stored, no fold, no reader entry, no page cache, no checkpoint, and it
     is the same frame cold as warm;
-  * the shadow is off unless STATE/tail-first-shadow says so, waits for the background gate before each step, claims no
-    foreground of its own, and its thread ends with the loops.
+  * a window reaches a scope only through em.tail_open, whose gates (an armed rollback, another file of the conversation
+    written inside the window, the high-water stamps) cannot be skipped by building from tail_window's answer;
+  * the kernel's memos derived from whole parses (the message-caption map, the task store's content-join answer) are
+    refused inside the scope, warm or cold, and the caption map's union never misses a submap a call left stored;
+  * the shadow is off unless STATE/tail-first-shadow says so, compares once per turn end and transcript state, waits
+    for the background gate before each step, claims no foreground of its own, and its thread ends with the loops.
 Synthetic transcripts only."""
 import ast
 import json
@@ -101,7 +105,7 @@ class Harness(unittest.TestCase):
         km._live_map = lambda: {}
         self.fresh()
         self.reset_shadow()
-        self.win, why = em.tail_window(self.leaf, 6)
+        self.win, why = em.tail_open(self.leaf, files=[self.leaf], cut_armed=False, min_events=6)
         self.assertIsNotNone(self.win, why)
 
     def tearDown(self):
@@ -114,10 +118,16 @@ class Harness(unittest.TestCase):
     def reset_shadow(self):
         with km._TAIL_FIRST_LOCK:
             km._TAIL_FIRST_QUEUE.clear()
-            km._TAIL_FIRST_STATS.update(offered=0, dropped=0, attempts=0, refused={}, skipped={}, matched=0, mismatched=0,
-                                        ms=0.0, msMax=0.0)
+            km._TAIL_FIRST_STATS.update(offered=0, dropped=0, unmoved=0, attempts=0, refused={}, skipped={}, matched=0,
+                                        mismatched=0, ms=0.0, msMax=0.0)
+            km._TAIL_FIRST_ENDS.clear()
+            km._TAIL_FIRST_LAST.clear()
         km._TAIL_FIRST_SAID.clear()
         km._TAIL_FIRST_WAKE.clear()
+
+    def turn_ended(self, sid, at):
+        """The Stop hook's stamp of a turn end on the session's registry entry (lastStopAt), the event the offer keys on."""
+        (jd.STATE / "sdk" / (sid + ".json")).write_text(json.dumps({"lastStopAt": int(at)}))
 
     def fresh(self):
         """A kernel restart's in-memory side (the caches a whole build fills)."""
@@ -138,6 +148,8 @@ class Harness(unittest.TestCase):
         km._built_chat.clear()
         km._prev_chat_events.clear()
         km._RENDER_FLOOR.clear()
+        with em._TAIL_STAMPS_LOCK:
+            em._TAIL_STAMPS.clear()
 
     def warm(self):
         """A whole build of the session and a read through each memoizing reader: every memo a whole read fills is full."""
@@ -165,6 +177,8 @@ class Harness(unittest.TestCase):
             ("parse_session", lambda: em.parse_session(path)),
             ("jd.parsed_session", lambda: jd.parsed_session(os.path.basename(path)[:-6], [path], NOW)),
             ("jd.parsed_session_peek", lambda: jd.parsed_session_peek(os.path.basename(path)[:-6], [path])),
+            ("tail_stamps", lambda: em.tail_stamps(path)),
+            ("tail_open", lambda: em.tail_open(path, files=[path], cut_armed=False)),
         ]
 
 
@@ -217,7 +231,7 @@ class TestEveryReaderRefusesTheScopedFile(Harness):
             (first if is_first else later).add(fn.name)
         self.assertEqual(first, {"_read_jsonl", "_read_jsonl_incremental", "_read_jsonl_entry", "_read_jsonl_entry_unlocked",
                                  "cached_whole_records", "read_records_detached", "fold_records", "_read_record_at",
-                                 "_assemble", "_file_head_t"})
+                                 "_assemble", "_file_head_t", "tail_stamps", "tail_open"})
         self.assertEqual(later, {"__enter__", "hydrate"}, "serve_records.__enter__ and hydrate guard per file, before its read")
 
     def test_another_file_reads_as_ever_inside_the_scope(self):
@@ -266,6 +280,8 @@ class TestTheParseTakesTheWindowsOwnRecords(Harness):
         self.assertEqual((tree["turns"][0]["trigger"] or {}).get("uuid"), self.win.uuid)
 
     def test_tail_parse_opens_at_the_boundary_and_stores_nothing(self):
+        kept = sorted(os.listdir(jd.STATE / "checkpoints"))
+        self.assertEqual([n for n in kept if not n.endswith(".tail-stamps")], [], "only the high-water entry tail_open keeps")
         tree = em.tail_parse(self.win, rompuuid=SID, now=NOW, postal_log=str(jd.MESSAGES))   # this root's log, as the kernel passes
         self.assertEqual([t["trigger"]["uuid"] for t in tree["turns"]], ["u6", "u7"])
         self.assertIsNone(em.tail_scope_window(), "the scope ended with the parse")
@@ -273,7 +289,7 @@ class TestTheParseTakesTheWindowsOwnRecords(Harness):
             self.assertFalse(em._JSONL_CACHE, "no reader entry")
         with em._ASM_LOCK:
             self.assertFalse(em._ASM_CACHE, "no assembly entry")
-        self.assertEqual(os.listdir(jd.STATE / "checkpoints"), [], "no checkpoint")
+        self.assertEqual(sorted(os.listdir(jd.STATE / "checkpoints")), kept, "no checkpoint")
 
     def test_the_judges_parse_store_is_refused_even_when_it_holds_the_tree(self):
         self.warm()
@@ -374,7 +390,7 @@ class TestTheScopeIsTheCallingThreads(Harness):
                 em.read_records_detached(self.leaf)
         self.assertIsNone(em.tail_scope_window(), "a refusal that escaped the block ended the scope")
         self.assertEqual(len(em.read_records_detached(self.leaf)), 32)
-        other, why = em.tail_window(self.other, 2)
+        other, why = em.tail_open(self.other, files=[self.other], cut_armed=False, min_events=2)
         with em.tail_scope(self.win):
             with em.tail_scope(other):
                 self.assertIs(em.tail_scope_window(), other)
@@ -401,7 +417,9 @@ class TestTheProvisionalBuildKeepsNothing(Harness):
 
     def test_cold_it_fills_no_cache(self):
         before = self.stores()
-        self.assertEqual({k: v for k, v in before.items() if v}, {}, "a kernel just restarted")
+        self.assertEqual({k: v for k, v in before.items() if v and k != "checkpoints"}, {}, "a kernel just restarted")
+        self.assertEqual([n for n in before["checkpoints"] if not n.endswith(".tail-stamps")], [],
+                         "nothing but the high-water entry tail_open kept, before the build")
         prov = km._tail_first_frame(SID, NOW, {}, self.win)
         self.assertEqual([e["uuid"] for e in prov["events"] if e.get("kind") == "user"], ["u6", "u7"])
         self.assertEqual(self.stores(), before, "no parse, fold, reader entry, page cache or checkpoint was written")
@@ -464,8 +482,11 @@ class TestTheSwitch(Harness):
         for word in ("on\n", "ON", "shadow", "1", "true"):
             self.flip(word)
             self.assertEqual(km._tail_first_mode(), "shadow", repr(word))
+        self.assertFalse(km._tail_first_offer(SID), "no turn has ended: nothing to compare yet")
+        self.turn_ended(SID, NOW - 50)
         self.assertTrue(km._tail_first_offer(SID))
-        self.assertTrue(km._tail_first_offer(SID), "a session already waiting is offered again, and waits once")
+        self.turn_ended(SID, NOW - 10)
+        self.assertTrue(km._tail_first_offer(SID), "a session already waiting is offered again at its next turn end, and waits once")
         rep = km._tail_first_report()
         self.assertEqual((rep["mode"], rep["offered"], rep["queued"], rep["attempts"]), ("shadow", 2, 1, 0))
         self.assertTrue(km._TAIL_FIRST_WAKE.is_set(), "an offer wakes the shadow's thread")
@@ -474,8 +495,8 @@ class TestTheSwitch(Harness):
         self.assertFalse(km._tail_first_offer(OTHER))
 
     def test_the_report_block(self):
-        self.assertEqual(set(km._tail_first_report()), {"mode", "offered", "dropped", "queued", "attempts", "refused", "skipped",
-                                                        "matched", "mismatched", "ms", "msMax"})
+        self.assertEqual(set(km._tail_first_report()), {"mode", "offered", "dropped", "unmoved", "queued", "attempts", "refused",
+                                                        "skipped", "matched", "mismatched", "ms", "msMax"})
         self.warm()
         self.assertEqual(km._tail_first_shadow_job(SID, now=NOW, live_map={}, min_events=6), ("matched", None))
         self.assertEqual(km._tail_first_shadow_job(SID, now=NOW, live_map={}, min_events=400), ("refused", "too-short"))
@@ -492,9 +513,34 @@ class TestTheSwitch(Harness):
         self.assertGreaterEqual(rep["ms"], rep["msMax"])
         json.dumps(rep)
 
+    def test_a_comparison_follows_a_turn_end_never_a_streaming_build(self):
+        """Every chat build offers; only the first one after a turn end joins the queue. A comparison re-walks the history
+        before the window, so it is paid once per turn, not once per build of a streaming turn."""
+        self.flip("on")
+        for _ in range(5):
+            self.assertFalse(km._tail_first_offer(SID), "builds while the first turn streams")
+        self.turn_ended(SID, NOW - 100)
+        self.assertTrue(km._tail_first_offer(SID))
+        for _ in range(5):
+            self.assertFalse(km._tail_first_offer(SID), "builds after that end, the next turn streaming")
+        self.turn_ended(SID, NOW - 10)
+        self.assertTrue(km._tail_first_offer(SID))
+        self.assertEqual(km._tail_first_report()["offered"], 2)
+
+    def test_one_comparison_per_transcript_state(self):
+        """A second turn end that wrote nothing to the transcript (a stop on the same bytes) is counted, not compared."""
+        self.assertTrue(km._tail_first_due(SID))
+        self.assertFalse(km._tail_first_due(SID))
+        self.assertEqual(km._tail_first_report()["unmoved"], 1)
+        with open(self.leaf, "a") as fh:
+            fh.write(json.dumps(U(T0 + 900, "step 9 of the tag filter", "u9", "z7")) + "\n")
+        self.assertTrue(km._tail_first_due(SID))
+        self.assertTrue(km._tail_first_due(OTHER), "per session")
+
     def test_the_queue_is_bounded(self):
         self.flip("on")
         for i in range(km._TAIL_FIRST_QUEUE_MAX + 5):
+            self.turn_ended("sid-%d" % i, NOW - 10)
             km._tail_first_offer("sid-%d" % i)
         rep = km._tail_first_report()
         self.assertEqual((rep["queued"], rep["dropped"]), (km._TAIL_FIRST_QUEUE_MAX, 5))
@@ -514,6 +560,175 @@ class TestTheSwitch(Harness):
         for word in km._TAIL_FIRST_ON_WORDS:
             self.assertIn("`%s`" % word, entry, "an on word")
         self.assertIn("serves nothing", entry)
+
+
+class TestOneEntryPoint(Harness):
+    """em.tail_open is the only way to a window a scope takes: the gates that need more than the records in hand live there,
+    behind one call, and the scope refuses a window that did not come through it."""
+
+    def test_a_window_the_search_hands_out_is_refused_by_the_scope(self):
+        win, why = em.tail_window(self.leaf, 6)
+        self.assertIsNone(why)
+        with self.assertRaises(em.TailRefused) as cm:
+            with em.tail_scope(win):
+                pass
+        self.assertEqual(cm.exception.reason, "unopened")
+        self.assertIsNone(em.tail_scope_window())
+        for build in (lambda: km._tail_first_frame(SID, NOW, {}, win), lambda: em.tail_parse(win, rompuuid=SID, now=NOW)):
+            with self.assertRaises(em.TailRefused) as cm:
+                build()
+            self.assertEqual(cm.exception.reason, "unopened")
+        self.assertTrue(self.win.opened, "tail_open's window")
+
+    def test_tail_open_runs_every_gate_and_names_the_files(self):
+        with self.assertRaises(TypeError):
+            em.tail_open(self.leaf)                                    # the files and the rollback state are stated, always
+        self.assertEqual(em.tail_open(self.leaf, files=[self.leaf], cut_armed=True, min_events=6), (None, "pending-cut"))
+        first = str(self.proj / "first.jsonl")                         # the conversation's earlier file, all of it an hour older
+        recs = transcript("f", turns=2)
+        for r in recs:
+            r["timestamp"] = iso(em.parse_z(r["timestamp"]) - 3600)
+        Path(first).write_text("".join(json.dumps(r) + "\n" for r in recs))
+        os.utime(first, (T0 + 650, T0 + 650))                          # written after the boundary's stamp
+        self.assertEqual(em.tail_open(self.leaf, files=[self.leaf, first], cut_armed=False, min_events=6),
+                         (None, "sibling-file-active"))
+        os.utime(first, (T0 - 60, T0 - 60))                            # last written before it
+        win, why = em.tail_open(self.leaf, files=[self.leaf, first], cut_armed=False, min_events=6)
+        self.assertIsNone(why)
+        self.assertTrue(win.holds(first), "the scope refuses the other file too")
+        with em.tail_scope(win):
+            with self.assertRaises(em.WholeHistoryRead):
+                em.read_records_detached(first)
+        os.utime(self.other, (T0 - 60, T0 - 60))                       # a file whose records are stamped inside the window
+        self.assertEqual(em.tail_open(self.leaf, files=[self.leaf, self.other], cut_armed=False, min_events=6),
+                         (None, "sibling-high-water"))
+
+    def test_the_kernels_road_reads_the_rollback_and_the_files(self):
+        saved = jd._PENDING_CUT_FN
+        jd._PENDING_CUT_FN = lambda fsid: "a1" if fsid == SID else ""
+        try:
+            self.assertEqual(km._tail_first_open(SID, self.leaf, 6), (None, "pending-cut"))
+        finally:
+            jd._PENDING_CUT_FN = saved
+        win, why = km._tail_first_open(SID, self.leaf, 6)
+        self.assertEqual((win.uuid, why, win.opened), ("u6", None, True))
+        src = open(os.path.join(ROOT, "kernel", "kernel.py")).read()
+        job = src[src.index("def _tail_first_shadow_job("):src.index("def _tail_first_mismatch(")]
+        self.assertIn("_tail_first_open(sid, path, min_events)", job, "the shadow takes its window from the one road")
+        for gone in ("em.tail_window(", "_pending_cut(", ".also("):
+            self.assertNotIn(gone, job, "no gate of the road's is the job's own")
+
+
+class TestTheKernelsDerivedMemos(Harness):
+    """Memos the kernel keeps of whole parses: inside a scope they are refused before they are looked at, warm or cold,
+    so a provisional build shows the piece pending whatever an earlier build left behind."""
+
+    def test_the_caption_map_is_refused_inside_the_scope_even_when_current(self):
+        km._msg_sum_cache.clear()
+        saved = km._msg_sum_scan_session
+        km._msg_sum_scan_session = lambda sid, path, now: {"m-%s" % sid[:4]: "a synthetic caption"}
+        try:
+            warm = km._msg_summaries()
+            self.assertTrue(warm, "outside the scope the map answers")
+            table = dict(km._msg_sum_cache["per"])
+            with em.tail_scope(self.win):
+                with self.assertRaises(em.WholeHistoryRead):
+                    km._msg_summaries()
+                km._live_scope.msgsum = [warm]                         # a pusher cycle's slot, already fetched
+                try:
+                    with self.assertRaises(em.WholeHistoryRead):
+                        km._msg_summaries_scoped()
+                finally:
+                    del km._live_scope.msgsum
+            self.assertEqual(km._msg_sum_cache["per"], table, "the refusal touched nothing")
+            self.assertIs(km._msg_summaries(), warm)
+        finally:
+            km._msg_sum_scan_session = saved
+            km._msg_sum_cache.clear()
+
+    def test_the_caption_maps_union_never_misses_a_stored_submap(self):
+        """A call that leaves early (a BaseException past the scan's `except Exception`) after one session's submap moved:
+        the next call's union holds it, even when that next call itself changes nothing (the session that raised had no
+        submap yet, and is gone)."""
+        class Stop(BaseException):
+            pass
+        km._msg_sum_cache.clear()
+        caps = {SID: "first caption"}
+        saved = (km._msg_sum_scan_session, km._msg_sum_key, self.rows)
+        km._msg_sum_key = lambda s: caps.get(s["sid"])
+
+        def scan(sid, path, now):
+            if sid == OTHER:
+                raise Stop()
+            return {"m-" + sid: caps[sid]}
+        km._msg_sum_scan_session = scan
+        try:
+            self.rows = [r for r in saved[2] if r["sid"] == SID]
+            self.assertEqual(km._msg_summaries(), {"m-" + SID: "first caption"})
+            caps[SID] = "first caption, revised"
+            self.rows = list(saved[2])                                 # a second session appears, and its first scan raises
+            with self.assertRaises(Stop):
+                km._msg_summaries()
+            self.rows = [r for r in saved[2] if r["sid"] == SID]       # and it has ended: this call changes nothing
+            self.assertEqual(km._msg_summaries(), {"m-" + SID: "first caption, revised"})
+        finally:
+            km._msg_sum_scan_session, km._msg_sum_key, self.rows = saved
+            km._msg_sum_cache.clear()
+
+    def test_the_task_stores_content_join_answer_is_refused_inside_the_scope(self):
+        base = self.td / "claude"
+        saved = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(base)
+        (base / "tasks" / "team-synthetic").mkdir(parents=True)
+        km._task_dir_hint[SID] = "team-synthetic"                      # what an earlier whole build's join found
+        try:
+            self.assertEqual(km._task_store_known(SID), base / "tasks" / "team-synthetic")
+            with em.tail_scope(self.win):
+                with self.assertRaises(em.WholeHistoryRead):
+                    km._task_store_known(SID)
+                prov = km._tail_first_pieces(SID, self.leaf, {}, None, only={"todo"})
+            self.assertEqual(prov["todo"], {"pending": "todo"})
+            (base / "tasks" / SID).mkdir()
+            with em.tail_scope(self.win):
+                self.assertEqual(km._task_store_known(SID), base / "tasks" / SID, "a store named after the session is no join")
+        finally:
+            km._task_dir_hint.pop(SID, None)
+            if saved is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = saved
+
+
+class TestTheGuardsOwnCost(Harness):
+    def test_read_jsonl_refuses_at_the_call(self):
+        """A generator's body waits for the first next(): an iterator taken inside the scope and drained outside it would
+        have read the whole file. The guard fires when the call is made."""
+        with em.tail_scope(self.win):
+            with self.assertRaises(em.WholeHistoryRead):
+                em._read_jsonl(self.leaf)                              # not iterated
+        self.assertEqual(len(list(em._read_jsonl(self.leaf))), 32)
+
+    def test_the_scope_is_a_thread_local_with_a_class_default(self):
+        self.assertIsInstance(em._TAIL_SCOPE, threading.local)
+        self.assertIsNone(type(em._TAIL_SCOPE).win, "a thread that never opened a scope reads the class's None")
+        seen = []
+        with em.tail_scope(self.win):
+            th = threading.Thread(target=lambda: seen.append(em.tail_scope_window()))
+            th.start()
+            th.join(10)
+        self.assertEqual(seen, [None])
+        n = 200000
+        t0 = time.perf_counter()
+        for _ in range(n):
+            em._tail_guard(self.leaf, "probe")
+        inactive = (time.perf_counter() - t0) / n * 1e6
+        plain = threading.local()
+        t0 = time.perf_counter()
+        for _ in range(n):
+            getattr(plain, "win", None)
+        getattr_default = (time.perf_counter() - t0) / n * 1e6
+        print("\nthe guard outside a scope: %.3f us a call (getattr with a default on a plain threading.local: %.3f us)"
+              % (inactive, getattr_default))
 
 
 class TestTheShadowNeverRunsBesideABuild(Harness):
@@ -600,6 +815,7 @@ class TestTheShadowNeverRunsBesideABuild(Harness):
         th = threading.Thread(target=km._tail_first_shadow_loop, daemon=True)
         th.start()
         try:
+            self.turn_ended(SID, NOW - 10)
             self.assertTrue(km._tail_first_offer(SID))
             deadline = time.time() + 10
             while km._tail_first_report()["attempts"] < 1 and time.time() < deadline:
