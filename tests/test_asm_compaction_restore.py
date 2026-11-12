@@ -1591,6 +1591,102 @@ class CompactionRestore(Harness):
         self.assertEqual((modes, moved.get("restore:summaryOwnerRefused", 0)), (["full"], 1), "refused once: %s" % moved)
         self.assertEqual(boot_modes, ["restore"], "the rewritten document restores")
 
+    def _older_document_bytes(self, name, data):
+        """`data`, a transcript's bytes, documented as the writer did before the owner rule (see _older_document)."""
+        d_ = self.td / name
+        d_.mkdir()
+        path = str(d_ / (SID + ".jsonl"))
+        Path(path).write_bytes(data)
+        with mock.patch.object(em.FileAdapter, "_summary_owner", lambda self_, u: None):
+            self.fresh()
+            self.parse(path)
+            self.assertTrue(self.doc(path), "the premise: the document is written")
+        d = _doc(path)
+        d.pop("sumOwner", None)
+        _write_doc(path, d)
+        self.fresh()
+        with em._ASM_CKPT_LOCK:
+            em._ASM_SUMOWNER_MEMO.clear()
+        return path
+
+    @staticmethod
+    def _mixed_records():
+        """A session compacted once in the older shape (b40, its summary parented on it), then once in the new shape (its
+        summary stamped before its boundary: the older rule gave it to b40 too, over b40's own), then once more in the older
+        shape so the document's cut falls past both: b40's value comes from the derivation alone, its own summary, which the
+        carry does not hold (the new-shape summary overwrote it there)."""
+        recs = episode(NOW - 86400, turns=80, compact_every=40)
+        t = max(em.parse_z(r["timestamp"]) for r in recs) + 120
+        comp, s = early_summary_compaction(t, "mixed", recs[-1]["uuid"])
+        recs += comp + [G.aline(t + 40, "carrying on", "mx_a", s, stop="end_turn")] + turn(t + 100, "mixed", "mx_a")
+        last, s2 = compaction(t + 400, "mixlast", recs[-1]["uuid"])
+        return recs + last + turn(t + 500, "mixlast", s2)
+
+    def test_an_older_document_over_a_bare_cr_parses_whole_once(self):
+        """The final review of 2026-11-12: the reader splits a line at a bare CR as at a newline (bytes.splitlines) and skips a
+        blank line, so one blank line and one line holding two records split by a bare CR keep the file's line count equal to
+        its record count while every index after them shifts by one: the derivation read the wrong lines and served b40's card
+        empty. A bare CR before the cut now refuses the restore once; the whole parse's document restores after."""
+        recs = self._mixed_records()
+        lines = [json.dumps(r) for r in recs]
+        k = next(j for j, r in enumerate(recs) if r.get("isCompactSummary") and r.get("parentUuid") == "b40")
+        # two records on one line split by a bare CR before b40's summary, a blank line after the record that follows it: between
+        # the two, each line number is one short of its record index, and the summary's own line sits at b40's index
+        data = (lines[0] + "\r" + "\n".join(lines[1:k + 2]) + "\n\n" + "\n".join(lines[k + 2:]) + "\n").encode("utf-8")
+        path = self._older_document_bytes("older-bare-cr", data)
+        got, modes, moved = self._restore_counted(path)
+        self.fresh()
+        boot, boot_modes, _m = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertTrue(self._summary_of(cold, "b40"), "the premise: b40's card carries its summary")
+        self.assertSameTree(got, cold, "the whole parse")
+        self.assertSameTree(boot, cold, "the next restart")
+        self.assertEqual((modes, moved.get("restore:summaryOwnerRefused", 0)), (["full"], 1), "refused once: %s" % moved)
+        self.assertEqual(boot_modes, ["restore"], "the rewritten document restores")
+
+    def test_an_older_document_whose_summary_holds_invalid_utf8_restores_exact(self):
+        """The final review of 2026-11-12: the reader decodes a line with bad bytes replaced and keeps it; the scan decoded the
+        raw bytes, met the error and dropped the summary, so b40's card was served empty. The scan now decodes as the reader."""
+        recs = self._mixed_records()
+        i = next(k for k, r in enumerate(recs) if r.get("isCompactSummary") and r.get("parentUuid") == "b40")
+        recs[i] = dict(recs[i], message={"role": "user", "content": "summary so far: the notes-api search BADBYTES is wired"})
+        data = "".join(json.dumps(r) + "\n" for r in recs).encode("utf-8").replace(b"BADBYTES", b"\xff\xfe")
+        path = self._older_document_bytes("older-bad-utf8", data)
+        got, modes, moved = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertIn("\ufffd", self._summary_of(cold, "b40") or "", "the premise: a cold parse keeps the summary, bad bytes replaced")
+        self.assertSameTree(got, cold, "the restore")
+        self.assertEqual((modes, moved.get("full", 0)), (["restore"], 0), "restored: %s" % moved)
+
+    def test_an_older_documents_derivation_is_saved_beside_it_for_the_next_process(self):
+        """The final review of 2026-11-12: the derivation reads the pre-cut bytes (2.2 s for the live host's 1 GB document), and
+        an older document is replaced only by its next write, so every boot paid it again. The restore saves the derivation in
+        the document's sidecar against the document file's stat and each lineage file's inode and scanned bytes: the next
+        process restores from it with no read (restore:summaryOwnerSaved), still after an append, and a changed document file
+        sets it aside."""
+        path = self._older_document_bytes("older-saved", "".join(json.dumps(r) + "\n" for r in self._mixed_records()).encode("utf-8"))
+        got, modes, moved = self._restore_counted(path)
+        meta = json.loads(em._asm_ckpt_file(path).with_name(em._asm_ckpt_file(path).name + ".meta").read_text())
+        self.assertIn("sumOwnerScan", meta, "the derivation is saved in the sidecar")
+        self.assertEqual((meta.get("av"), sorted(meta.get("files") or [])), (_doc(path)["av"], sorted(_doc(path)["files"])),
+                         "the sidecar's own fields stay")
+        self._append(path, turn(self.after(self._mixed_records(), 300), "saved-more", "xa_mixlast"))
+        self.fresh()
+        with em._ASM_CKPT_LOCK:
+            em._ASM_SUMOWNER_MEMO.clear()
+        got2, modes2, moved2 = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertSameTree(got2, cold, "the next process, after an append")
+        self.assertEqual((modes, modes2, moved2.get("restore:summaryOwnerSaved", 0)), (["restore"], ["restore"], 1),
+                         "the next process restores from the saved derivation: %s" % moved2)
+        d = _doc(path)                                               # the document file changes: the saved derivation is set aside
+        _write_doc(path, d)
+        self.fresh()
+        with em._ASM_CKPT_LOCK:
+            em._ASM_SUMOWNER_MEMO.clear()
+        _g, modes3, moved3 = self._restore_counted(path)
+        self.assertEqual((modes3, moved3.get("restore:summaryOwnerSaved", 0)), (["restore"], 0), "derived again: %s" % moved3)
+
     def test_an_older_document_that_cannot_be_corrected_exactly_parses_whole_once(self):
         """The backstop: a transcript's first compaction of the new shape had no owner under the older rule, so no restore
         window opened after its summary, and with the owner it opens; a user record between that summary and the next reply

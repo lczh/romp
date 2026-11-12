@@ -3710,11 +3710,15 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   isCompactSummary (a summary emits no atom, so neither the rows nor the atoms
   flag one; each kept user row is a summary exactly when the line at its
   record index is, the line count before the cut against the document's record
-  count proving the lines are the records), every summary is assigned again
-  before the pass, chainless ones included, with no version bump and no whole
-  parse (on the live host at the change: 232 documents, none refused, 164
-  corrected, the read up to 2 s for 1 GB of pre-cut bytes, once per document
-  until the next write gives it `sumOwner`); the derivation must agree
+  count proving the lines are the records once the bytes hold no bare CR,
+  which the reader also splits a line at; a line is decoded as the reader
+  decodes it, bad bytes replaced), every summary is assigned again before the
+  pass, chainless ones included, with no version bump and no whole parse; the
+  result is saved in the document's sidecar against the document file's stat
+  and each lineage file's inode and scanned bytes, so the read is paid once
+  per document (`restore:summaryOwnerSaved` counts a restore served from it;
+  on the live host at the change: 232 documents, none refused, 164 corrected,
+  the read up to 2 to 3.5 s for 1 GB of pre-cut bytes); the derivation must agree
   with every assignment the document's carry holds, and a moved summary that
   changes whether a restore window opens must be followed by a reply before
   any other user record, else the restore refuses once
