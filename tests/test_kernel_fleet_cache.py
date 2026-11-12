@@ -148,25 +148,24 @@ class FleetCacheTest(unittest.TestCase):
         T = 1789500002.5
         tsid = "77777777-2222-4333-8444-000000000777"
         saved = (dict(km._built_thread), km._views_dirty[0], km._thread_reg, km._sdk_sess, km._chat_build_sig, km._chat_sig_ok,
-                 km.build_session, km._comment_thread_row_created)
+                 km.build_session)
         try:
             km._thread_reg = lambda t: {}
             km._sdk_sess = lambda t, now: object()
             km._chat_build_sig = lambda *a, **k: ("SIG",)
             km._chat_sig_ok = lambda t: None
             km.build_session = lambda t, now, live_map=None, **kw: {"events": [{"uuid": "fresh"}]}   # kw: the thread's cut (thread_cut)
-            km._comment_thread_row_created = lambda t: 0
             key = ("SIG", None)                                                     # the stubbed signature plus no states row
             with mock.patch.object(km.time, "time", return_value=T):
                 km._built_thread[tsid] = (key, None, [{"uuid": "stale"}], km.time.time())   # an entry whose build started at T
                 km._views_dirty[0] = km.time.time()                                        # the mutation lands at T
-                got = km._thread_events(tsid, None, int(T), {})
+                got = km._thread_events(tsid, None, 0, int(T), {})
             self.assertEqual(got, [{"uuid": "fresh"}], "an entry built in the mark's tick is a miss, rebuilt (the base served the stale events)")
             km._views_dirty[0] = T - 1e-6
-            self.assertEqual(km._thread_events(tsid, None, int(T), {}), [{"uuid": "fresh"}], "a mark older than the start serves the (now fresh) entry")
+            self.assertEqual(km._thread_events(tsid, None, 0, int(T), {}), [{"uuid": "fresh"}], "a mark older than the start serves the (now fresh) entry")
         finally:
             km._built_thread.clear(); km._built_thread.update(saved[0])
-            (km._views_dirty[0], km._thread_reg, km._sdk_sess, km._chat_build_sig, km._chat_sig_ok, km.build_session, km._comment_thread_row_created) = saved[1:]
+            (km._views_dirty[0], km._thread_reg, km._sdk_sess, km._chat_build_sig, km._chat_sig_ok, km.build_session) = saved[1:]
 
     def test_a_mutation_landing_mid_build_is_not_swallowed_by_that_build(self):
         """A build takes ~1-1.6s and reads the stores one session at a time, so a mutation landing

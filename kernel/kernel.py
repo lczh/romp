@@ -21304,7 +21304,7 @@ _built_thread = {}       # thread sid -> (key, cut_uuid, events, build_started_a
 _thread_fold_keep = [set(), set()]   # [last cycle's thread sids, this cycle's]: _push's fold eviction keeps them
 
 
-def _thread_events(tsid, cut_uuid, now, live_map, tm=None, out=None):
+def _thread_events(tsid, cut_uuid, floor_t, now, live_map, tm=None, out=None):
     """The thread rendered with the CHAT's own builder (the user 2026-08-17: the popover shows the
     same thing the chat shows), sliced to AFTER the branch point: build_session on the thread sid
     (reachable via _sdk_sess's reg fallback — no names/ entry), events after the cut record's, the
@@ -21331,14 +21331,20 @@ def _thread_events(tsid, cut_uuid, now, live_map, tm=None, out=None):
     carries it under the thread's sid alone, so no other session's reading moves). `out`, when given, receives what the
     popover's live painters read off the build, served from the cache with the events (_thread_build_live): "chip", the
     build's state chip; "status", the status fields they read (_THREAD_LIVE_STATUS_KEYS); "bgTasks", the build's
-    background tasks (thread-live-2)."""
+    background tasks (thread-live-2).
+
+    `floor_t`: a TIP fork's floor, its row's createdT (0 for a cut fork), handed down by the caller from the thread row it
+    holds, as _thread_messages takes it. It reached here through a module memo the frame filled, which the frame CLEARED
+    once it held more than 512 threads, the entry it had just written included: the thread whose row tipped it over was
+    built with floor 0 and its popover showed the parent's whole copied history as its own, served from the build cache
+    until its transcript moved (2026-11-12)."""
     reg = _thread_reg(tsid)
     if reg.get("forkOf"):
         return []
     live_map = live_map if live_map is not None else {}
     _thread_fold_keep[1].add(tsid)              # this cycle's thread: _push keeps its fold prefix
     sess = _sdk_sess(tsid, now)
-    floor_t = 0 if cut_uuid else int(_comment_thread_row_created(tsid) or 0)
+    floor_t = 0 if cut_uuid else int(floor_t or 0)
     tpath = sess.get("path") if isinstance(sess, dict) else None
     own = _thread_own_records(tsid, tpath, cut_uuid, floor_t) if tpath else None
     tm = tm if tm is not None else live_map.get(tsid)
@@ -21398,14 +21404,13 @@ def _thread_events(tsid, cut_uuid, now, live_map, tm=None, out=None):
             else:
                 evs = evs[at + 1:]                       # sliced to AFTER the branch point (the extension's source pin)
         else:
-            floor = int((_comment_thread_row_created(tsid) or 0))
             # a TIP fork: the copied history keeps its original (older) stamps, under the floor. The build's head cards
             # (the system card, a clear's card: its headCards) sit above that history, and a cut fork slices them off
             # with it; the system card carries no stamp, so the floor kept it and a tip-forked thread (every one on a
             # passage from before the last compaction) opened on "System context" above its own first message
             heads = {c.get("uuid") for c in ((m or {}).get("headCards") or []) if isinstance(c, dict) and c.get("uuid")}
             evs = [e for e in evs if e.get("uuid") not in heads
-                   and (not e.get("ts") or int(em.parse_z(e.get("ts")) or 0) >= floor)]
+                   and (not e.get("ts") or int(em.parse_z(e.get("ts")) or 0) >= floor_t)]
         evs = _thread_opener_shown(evs)
         evs = evs[-80:]
         # an EMPTY result for these inputs is as settled as a full one and is served the same way; only a
@@ -21540,13 +21545,6 @@ def _thread_opener_shown(evs):
     out = list(evs)
     out[i] = dict(evs[i], md=md)
     return out
-
-
-_comment_created_memo = {}                          # tsid -> createdT, for the tip-fork event floor
-
-
-def _comment_thread_row_created(tsid):
-    return _comment_created_memo.get(tsid)
 
 
 _thread_parse_warned = set()                        # (tsid, error) pairs already shouted — once per cause
@@ -21815,9 +21813,6 @@ def _comment_frame_entry(th, be, now, live_map=None, thread_live=None):
     2026-10-14). A dormant thread has no live row and ships chip "": the page reads its raw `state` as before."""
     tsid = str(th.get("sid") or "")
     status = th.get("status") or "open"
-    _comment_created_memo[tsid] = int(th.get("createdT") or 0)
-    if len(_comment_created_memo) > 512:
-        _comment_created_memo.clear()
     # A promoted thread whose session was later ENDED is done, full stop (the user 2026-08-13,
     # who found the highlight still claiming "now its own session" after closing that session):
     # drop it from the frame entirely rather than point at a session that no longer runs. The
@@ -21841,8 +21836,8 @@ def _comment_frame_entry(th, be, now, live_map=None, thread_live=None):
     # the plain projection still computes UNREAD (cheap, mtime-cached); the DISPLAY is the
     # chat's own events from the branch point on (the user 2026-08-17: same component, rail
     # dots and all — tool folds, notice cards, markdown, exactly as the chat renders them)
-    msgs = [] if status == "promoted" else _thread_messages(
-        tsid, str(th.get("cutUuid") or ""), floor_t=(0 if th.get("cutUuid") else int(th.get("createdT") or 0)))
+    floor_t = 0 if th.get("cutUuid") else int(th.get("createdT") or 0)   # a tip fork's floor: the row's own createdT
+    msgs = [] if status == "promoted" else _thread_messages(tsid, str(th.get("cutUuid") or ""), floor_t=floor_t)
     seen = int(th.get("lastSeenT") or 0)
     # the backend's live echoes are read BEFORE the events projection is built (T237b A): build_session
     # → _merge_live_atoms → prune_live retires echoes as their records land — reading after it could
@@ -21856,7 +21851,8 @@ def _comment_frame_entry(th, be, now, live_map=None, thread_live=None):
             _thread_backend_shout(tsid, "live_atoms", e)
     trow = (thread_live or {}).get(tsid) if status == "open" else None   # its live row, when its process runs
     built = {}
-    events = [] if status == "promoted" else _thread_events(tsid, str(th.get("cutUuid") or ""), now, live_map, tm=trow, out=built)
+    events = [] if status == "promoted" else _thread_events(tsid, str(th.get("cutUuid") or ""), floor_t, now, live_map,
+                                                            tm=trow, out=built)
     chip = str(built.get("chip") or "") if trow is not None else ""
     # what the popover's live painters read for a RUNNING thread (thread-live-2): its build's status projection and its
     # background tasks, the very fields a tab's statusline, context gauge and background box read; None for a dormant one

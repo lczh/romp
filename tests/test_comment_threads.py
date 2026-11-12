@@ -2000,7 +2000,7 @@ class ThreadProjection(CommentBase):
         if precompact:
             row["beforeSummary"] = True
         km._save_comments(PARENT, {"threads": [row]})
-        km._built_thread.clear(); km._comments_memo.clear(); km._comment_created_memo.clear()
+        km._built_thread.clear(); km._comments_memo.clear()
         return recs, sent
 
     def _relay_body(self):
@@ -2141,7 +2141,6 @@ class ThreadProjection(CommentBase):
         # head cards (its headCards: the system card, a clear's card) are no part of the thread, and the unstamped
         # system card stayed, so the popover opened on "System context" above the thread's own first message
         self._seed_precompact_thread()
-        km._comment_created_memo[THREAD] = self.now - 110
         stamp = lambda t: iso(t)
         head = {"kind": "system", "uuid": "system:head", "model": "Opus 5"}
         built = [head,
@@ -2154,12 +2153,52 @@ class ThreadProjection(CommentBase):
         km.build_session = lambda sid, now, tm=None, **kw: {"events": [dict(e) for e in built], "headCards": [dict(head)]}
         km._built_thread.pop(THREAD, None)
         try:
-            evs = km._thread_events(THREAD, "", self.now, {})
+            evs = km._thread_events(THREAD, "", self.now - 110, self.now, {})   # the row's createdT, with no frame built first
         finally:
             km.build_session = real
             km._built_thread.pop(THREAD, None)
         self.assertEqual([e["uuid"] for e in evs], ["cu1", "br1", "ca1"])
         self.assertEqual(evs[0]["md"], "Why jitter at all?")
+
+    def test_every_tip_fork_keeps_its_floor_past_512_threads(self):
+        # the tip fork's floor (the row's createdT) reached the popover's build through a module memo the frame filled
+        # and CLEARED once it held more than 512 threads, the entry it had just written included: the thread whose row
+        # tipped it over was built with floor 0 and showed its parent's whole copied history as its own. Six hundred tip
+        # forks under one parent cross that line wherever the memo stood before this test; every one keeps its floor
+        created = self.now - 110
+        tsids = ["77777777-0000-4000-8000-%012d" % i for i in range(600)]
+        for t in tsids:                                       # each a tip fork: the copied history, then its own exchange
+            self._write(t, [uline(self.now - 500, "how should the retry loop back off?", "u1"),
+                            aline(self.now - 495, "Use exponential backoff with a jitter of ten percent.", "a1", parent="u1"),
+                            uline(self.now - 100, "Why jitter at all?", "cu1", parent="a1"),
+                            aline(self.now - 90, "Jitter spreads retries.", "ca1", parent="cu1")])
+            (jd.SDKDIR / (t + ".json")).write_text(json.dumps(
+                {"sid": t, "name": "thread-x", "cwd": self.cdir, "lastSid": t, "alive": True, "threadOf": PARENT}))
+        km._save_comments(PARENT, {"threads": [
+            {"tid": t, "sid": t, "anchorUuid": "a1", "cutUuid": "", "anchorT": self.now - 495, "exact": "exponential backoff",
+             "status": "open", "createdT": created, "lastSeenT": self.now} for t in tsids]})
+        km._comments_memo.clear(); km._built_thread.clear()
+        floors = {}
+        stamp = lambda t: iso(t)
+
+        def build(sid, now, live_map=None, **kw):
+            floors[sid] = kw["thread_cut"][1]
+            return {"events": [{"kind": "user", "uuid": "u1", "ts": stamp(self.now - 500), "md": "how should the retry loop back off?"},
+                               {"kind": "user", "uuid": "cu1", "ts": stamp(self.now - 100), "md": "Why jitter at all?"},
+                               {"kind": "assistant", "uuid": "ca1", "ts": stamp(self.now - 90), "text": "Jitter spreads retries."}],
+                    "headCards": []}
+        real = km.build_session
+        km.build_session = build
+        try:
+            fr = km._comments_frame(PARENT)
+        finally:
+            km.build_session = real
+            km._built_thread.clear()
+        self.assertEqual(len(fr["threads"]), 600)
+        lost = [t for t in tsids if floors.get(t) != created]
+        self.assertEqual(lost, [], "every thread's build is floored at its own row's createdT")
+        leaked = [th["sid"] for th in fr["threads"] if any(e.get("uuid") == "u1" for e in th["events"])]
+        self.assertEqual(leaked, [], "no tip fork shows its parent's copied history as its own")
 
     def test_a_long_opener_strips_before_the_msgs_cap(self):
         # the msgs projection capped each text at 4,000 characters BEFORE the opener's strip: a long quote plus the
