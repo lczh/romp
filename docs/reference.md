@@ -7228,8 +7228,8 @@ sometimes answers it only in its thinking and carries on, so no answer shows. Wh
 message you typed into the page (the message box, a card's reply, a comment thread)
 reaches a turn already running, romp adds one short note beside it, labelled from romp,
 asking the session to answer it in a sentence or two before carrying on. A message that
-starts a turn, a `romp send`, a relay, the Continue and Nudge buttons and anything romp
-sends itself get no note.
+starts a turn, a `romp send`, a relay, the Continue, Nudge and Check status buttons and
+anything romp sends itself get no note.
 
 ### Opening a markdown document
 

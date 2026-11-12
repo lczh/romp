@@ -11213,6 +11213,9 @@ class SdkSession:
             u, self._untaken = self._untaken, None
             if u is not None and keeps and u.get("received"):
                 u["carried"] = True
+                # …and it crossed a connection: a prompt hook the CLI asked meanwhile may have been answered by the host
+                # itself (session_host's self-answer, unattached), so the arrival note's order check stands down for it
+                u["crossed"] = True
                 self._untaken = u
             elif u is not None and not keeps and self._termed_cli_gone(termed) and self._rehead_unlanded_hold(u):
                 pass    # the CLI that held it is gone without running it: the fresh one takes it first
@@ -12618,7 +12621,7 @@ class SdkSession:
             elif not u.get("fresh"):
                 # fed mid-turn and taken while that turn still runs: spliced in at a tool boundary
                 self._note_turn_opener(fed_text_opener(u.get("text") or ""), False)
-                if not u.get("settled") and not u.get("hookSeen") and arrival_note_applies(u):
+                if not (u.get("settled") or u.get("hookSeen") or u.get("crossed")) and arrival_note_applies(u):
                     self._arrival_note_unhooked(u)   # the prompt hook should have seen it first (_arrival_note)
         else:
             self.backend._log("feed hold (%s): the CLI reports the held text %s without running it; the next queued text "
@@ -14035,6 +14038,7 @@ class SdkSession:
         (_prompt_submit_body, _arrival_note): the CLI runs this hook for every prompt it takes, a message spliced
         into a running turn at a tool boundary included, and attaches the additional context it answers right
         after that message."""
+        self._mark_hook_seen(inp)              # first, outside the cap: a gate that stalls or raises still saw the prompt
         cap = prompt_hook_timeout_s()
         try:
             return await asyncio.wait_for(self._prompt_submit_body(inp), timeout=cap)
@@ -14074,6 +14078,17 @@ class SdkSession:
             await asyncio.sleep(0)
         return False
 
+    def _mark_hook_seen(self, inp):
+        """The held fed text (_untaken) this prompt hook runs for, marked `hookSeen` for the lifecycle's order check
+        (_arrival_note_unhooked), or None when the prompt is not that text. Run at the hook's top, before the replay gate
+        and its cap, so a gate that times out or raises cannot make a hook the CLI did run read as one it skipped."""
+        u = getattr(self, "_untaken", None)
+        prompt = str((inp or {}).get("prompt") or "") if isinstance(inp, dict) else ""
+        if u is None or not prompt or echo_text_key(prompt) != echo_text_key(u.get("text") or ""):
+            return None
+        u["hookSeen"] = True
+        return u
+
     async def _arrival_note(self, inp) -> bool:
         """Does the prompt this hook runs for earn the ARRIVAL NOTE (see ARRIVAL_NOTE's note)? Yes exactly when it is the
         text romp fed and the CLI has not yet taken (the hold, _untaken: one fed text at a time, so the prompt is that
@@ -14086,16 +14101,7 @@ class SdkSession:
         as a turn of its own: the hook waits until the receive loop has read every frame written before it
         (_stream_caught_up), so that result has marked the hold `settled`. When the loop cannot be shown caught up the
         note is left off and the reason logged (a message keeps reaching the session either way)."""
-        prompt = str((inp or {}).get("prompt") or "") if isinstance(inp, dict) else ""
-
-        def held():
-            u = getattr(self, "_untaken", None)
-            if u is None or not prompt or echo_text_key(prompt) != echo_text_key(u.get("text") or ""):
-                return None
-            u["hookSeen"] = True
-            return u
-
-        u = held()
+        u = self._mark_hook_seen(inp)
         if u is None or u.get("fresh") or u.get("settled") or not arrival_note_applies(u):
             return False
         caught = await self._stream_caught_up()
@@ -14104,22 +14110,24 @@ class SdkSession:
                               % (self.name, "could not be read" if caught is None else "did not settle before its hook"),
                               problem=True, key=("arrival-note", "stream"))
             return False
-        u = held()
+        u = self._mark_hook_seen(inp)            # the hold this prompt is, read again after the wait
         return u is not None and not u.get("fresh") and not u.get("settled") and arrival_note_applies(u)
 
     def _arrival_note_unhooked(self, u) -> None:
-        """A message typed into a page, fed mid-turn, has just been reported `started` while its turn still runs, and the
-        prompt hook never matched it (`hookSeen`): the CLI took it without running the hook first, so the arrival note
-        was not added and will not be while that order holds. Said once per kernel life, to the error center, naming the
-        CLI version, since nothing else would show the note stopped (the review of #412)."""
+        """A message typed into a page, fed mid-turn on this connection (a hold that `crossed` a reconnect is skipped: the
+        host may have answered its hook itself), has just been reported `started` while its turn still runs, and the
+        prompt hook never saw it (`hookSeen`, marked at the hook's top whatever the gate then did): the arrival note was
+        not added, and if the CLI now takes such messages before running the hook it never will be. Said once per kernel
+        life, to the error center, with the CLI version for whoever looks into it, since nothing else would show the
+        note stopped (the review of #412)."""
         if SdkSession._arrival_unhooked_said:
             return
         SdkSession._arrival_unhooked_said = True
         ver = str(getattr(self, "_cli_version_seen", "") or "") or "an unknown version"
-        self.backend._log("arrival note (%s): Claude Code %s took a message typed mid-turn without running the prompt hook "
-                          "for it first, so the note asking for a visible answer was not added; while it does this, no "
-                          "message sent mid-turn gets the note" % (self.name, ver), problem=True,
-                          key=("arrival-note", "unhooked"))
+        self.backend._log("arrival note (%s): a message typed mid-turn was taken into the turn before the prompt hook saw "
+                          "it, so the note asking for a visible answer was not added (Claude Code %s). If this repeats, "
+                          "the CLI may now take such messages before running the hook, and no message sent mid-turn gets "
+                          "the note" % (self.name, ver), problem=True, key=("arrival-note", "unhooked"))
 
     async def _prompt_submit_gate(self, inp):
         """The replay gate proper — the body _prompt_submit_hook runs under its cap. Its first step

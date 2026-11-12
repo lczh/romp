@@ -86,7 +86,7 @@ class _Frames:
 
 
 class Doors:
-    """The kernel's send doors, each handing the backend `typed` (the words typed into a page) or nothing."""
+    """The kernel's send doors, each handing the backend `typed=True` (typed into a page, a flag) or nothing."""
 
     def doors_setup(self):
         self.be = RecordingBackend()
@@ -373,9 +373,48 @@ class ArrivalNote(Doors, unittest.TestCase):
         self.started(cu)
         self.assertEqual(self.unhooked(), [])
 
+    def test_a_replay_gate_that_fails_or_times_out_still_counts_as_the_hook_having_seen_the_message(self):
+        """The hook marks the held message at its top, before the replay gate: a gate that raises or runs past the cap
+        leaves the note off (the prompt is allowed bare), but the CLI did run the hook first, so no order warning."""
+        async def raising(inp):
+            raise RuntimeError("synthetic gate fault")
+
+        async def stalling(inp):
+            await asyncio.sleep(5)
+        saved = os.environ.get("ROMP_PROMPT_HOOK_TIMEOUT_S")
+        os.environ["ROMP_PROMPT_HOOK_TIMEOUT_S"] = "0.05"
+        try:
+            for name, gate in (("raises", raising), ("times out", stalling)):
+                with self.subTest(name):
+                    self.s._prompt_submit_gate = gate
+                    cu = self.feed(WORDS, typed=True)
+                    self.assertEqual(self.hook(WORDS), {}, "the prompt runs, without the note")
+                    self.started(cu)
+                    self.assertEqual(self.unhooked(), [], "the hook ran first: the CLI's order is not to blame")
+        finally:
+            if saved is None:
+                os.environ.pop("ROMP_PROMPT_HOOK_TIMEOUT_S", None)
+            else:
+                os.environ["ROMP_PROMPT_HOOK_TIMEOUT_S"] = saved
+
+    def test_a_hold_that_crossed_a_reconnect_says_nothing(self):
+        """A hold carried across a reconnect to the same CLI (the connect loop's top marks it `crossed`): while no kernel
+        was attached the host may have answered the message's hook itself (session_host's self-answer), so a `started`
+        with no hook seen on this connection blames nothing."""
+        import inspect
+        self.assertIn('u["carried"] = True\n', inspect.getsource(sb.SdkSession._amain))
+        self.assertIn('u["crossed"] = True\n', inspect.getsource(sb.SdkSession._amain), "the loop top marks the carried hold")
+        cu = self.feed(WORDS, typed=True)
+        self.s._untaken["crossed"] = True                      # as the loop top leaves a hold carried to the same CLI
+        self.started(cu)
+        self.assertEqual(self.unhooked(), [])
+        cu = self.feed("and which TTL does it use?", typed=True)
+        self.started(cu)
+        self.assertEqual(len(self.unhooked()), 1, "a hold whose whole life was on this connection still says it")
+
 
 class BackendCarry(unittest.TestCase):
-    """The queued copy keeps the typed words beside its identity, across the persisted mirror and a stranded re-head."""
+    """The queued copy keeps its typed flag beside its identity, across the persisted mirror and a stranded re-head."""
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
