@@ -219,5 +219,61 @@ class TheBuildersRunTheProductionProfile(unittest.TestCase):
                         self.assertEqual(calls, [want])
 
 
+class TheConvergeRebuildRetriesAfterNpmInstall(unittest.TestCase):
+    """EXECUTED. _rebuild_dist is the build a kernel serves a new commit with WITHOUT restarting (the in-place
+    converge, and since 2026-11-12 the answer to a peer's push that changed no kernel code). A build that failed
+    there sent the converge down the restart path, where _ensure_bundles cured the common cause, a merged commit
+    importing a package this machine's node_modules predates, with its `npm install` retry: a restart for a
+    page-only change. The converge's builder now carries the same one retry. A stand-in subprocess answers each
+    run() in turn; the argv of every run is asserted whole."""
+
+    BUILD = ["node", "esbuild.js", "--production"]
+    NPM = ["npm", "install", "--no-audit", "--no-fund"]
+    MISSING = 'Could not resolve "a-package-added-by-the-merge"'
+
+    @classmethod
+    def setUpClass(cls):
+        cls.km = load_source("romp_kernel_build_mode", os.path.join(ROOT, "bin", "romp-kernel"))
+
+    def _rebuild(self, *answers):
+        """_rebuild_dist() against runs that answer, in order, with each (returncode, stderr) given:
+        ((ok, err), [(argv, cwd) of each run])."""
+        km, calls, script = self.km, [], list(answers)
+
+        def fake_run(argv, *a, **kw):
+            calls.append((list(argv), kw.get("cwd")))
+            rc, err = script.pop(0)
+            return types.SimpleNamespace(returncode=rc, stdout="", stderr=err)
+
+        real = km.subprocess
+        stand_in = types.SimpleNamespace(run=fake_run, TimeoutExpired=real.TimeoutExpired,
+                                         CalledProcessError=real.CalledProcessError)
+        with mock.patch.dict(os.environ), mock.patch.object(km, "subprocess", stand_in):
+            os.environ.pop("ROMP_EXT_DEV_BUILD", None)
+            out = km._rebuild_dist()
+        return out, calls
+
+    def test_a_failed_build_is_retried_once_after_npm_install_and_can_succeed(self):
+        out, calls = self._rebuild((1, self.MISSING), (0, ""), (0, ""))
+        self.assertEqual(out, (True, ""), "the retry built: the converge serves the commit, no restart")
+        self.assertEqual([c[0] for c in calls], [self.BUILD, self.NPM, self.BUILD],
+                         "the same build command again, after the dependency refresh")
+        self.assertEqual({c[1] for c in calls}, {str(self.km.ROOT / "vscode-extension")}, "all three in the extension's directory")
+
+    def test_an_npm_install_that_fails_reports_the_builds_own_error_and_builds_no_more(self):
+        out, calls = self._rebuild((1, self.MISSING), (1, "npm ERR! network"))
+        self.assertEqual(out, (False, self.MISSING), "the build's words are the news, not npm's")
+        self.assertEqual([c[0] for c in calls], [self.BUILD, self.NPM])
+
+    def test_a_retry_that_fails_too_is_the_last_one(self):
+        out, calls = self._rebuild((1, self.MISSING), (0, ""), (1, "error: Unexpected token"))
+        self.assertEqual(out, (False, "error: Unexpected token"), "what the build says after the refresh")
+        self.assertEqual([c[0] for c in calls], [self.BUILD, self.NPM, self.BUILD], "one retry, never a loop")
+
+    def test_a_build_that_succeeds_runs_nothing_else(self):
+        out, calls = self._rebuild((0, ""))
+        self.assertEqual((out, [c[0] for c in calls]), ((True, ""), [self.BUILD]))
+
+
 if __name__ == "__main__":
     unittest.main()

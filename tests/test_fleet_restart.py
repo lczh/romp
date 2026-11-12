@@ -157,7 +157,7 @@ class ReportSurvivesTheRestart(unittest.TestCase):
                                             "_behind_info", "_local_branch")}
         hc, run = dict(km._HEAD_CACHE), km.subprocess.run
         did = []
-        km._update_remote = lambda h: did.append(("push", h)) or (True, "synced")
+        km._update_remote = lambda h, restart="if-code-changed": did.append(("push", h, restart)) or (True, "synced")
         km._restart_remote_kernel = lambda h: did.append(("restart", h)) or (True, "restarted")
         km._restart_this_kernel = lambda reason="", manager_port=None: None
         km._behind_info = lambda sha, head=None: {"behind": 1, "ahead": 0, "date": ""}   # strictly behind: a push only adds
@@ -179,7 +179,9 @@ class ReportSurvivesTheRestart(unittest.TestCase):
             km.subprocess.run = run
             km._HEAD_CACHE.clear(); km._HEAD_CACHE.update(hc)
             km._remotes.clear()
-        self.assertEqual(did, [("push", "TESTHOST")], "behind the head the user has: pushed, not merely restarted")
+        self.assertEqual(did, [("push", "TESTHOST", "always")],
+                         "behind the head the user has: pushed, not merely restarted; and as the restart the user asked "
+                         "for, whatever the push changes (a push that moves no kernel code otherwise restarts nothing)")
         self.assertEqual(report["rows"][0]["action"], "sync-push")
         self.assertEqual(report["local"]["head"], fresh[:7], "the report names the head the plan was judged against")
 

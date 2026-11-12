@@ -2647,6 +2647,7 @@ def _version_info(authed=False):
             # the checkout's HEAD beside the booted commit, and whether the checkout holds kernel code this process does not
             # run: a hub measures drift on the checkout and offers a restart on the code (plans/drift-by-running-code.md)
             "checkout_sha": _local_head(short=True) or "", "restart_pending": _restart_pending(),
+            "converged_sha": _converged_sha(),   # the booted commit, or the one an in-place converge moved this process onto since
             "boot": _BOOT_ID,   # lets a page retire update offers from a previous kernel life (2026-08-15)
             # a linked kernel holding a row for this one pulls its push events (GET /push/events) when this is set, and this
             # one stops forwarding to that kernel once ITS /version carries it (plans/federated-push.md, the transition)
@@ -11703,20 +11704,42 @@ def _restart_pending(checkout=None):
     return booted != disk
 
 
+_REBUILD_LOCK = threading.Lock()   # one bundle build at a time: a peer's ask (_converge_ask, on a request thread) and
+#                                    the periodic pass (_dist_converge_check) would otherwise run two esbuilds into
+#                                    the same dist/ at once
+
+
 def _rebuild_dist():
     """Rebuild the served bundles in place — the UI-only converge. The same esbuild the launcher runs,
     kernel left up: _dist_ver() stats per page render so the fresh ?v= token flows on the next paint,
-    and the extension's newer-build prompt keys off the dv keepalive. (ok, err_tail)."""
-    try:
+    and the extension's newer-build prompt keys off the dv keepalive. (ok, err_tail).
+
+    A failed build gets ONE retry after `npm install`, the rule _ensure_bundles follows at boot and for
+    its reason: the common failure is a merged commit importing a package this machine's node_modules
+    predates, which npm install cures and a restart would only have cured through that same retry. Here
+    the failure used to send the converge down the restart path for a UI-only change."""
+    cv = ROOT / "vscode-extension"
+
+    def build():
         # --production (minified, no sourcemaps) unless ROMP_EXT_DEV_BUILD is set: the same profile and the
         # same knob as _ensure_bundles and vscode-extension/install.sh. A bare `node esbuild.js` here served
         # unminified bundles with sourcemaps after every fast-forward, and _ensure_bundles never re-minified
         # them: its staleness test is mtime against dist/render.js, not profile, so the bundles a converge
         # wrote stayed current to the next boot until an unrelated source change.
         argv = ["node", "esbuild.js"] + ([] if os.environ.get("ROMP_EXT_DEV_BUILD") else ["--production"])
-        r = subprocess.run(argv, cwd=str(ROOT / "vscode-extension"),
-                           capture_output=True, text=True, timeout=180)
+        r = subprocess.run(argv, cwd=str(cv), capture_output=True, text=True, timeout=180)
         return r.returncode == 0, (r.stderr or r.stdout or "").strip()[-300:]
+    try:
+        with _REBUILD_LOCK:
+            ok, err = build()
+            if ok:
+                return True, err
+            sys.stderr.write("romp-kernel: in-place bundle build failed — refreshing UI deps (npm install) and retrying…\n")
+            n = subprocess.run(["npm", "install", "--no-audit", "--no-fund"], cwd=str(cv),
+                               capture_output=True, text=True, timeout=300)
+            if n.returncode != 0:
+                return False, err                # the build's own words: npm could not help, and its failure is not the news
+            return build()
     except Exception as e:
         return False, str(e)
 
@@ -11791,45 +11814,93 @@ _INPLACE_TRIED = [""]   # the target sha the in-place converge already attempted
 #                         a transient failure retries on the NEXT target, never a 300s loop
 
 
+_INPLACE_LOCK = threading.Lock()   # one in-place converge at a time: the drift pass and a peer's ask
+#                                    (_converge_ask) can name the same target within the same seconds, and
+#                                    the one that arrived second read the first's latch as "already tried"
+#                                    and took the restart path while the first was still building
+
+
 def _in_place_converge(target):
     """The no-kernel-code converge (T216): bounce the bus if bus-class files changed (its own
     process — see _bus_converge), rebuild dist, latch, and AUDIT the skip verdict with its per-class
     file lists so a wrong skip is diagnosable from disk. True = converged (caller returns); False =
     fall through to the restart path, which is always the safe converge."""
-    if _INPLACE_TRIED[0] == target:
-        return False                       # already attempted this target — no storms
-    _INPLACE_TRIED[0] = target
-    cc = _converge_classes(_kernel_sha(), target)
-    if cc is None:
-        # the verdict's own classification succeeded moments ago, but THIS one failed (git flake,
-        # lock contention) — an empty mask here would silently drop the bus bounce and write a
-        # lying audit row; unprovable falls to the restart path, per the standing rule
-        _sync_notice("in-place converge could not re-read the diff — taking the restart path",
-                     ok=False)
-        return False
-    if cc["bus"]:
-        ok, err = _bus_converge()
-        _audit_restart_request("bus-converge", tag=target, ok=("yes" if ok else "no"),
-                               files=",".join(cc["bus"][:20]), err=("" if ok else err))
+    with _INPLACE_LOCK:
+        if _REBUILT_FOR[0] == target:
+            return True                    # whoever held the lock converged onto this very target
+        if _INPLACE_TRIED[0] == target:
+            return False                       # already attempted this target — no storms
+        _INPLACE_TRIED[0] = target
+        cc = _converge_classes(_kernel_sha(), target)
+        if cc is None:
+            # the verdict's own classification succeeded moments ago, but THIS one failed (git flake,
+            # lock contention) — an empty mask here would silently drop the bus bounce and write a
+            # lying audit row; unprovable falls to the restart path, per the standing rule
+            _sync_notice("in-place converge could not re-read the diff — taking the restart path",
+                         ok=False)
+            return False
+        if cc["bus"]:
+            ok, err = _bus_converge()
+            _audit_restart_request("bus-converge", tag=target, ok=("yes" if ok else "no"),
+                                   files=",".join(cc["bus"][:20]), err=("" if ok else err))
+            if ok:
+                _sync_notice("postal bus restarted onto the new build (bus-only change — the kernel "
+                             "keeps running; a kernel restart would not have updated the bus)")
+            else:
+                _sync_notice("the postal bus needs a restart for this change and the bounce failed "
+                             "(%s) — mail may run stale until `romp refresh`" % err, ok=False)
+        ok, err = _rebuild_dist()
         if ok:
-            _sync_notice("postal bus restarted onto the new build (bus-only change — the kernel "
-                         "keeps running; a kernel restart would not have updated the bus)")
-        else:
-            _sync_notice("the postal bus needs a restart for this change and the bounce failed "
-                         "(%s) — mail may run stale until `romp refresh`" % err, ok=False)
-    ok, err = _rebuild_dist()
-    if ok:
-        _REBUILT_FOR[0] = target
-        _audit_restart_request("main-converge-skip", tag=target,
-                               why="no kernel-code change",
-                               skip=",".join(cc["skip"][:20]) or "none",
-                               bus=",".join(cc["bus"][:20]),
-                               ast_equal=",".join(cc["ast_equal"][:20]))
-        _sync_notice("new build served in place (no kernel-code change; no restart) — reload the "
-                     "dashboard to pick it up")
-        return True
-    _sync_notice("in-place update failed to build (%s) — taking the restart path" % err, ok=False)
-    return False
+            _REBUILT_FOR[0] = target
+            _audit_restart_request("main-converge-skip", tag=target,
+                                   why="no kernel-code change",
+                                   skip=",".join(cc["skip"][:20]) or "none",
+                                   bus=",".join(cc["bus"][:20]),
+                                   ast_equal=",".join(cc["ast_equal"][:20]))
+            _sync_notice("new build served in place (no kernel-code change; no restart) — reload the "
+                         "dashboard to pick it up")
+            return True
+        _sync_notice("in-place update failed to build (%s) — taking the restart path" % err, ok=False)
+        return False
+
+
+def _converge_ask(want):
+    """Converge THIS running kernel in place onto `want`, the full sha its checkout was just moved to by someone
+    else: a peer's push (the apply script's POST /converge, _update_remote) or this machine's own pull route. The
+    asker has already classified the diff; this side decides again from its own tree, because it is the one that
+    keeps running: the checkout must be AT `want` (read fresh, which also puts the new head in front of /version's
+    checkout_sha), must hold no kernel byte this process does not run (_restart_pending), and the diff from the
+    booted commit must classify restart-free here too (_kernel_code_changed, which fails toward restarting). Then
+    the same _in_place_converge the drift pass runs: bus bounce when bus files changed, bundle rebuild (the `dv`
+    keepalive is what raises the reload offer on open pages), latch, audit row. (ok, detail); a refusal names its
+    reason, and every asker answers one with the restart."""
+    want = str(want or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", want):
+        return False, "no commit named"
+    head = _fresh_local_head()
+    if head != want:
+        return False, "the checkout this kernel runs from is at %s, not %s" % (head[:8] or "no commit", want[:8])
+    if _restart_pending() is True:
+        return False, "the checkout holds kernel code this process does not run"
+    running, target = _kernel_sha(reask=True), _sha8(want)
+    if not running:
+        return False, "the commit this kernel booted from could not be read"
+    if _sha_same(running, want) and not _REBUILT_FOR[0]:
+        return True, "already running %s" % target      # booted from this very commit and never moved off it
+    if _kernel_code_changed(running, want):
+        return False, "kernel code changed between %s and %s, or the diff could not be read" % (running, target)
+    if not _in_place_converge(target):
+        return False, "the in-place build for %s failed (the notice there carries the build's own words)" % target
+    return True, "converged in place onto %s" % target
+
+
+def _converged_sha():
+    """The commit this PROCESS serves: the one it last converged onto in place, else the one it booted from
+    ('-dirty' kept, so an uncommitted boot never reads as a commit). /version carries it beside kernel_sha, which
+    stays the booted commit for the kernel's whole life (plans/drift-by-running-code.md), so a reader that wants
+    one answer to "is this machine on build X" after either kind of deploy has it: converged_sha names X and
+    restart_pending is false."""
+    return _REBUILT_FOR[0] or _kernel_sha() or ""
 
 
 _CONVERGE_DECLINED = [0]   # converges that found this kernel leaving and asked no restart (memos.convergeDeclined on /perf): the
@@ -31617,7 +31688,11 @@ def _auto_push_remote(host):
     try:
         head = _fresh_local_head()
         with _remotes_lock:
-            base = _sha_base((_remotes.get(host) or {}).get("kernel_sha") or "")
+            # the remote half of the key is the sha the hook keys on (_drift_sha: the checkout's, else the booted
+            # one). It was the booted sha alone, which stopped agreeing with the hook once a kernel could serve a
+            # checkout newer than its boot: the hook then saw an untried advance on the pass after every push to
+            # such a machine and pushed again
+            base = _sha_base(_drift_sha(_remotes.get(host) or {}))
         with _auto_push_lock:
             # _maybe_auto_push keyed this attempt on the polls' CACHED head, but the push uses the head read
             # just now, which that read also wrote into the cache: the next supervisor pass then computed a
@@ -31627,12 +31702,21 @@ def _auto_push_remote(host):
         ok, detail = _update_remote(host, head=head)
     except Exception as e:
         ok, detail = False, str(e)
-    if ok:
+    with _remotes_lock:
+        restarting = isinstance((_remotes.get(host) or {}).get("restartExpected"), dict)
+    if ok and restarting:
         # The remote is restarting into the new build; the supervisor's own /version poll clears outOfDate
         # when it comes back, which is what ends this phase. No timer decides it — the next poll does.
         _set_auto_push(host, "waiting", "pushed; waiting for it to restart")
         _sync_notice("pushed this machine's build (%s) to %s; it is restarting into it"
                      % (_kernel_ver() or _local_head(short=True) or "HEAD", host))
+    elif ok:
+        # Nothing restarts there (_update_remote left no restart expected): the kernel converged in place, the
+        # host is stopped on purpose, or its checkout already held the build. The push's own words say which;
+        # the same poll ends the phase, on the checkout it reports.
+        _set_auto_push(host, "waiting", detail or "pushed")
+        _sync_notice("pushed this machine's build (%s) to %s: %s"
+                     % (_kernel_ver() or _local_head(short=True) or "HEAD", host, detail or "synced"))
     else:
         _set_auto_push(host, "failed", detail or "push failed")
         _sync_notice("could not push this machine's build to %s: %s" % (host, detail or "push failed"), ok=False)
@@ -31721,6 +31805,83 @@ def _maybe_auto_push(r):
                      args=(host,), daemon=True).start()
 
 
+# ── a push that changes no kernel code leaves the far kernel running (the user 2026-11-12, who wanted pages to stay
+# responsive after a deploy: every kernel restart costs minutes of slow pages, and most merges touch nothing the kernel
+# process runs) ──
+# _update_remote's apply used to end in a restart whatever it had just installed. When the diff from the commit the far
+# kernel BOOTED from to the pushed one classifies restart-free (_push_in_place, on the converge's own classifier), the
+# apply resets the checkout and then asks that kernel to converge in place (POST /converge there: _converge_ask, which
+# classifies again from its own tree, bounces the bus when bus files changed and rebuilds the bundles in its own
+# process, so the ssh shell needs no node on its PATH), and reads that kernel's /version back. Anything short of "it
+# serves the pushed commit and owes no restart" falls through to the restart the script has always run, with the
+# reason on the outcome tag so the result can say a restart happened and why.
+_INPLACE_ASK_S = 45    # how long the apply waits for the far kernel's answer. A bundle build takes seconds (about two,
+#                        measured on a loaded four-core machine), so this is room for a slow one plus the one
+#                        `npm install` retry; an ask still unanswered then is treated as a refused one, and the restart
+#                        runs. It also keeps the whole push (the 60 s every apply gets, plus this) inside what its
+#                        callers wait: `romp update` (120 s) and a relayed update (_VIA_TIMEOUT), so neither gives up
+#                        on a push that is still converging
+# The ask, run by the apply as `python3 -c <this> <state dir> <port> <sha> <seconds>` (python3 is what the apply already
+# writes its audit row with; curl is not on every host). Prints OK, or one line saying why not. Double quotes only: it
+# travels inside two layers of shell quoting. The reason is cut down to what an outcome tag can carry, so no colon,
+# the tag's field separator.
+_INPLACE_ASK_PY = """
+import json, re, sys, urllib.error, urllib.request
+state, port, want, wait = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
+def no(why):
+    print(re.sub("[^A-Za-z0-9 ._,()/-]", "", str(why))[:120].strip() or "no reason given")
+    sys.exit(0)
+try:
+    tok = open(state + "/serve-token").read().strip()
+except OSError:
+    no("no serve token in the state directory there")
+op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+base = "http://127.0.0.1:" + port
+try:
+    rq = urllib.request.Request(base + "/converge", data=json.dumps({"sha": want}).encode(),
+                                headers={"Content-Type": "application/json", "X-Romp-Token": tok})
+    j = json.loads(op.open(rq, timeout=wait).read() or b"{}")
+except urllib.error.HTTPError as e:
+    try:
+        j = json.loads(e.read() or b"{}")
+    except Exception:
+        j = {}
+    j = {"ok": False, "detail": (j.get("detail") if isinstance(j, dict) else "") or "its kernel answered HTTP %d" % e.code}
+except Exception as e:
+    no("its kernel did not answer the ask (%s)" % type(e).__name__)
+if not (isinstance(j, dict) and j.get("ok") is True):
+    no((j.get("detail") if isinstance(j, dict) else "") or "its kernel refused")
+try:
+    v = json.loads(op.open(base + "/version", timeout=10).read() or b"{}")
+except Exception as e:
+    no("its /version could not be read after the ask (%s)" % type(e).__name__)
+got = str(v.get("converged_sha") or "") if isinstance(v, dict) else ""
+if len(got) < 7 or not want.startswith(got):
+    no("after the ask it reports %s, not %s" % (got or "no commit", want[:8]))
+if v.get("restart_pending") is True:
+    no("after the ask it reports kernel code it does not run")
+print("OK")
+""".strip()
+
+
+def _push_in_place(rr, lfull):
+    """Whether a push of `lfull` may ask the kernel behind row `rr` to converge in place instead of restarting it.
+    True only when every part of it can be shown from here: a kernel is answering there, it reported the commit it
+    BOOTED from (a clean one: an uncommitted boot names no commit to diff from), it does not already owe a restart,
+    and the diff from that commit to `lfull` holds no kernel-class file (_converge_classes, the converge's
+    classifier: None when the diff cannot be read, as when this repository lacks the far commit). A kernel file
+    whose AST is unchanged counts as changed here, unlike in the self-converge: the far kernel's restart_pending is
+    byte identity, so a comment-only edit served in place would leave it reporting a restart owed for the rest of
+    its life. False is the restart, which is what every push did before this."""
+    if not rr or rr.get("status") != "up":
+        return False
+    ksha = str(rr.get("kernel_sha") or "")
+    if not ksha or ksha.endswith("-dirty") or rr.get("restart_pending") is True:
+        return False
+    cc = _converge_classes(ksha, lfull)
+    return cc is not None and not cc["kernel"] and not cc["ast_equal"]
+
+
 _P2P_REF = "romp-p2p-sync"   # scratch branch the local kernel force-pushes its HEAD to on the remote
 _P2P_APPLIED_REF = "romp-applied"   # branch the remote's apply leaves on the commit it applied: the next push's base
 
@@ -31806,7 +31967,7 @@ def _discover_remote_clone(host):
     return rdir, rhead, rdirty, ""
 
 
-def _update_remote(host, head=None):
+def _update_remote(host, head=None, restart="if-code-changed"):
     """PEER-TO-PEER update (the user 2026-07-04, who wanted p2p pushing by default, no GH backstop — just take what is
     committed on local). Push THIS kernel's committed HEAD straight to `host` over ssh and restart it, so the
     remote runs exactly the local code — GitHub/origin is never involved. Three steps, all over the same
@@ -31823,7 +31984,10 @@ def _update_remote(host, head=None):
     Returns (ok, detail), fail-loud. Requires a CLEAN local tree — we push COMMITS, so uncommitted local work
     isn't sent; the caller is told to commit first. `head` = the full sha to push when the caller has already
     read it with _fresh_local_head (the automatic push keys its once-per-advance gate on that same value);
-    None reads it here."""
+    None reads it here. `restart`: by default the far kernel is restarted only when the push changes code its
+    process runs, or when that cannot be shown; otherwise it is asked to converge in place and restarted only if
+    that fails (_push_in_place, and the block above it). "always" is the Restart sweep, a restart the user asked
+    for (_ask_peer_to_pull's vocabulary)."""
     host = str(host or "").strip()
     if not host:
         return False, "no host"
@@ -31860,14 +32024,29 @@ def _update_remote(host, head=None):
         with _remotes_lock:
             rr = _remotes.get(host)
             if rr is not None and rr.get("kernel_sha") and not _shas_agree(rr["kernel_sha"], lfull) \
+                    and rr.get("restart_pending") is not False \
                     and not isinstance(rr.get("restartExpected"), dict):
                 # the checkout already holds our build but the KERNEL still answers the old one: a
                 # restart is pending there (a quiet window we asked for and then forgot across our own
-                # restart, or one nobody asked for) — expect it again rather than read its gap as death
+                # restart, or one nobody asked for) — expect it again rather than read its gap as death.
+                # Not when that kernel says it owes none (restart_pending false): it booted from an older
+                # commit and converged in place since, so it runs this build and no restart is coming
                 rr["restartExpected"] = {"sha": lfull, "t": time.time(), "quiet": None}
                 return True, ("already up to date (%s) — that kernel has not restarted into it yet"
                               % lfull[:8])
         return True, "already up to date (%s)" % lfull[:8]
+    # Restart or converge in place: decided BEFORE anything is pushed, from the commit the far kernel booted from
+    # and the one about to travel, both read in this repository. The far kernel decides again when it is asked.
+    with _remotes_lock:
+        _snap = dict(_remotes.get(host) or {})
+    inplace = restart != "always" and _push_in_place(_snap, lfull)
+    ask = ""
+    if inplace:
+        # After the reset, before any restart step: OK ends the apply with nothing restarted (and no restart-audit
+        # row: there is no cut to attribute); anything else rides K onto whichever restart outcome follows
+        ask = ('IP="$(python3 -c %s "$LOGDIR" %d "$WANT" %d 2>/dev/null)"; '
+               'if [ "$IP" = OK ]; then echo "SYNCED:$NEW:INPLACE$K"; exit 0; fi; '
+               'K=":NOINPLACE:${IP:-the ask did not run}$K"; ') % (shlex.quote(_INPLACE_ASK_PY), kport, _INPLACE_ASK_S)
     # (2) push local HEAD to a scratch ref on the remote (non-checked-out → no denyCurrentBranch issue)
     env = dict(os.environ, GIT_SSH_COMMAND="%s %s" % (SSH_BIN, " ".join(_SSH_OPTS)))
     push_url = "%s:%s" % (host, rdir)
@@ -31939,6 +32118,10 @@ def _update_remote(host, head=None):
         # check comes first: a manager running beside a marker was started some way that did not clear
         # it, and its kernel gets the normal immediate restart.
         'if [ ! -x "$R/bin/romp-serve" ]; then echo "NOLAUNCH:$NEW$K"; exit 0; fi; '
+        # A push that changes no kernel code asks the kernel there to converge in place first (`ask` above; the
+        # empty string for every other push, which leaves this script exactly as it was). Past this point the
+        # script is the restart, reached when nothing was asked or the ask did not end in OK.
+        '%s'
         # NEVER AN ANONYMOUS SIGTERM (T238, the T121 rule): a restart-audit row lands BEFORE whichever
         # restart happens, so the far kernel's cut row carries WHO and WHY (the p2p update, from this
         # machine, to this sha) — nine restarts in three hours had no reason on record. The row lands
@@ -31990,6 +32173,7 @@ def _update_remote(host, head=None):
         'if [ "$UP" = 0 ]; then nohup "$R/bin/romp-serve" >>"$LOGDIR/kernel.log" 2>&1 </dev/null &  sleep 1; fi; '
         'echo "SYNCED:$NEW:FALLBACK$K"'
     ) % (shlex.quote(rdir), lfull, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_APPLIED_REF, _P2P_REF,
+         ask,
          _local_machine_label(), lfull[:8], kport,
          _local_machine_label(), lfull[:8], kport)
     # The apply KILLS the running kernel before booting its replacement, so it must be immune to the
@@ -32019,8 +32203,19 @@ def _update_remote(host, head=None):
                 rr.pop("restartExpected", None)
     _expect(None)
     try:
-        a = subprocess.run([SSH_BIN] + _SSH_OPTS + ["--", host, guarded_apply], capture_output=True, text=True, timeout=60)
+        # an in-place ask adds the far kernel's build to the wait (_INPLACE_ASK_S); the restart alone answers in seconds
+        a = subprocess.run([SSH_BIN] + _SSH_OPTS + ["--", host, guarded_apply], capture_output=True, text=True,
+                           timeout=60 + (_INPLACE_ASK_S if inplace else 0))
     except subprocess.TimeoutExpired:
+        if inplace:
+            # The ask and the restart behind it are both bounded well inside this wait, so the link went quiet, and
+            # which of the two the detached apply ends in is not known here. The expectation is withdrawn: kept, it
+            # would stand for RESTART_EXPECT_MAX_S against a kernel that converged in place and then accuse it of
+            # never restarting; withdrawn, a restart that does come reads as a kernel gone for its two seconds.
+            _unexpect()
+            return False, ("pushed, but %s did not answer in time — its kernel was asked to converge in place "
+                           "(no kernel code changed), and the detached apply there restarts it if that fails; "
+                           "check the popover in a minute" % host)
         # the detached apply keeps running there — the restart may still come, so the expectation stays
         return False, ("pushed, but confirming the restart timed out — the detached restart keeps "
                        "running on %s; check the popover in a minute" % host)
@@ -32039,23 +32234,41 @@ def _update_remote(host, head=None):
     def _verdict():
         if tag == "SYNCED":
             short, _, mode = rest.partition(":")
-            mode = mode.strip()
+            # ":NOINPLACE:<why>" trails the mode when the kernel there was asked to converge in place and the
+            # ask did not end in OK: the script went on to the restart, and the result says so
+            mode, _, noinplace = mode.strip().partition(":NOINPLACE:")
+            mode, noinplace = mode.strip(), noinplace.strip()
+            short = short.strip() or lfull[:8]
+            if mode == "INPLACE":
+                # Nothing restarts. The apply read that kernel's own /version after the ask (it serves the pushed
+                # commit and owes no restart), so the row says so now instead of calling the machine behind until
+                # the supervisor's next poll re-reads both fields.
+                with _remotes_lock:
+                    rr = _remotes.get(host)
+                    if rr is not None:
+                        rr.pop("restartExpected", None)
+                        rr["checkout_sha"], rr["restart_pending"] = _sha8(lfull), False
+                return True, ("synced to %s; no kernel code changed, so the kernel there converged in place "
+                              "(no restart)" % short)
+            fell = ("; it was asked to converge in place and could not (%s), so it is restarting instead"
+                    % noinplace) if noinplace else ""
             # every deploy restart is immediate (T269). `quiet` is RECORDED on the expectation, not read:
             # the tunnel's reinterpretation keys on sha and t (RESTART_EXPECT_MAX_S caps a restart that
             # never comes). The far kernel's own cut attribution takes the short window from the ROW,
             # which no longer carries when=quiet (_recent_restart_audit).
             _expect(False)
-            short = short.strip() or lfull[:8]
             if mode == "MANAGED":
-                return True, "synced to %s + restarting now (through its manager)" % short
+                return True, "synced to %s + restarting now (through its manager)%s" % (short, fell)
             if mode == "FALLBACK":
                 return True, ("synced to %s + restarting now (no manager owns that kernel there — an "
-                              "immediate restart)" % short)
+                              "immediate restart)%s" % (short, fell))
             if mode == "DOWN":
                 _unexpect()                   # nothing restarts: the host stays stopped on purpose
                 return True, ("synced to %s; %s is stopped by romp down, so nothing was restarted there "
-                              "(romp up on it starts the new code)" % (short, host))
-            return True, "synced to %s + restarting" % short
+                              "(romp up on it starts the new code)%s"
+                              % (short, host, ("; the in-place converge asked of its kernel did not happen (%s)"
+                                               % noinplace) if noinplace else ""))
+            return True, "synced to %s + restarting%s" % (short, fell)
         _unexpect()                       # nothing restarted: REFMISMATCH / DIVERGED / STATERR / DIRTYNOW / RESETFAIL / NOLAUNCH / error
         if tag == "REFMISMATCH":
             return False, ("pushed %s, but the scratch ref on %s now holds %s — another push moved it between "
@@ -32197,8 +32410,33 @@ def _pull_remote(host):
     _HEAD_CACHE.update(ts=0.0)             # HEAD moved; the next poll re-reads it and the drift clears
     short = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
                            capture_output=True, text=True, timeout=5).stdout.strip()
-    return True, "pulled %s commit%s from %s — now at %s; restart romp to run it" % (
-        count, "" if count == "1" else "s", host, short or "HEAD")
+    return True, "pulled %s commit%s from %s — now at %s%s" % (
+        count, "" if count == "1" else "s", host, short or "HEAD", _PULL_RESTART_TAIL)
+
+
+_PULL_RESTART_TAIL = "; restart romp to run it"   # how a pull's detail ends, until the pull route finds out otherwise
+
+
+def _pull_and_converge(host):
+    """/tunnels/pull's answer: _pull_remote, then (ok, detail, kernel_code_changed, converged). When the pull left
+    the kernel code this process runs untouched (_restart_pending false, read on the disk the pull just moved), the
+    kernel converges onto the pulled commit HERE (_converge_ask) instead of leaving it to the periodic drift pass,
+    which came up to _MAIN_CHECK_EVERY_S later and never on a kernel whose update checks are off: until then pages
+    kept the old bundle while the hub that asked for the pull was told the machine was done. `converged` is None
+    when nothing was attempted (a refused pull, kernel code changed, or a checkout that cannot say), else whether
+    this kernel serves the commit now; False tells an asking hub to restart it (_ask_peer_to_pull), and the detail
+    carries the reason."""
+    ok, detail = _pull_remote(host)
+    kcc = _restart_pending() if ok else None   # the disk the pull just moved, read fresh; a refused pull claims nothing
+    if not ok or kcc is not False:
+        return ok, detail, kcc, None
+    conv, why = _converge_ask(_fresh_local_head())
+    if conv:
+        if detail.endswith(_PULL_RESTART_TAIL):
+            detail = detail[:-len(_PULL_RESTART_TAIL)] + "; no kernel code changed, so it is served without a restart"
+    else:
+        detail += " (this kernel could not serve it in place: %s)" % why
+    return ok, detail, kcc, conv
 
 
 def _peer_call(r, method, path, body=None, timeout=8):
@@ -32301,8 +32539,13 @@ def _ask_peer_to_pull(host, restart="if-code-changed"):
     kcc = j.get("kernel_code_changed")
     if restart != "always" and kcc is None:
         kcc = _kernel_code_changed(_sha_base(r.get("kernel_sha") or ""), _fresh_local_head() or "")
-    if restart != "always" and kcc is False:
-        return True, detail + "; no kernel code changed, so it keeps running and converges in place"
+    # `converged`: the peer's pull route converges at once when no kernel code changed (_pull_and_converge) and says
+    # whether that worked. True: its detail already says the commit is served. False: it tried and could not (the
+    # reason rides its detail), so the restart below is what puts it on the build. Absent, from a peer older than the
+    # field: it converges on its own periodic pass, as before.
+    conv = j.get("converged")
+    if restart != "always" and kcc is False and conv is not False:
+        return True, detail + ("" if conv is True else "; no kernel code changed, so it keeps running and converges in place")
     rst, rj = _peer_call(r, "POST", "/restart", {"fleet": False}, timeout=10)
     if rst != 200:
         # The peer's own words ride along (review find, 2026-09-08): its /restart refuses a body it
@@ -32449,7 +32692,7 @@ def _fleet_restart_run(manager_port=_PORT_FROM_ENV):
                 rows.append({"host": host, "ok": None, "action": "skipped", "detail": reason})
                 continue
             if action == "sync-push":
-                ok, detail = _update_remote(host)
+                ok, detail = _update_remote(host, restart="always")      # the user asked for a restart
             elif action == "sync-pull":
                 ok, detail = _pull_remote(host)
                 if ok:
@@ -85104,9 +85347,16 @@ _gear_glyph_memo = {}
 def _gear_glyph():
     """THE settings gear's character (T405, the user 2026-09-13: one gear, one glyph, from one source): read from
     ui/webview/icons.ts GEAR_GLYPH, the constant the chat strip's gear renders, so the rail's glyph at the bottom right of
-    every romp page and the strip's cannot drift. Read once per kernel life (the UI tree is the checkout's); an unreadable
-    or unparseable file falls to the same character as a literal, said in the log."""
-    if "glyph" in _gear_glyph_memo:
+    every romp page and the strip's cannot drift. Read once per state of the file (its mtime and size), not once per
+    kernel life: a kernel that converges in place outlives the checkout it booted on, and the strip's gear comes from the
+    rebuilt bundle while the rail's would have stayed the booted file's. An unreadable or unparseable file falls to the
+    same character as a literal, said in the log once per such state."""
+    try:
+        st = (UI / "webview" / "icons.ts").stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None                                    # unreadable: one key, so the complaint below is not per page
+    if _gear_glyph_memo.get("key", "") == key and "glyph" in _gear_glyph_memo:
         return _gear_glyph_memo["glyph"]
     glyph = _GEAR_GLYPH_FALLBACK
     try:
@@ -85120,7 +85370,7 @@ def _gear_glyph():
             print("[rail] icons.ts declares no GEAR_GLYPH; the rail wears the fallback character", file=sys.stderr)
     except OSError as e:
         print("[rail] icons.ts unreadable (%s); the rail wears the fallback character" % e, file=sys.stderr)
-    _gear_glyph_memo["glyph"] = glyph
+    _gear_glyph_memo.update(key=key, glyph=glyph)
     return glyph
 
 
@@ -89601,6 +89851,20 @@ class Handler(BaseHTTPRequestHandler):
                     body = None
                 host = str((body or {}).get("host") or "").strip() if isinstance(body, dict) else ""
                 return self._send(200, json.dumps({"ok": True, "stopped": checkin_stop(host)}), "application/json")
+            if u.path == "/converge":
+                # A machine that just moved THIS checkout asks this kernel to serve the new commit without restarting:
+                # the apply script of its push (_update_remote there, _INPLACE_ASK_PY), over loopback with the serve
+                # token it read from the state directory. Body: {"sha": <the 40-hex commit the checkout was reset to>}.
+                # _converge_ask decides from this kernel's own tree and refuses whatever it cannot show is
+                # restart-free; a refusal is a 502 with the reason, and the asker answers it by restarting this
+                # kernel, as every push used to. The answer names the commit this process serves afterwards.
+                try:
+                    body = json.loads(raw_body or b"{}")
+                except Exception:
+                    body = None
+                ok, detail = _converge_ask(body.get("sha") if isinstance(body, dict) else "")
+                return self._send(200 if ok else 502, json.dumps({"ok": ok, "detail": detail, "converged_sha": _converged_sha()}),
+                                  "application/json")
             if u.path == "/tunnels/update":
                 # PUSH the local kernel's committed code to a remote (peer-to-peer, no GitHub) + restart it.
                 # Body: {"host": <ssh alias>}. The blocking ssh (git push + reset + restart) is fine on the
@@ -89634,12 +89898,12 @@ class Handler(BaseHTTPRequestHandler):
                 host = str((body or {}).get("host") or "").strip() if isinstance(body, dict) else ""
                 if not host:
                     return self._send(400, json.dumps({"ok": False, "error": "host required"}), "application/json")
-                ok, detail = _pull_remote(host)
                 # the peer's own word on whether what it now holds changes what its process runs: the hub asks a
-                # restart only when it does (plans/drift-by-running-code.md); None when this checkout cannot say
-                kcc = _restart_pending() if ok else None   # the disk the pull just moved, read fresh; a refused pull claims nothing
-                return self._send(200 if ok else 502, json.dumps({"ok": ok, "detail": detail, "kernel_code_changed": kcc}),
-                                  "application/json")
+                # restart only when it does (plans/drift-by-running-code.md); None when this checkout cannot say.
+                # `converged`: whether this kernel serves the pulled commit already (_pull_and_converge)
+                ok, detail, kcc, conv = _pull_and_converge(host)
+                return self._send(200 if ok else 502, json.dumps({"ok": ok, "detail": detail, "kernel_code_changed": kcc,
+                                                                  "converged": conv}), "application/json")
             if u.path == "/tunnels/askpull":
                 # ASK a checked-in peer to fast-forward ITSELF to this machine's build — the third
                 # direction, for the host no ssh of ours can reach (it holds the only link). The work
