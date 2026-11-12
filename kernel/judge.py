@@ -321,7 +321,35 @@ def fast_capable(model):
     known = fast_known(model)
     if known is not None:
         return known
+    if not _mf.read_table(STATE):
+        _say_fast_seed()
     return _model_family_version(model)[0] == "opus"
+
+
+_FAST_SEED_PROBLEM_FN = None   # kernel wiring: fn(text) -> the error center (the kernel's _sdk_problem); stderr unwired
+_FAST_SEED_SAID = set()        # said once per process: the seed decided a fast gate with nothing learned at all
+
+
+def _say_fast_seed():
+    """fast_capable fell to the seed with the learned table EMPTY: no Claude Code has reported which models run fast
+    mode (no session has connected since the table began, or every CLI that did sent a list without the field). The
+    judges' tiers then ask fast mode by romp's old rule, Opus only, which since Claude Code 2.1.321 is wrong both ways
+    (Fable 5.2 runs it, Opus 4.8 no longer does). That was silent (the review of #453); now it is said once per kernel
+    life in the error center (CLAUDE.md, fail loudly). A table that names other models but not this one is the CLI's
+    own silence about it, not this case, and says nothing."""
+    if _FAST_SEED_SAID:
+        return
+    _FAST_SEED_SAID.add(True)
+    line = ("fast mode: no Claude Code has reported yet which models run fast mode, so the judges' Fast mode boxes "
+            "follow romp's old rule, fast mode on Opus and nothing else, until a session connects and says")
+    try:
+        fn = _FAST_SEED_PROBLEM_FN
+        if fn is not None:
+            fn(line)
+        else:
+            sys.stderr.write("judges: %s\n" % line)
+    except Exception:
+        pass
 
 
 def fast_capable_or_unknown(model):

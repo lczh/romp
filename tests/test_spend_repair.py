@@ -953,7 +953,8 @@ class RestoredCostState(unittest.TestCase):
         """Review of #170: a known id plus any dash matched, so claude-sonnet-5-5 was priced as claude-sonnet-5. Only a
         date may follow a known id; anything else has no price here, and the rule's match never runs on a guess."""
         self.assertIsNone(rp.call_cost("claude-sonnet-5-5", {"input_tokens": 1e6}))
-        self.assertIsNone(rp.call_cost("claude-fable-5-2", {"cache_read_input_tokens": 1e6}))
+        self.assertIsNone(rp.call_cost("claude-fable-5-3", {"cache_read_input_tokens": 1e6}))
+        self.assertAlmostEqual(rp.call_cost("claude-fable-5-2-20261201", {"cache_read_input_tokens": 1e6}), 0.2)
         self.assertAlmostEqual(rp.call_cost("claude-fable-5-1-20261201", {"cache_read_input_tokens": 1e6}), 0.25)
 
     def test_the_plan_finds_the_rows_that_recorded_a_restored_record_and_only_those(self):

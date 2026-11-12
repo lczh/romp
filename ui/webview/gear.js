@@ -64,11 +64,11 @@ var SHORTCUT_ROWS =
 // that is always there instead) lives in a var because fillAutoNudge() appends to it when the attached machines disagree:
 // the row then has to say WHICH ones, and this is the one level down from the label.
 var AUTONUDGE_SUB = "When a session goes idle with its work still in progress and nothing awaited, nudge it once for a status update, on every connected machine.";
-// Fast mode's one-line hint, in a var because judgeFastGate() swaps it for the greyed-out reason when no
-// judge tier is on Opus (the opt-in rides only a call whose model is Opus, so the box is inert then).
-var JUDGEFAST_SUB = "This tier's judge calls run in Claude Code's fast mode (an Opus-only research preview, billed at a premium, "
-  + "about twice the standard Opus rate). Off by default. Follows to every connected machine's kernel.";
-var JUDGEFAST_SUB_OFF = "Fast mode is Opus-only, and this tier is not on Opus. Pick Opus for it to use fast mode; the setting is kept.";
+// Fast mode's one-line hint, in a var because judgeFastGate() swaps it for the greyed-out reason when the tier's
+// model does not run fast mode (the kernel's /models list says which do, by the CLI's word; the box is inert then).
+var JUDGEFAST_SUB = "This tier's judge calls run in Claude Code's fast mode, billed at a premium. "
+  + "Off by default. Follows to every connected machine's kernel.";
+var JUDGEFAST_SUB_OFF = "This tier's model doesn't run fast mode. Pick one that does to use it; the setting is kept.";
 function judgeFastSubRefused(word, r) {
   return "Fast mode was declined by Claude Code for the last " + word + " call (" + ((r && r.reason) || "no reason given")
     + "); the judges run at normal speed. The setting is kept.";
@@ -247,7 +247,7 @@ var GEAR_HTML =
   "<div class='rs-row rs-jrow'><b>Comment effort <span class=rs-mixed hidden></span></b><span class=rs-sub>Thinking effort for new comment threads. Same as the session (the default) inherits the effort of the conversation the thread branches from. Follows to every connected machine's kernel.</span><select id=rs-cmteffort></select></div>" +
   "<label class='rs-row'><input type=checkbox id=rs-cmtfast>" +
   '<span><b>Fast comment threads</b><span class=rs-mixed hidden></span>' +
-  "<span class=rs-sub>Start new comment threads in fast mode (Opus-only research preview). If the thread's model can't run it, the thread still opens on that model at normal speed, with a notice. Off = same as the session. Follows to every connected machine's kernel.</span>" +
+  "<span class=rs-sub>Start new comment threads in fast mode, billed at a premium. If the thread's model can't run it, the thread still opens on that model at normal speed, with a notice. Off = same as the session. Follows to every connected machine's kernel.</span>" +
   '</span></label>' +
   // THINKING (T404): asks the API for reasoning summaries on every new session, so it CHANGES what each new session asks of the API
   // (and turns adaptive thinking on where it was off), which is why it sits in Chat and not under Display. The summary itself costs
@@ -344,7 +344,7 @@ var GEAR_HTML =
   "<div class='rs-sec'>Model</div>" +
   "<label class='rs-row'><input type=checkbox id=rs-alwaysfast>" +
   '<span><b>Always fast</b><span class=rs-mixed hidden></span>' +
-  "<span class=rs-line>Every Opus session runs Claude Code's fast mode, billed at a premium; a session you set to Slow stays slow.</span>" +
+  "<span class=rs-line>Every session runs Claude Code's fast mode whenever its model supports it, billed at a premium; a session you set to Slow stays slow.</span>" +
   '</span></label>' +
   "<label class='rs-row'><input type=checkbox id=rs-retryupgrade>" +
   '<span><b>Retry upgrades after downgrades</b><span class=rs-mixed hidden></span>' +
@@ -1820,15 +1820,25 @@ function initGear(post, opts) {
   if (jc) jc.addEventListener('change', function () { post({ type: 'setJudgeConcurrency', value: jc.value, gt: gclock.stamp('judge-concurrency') }); });
   if (dm) dm.addEventListener('change', function () { post({ type: 'setDistillModel', model: dm.value, gt: gclock.stamp('distill-model') }); judgeFastGate(); });
   if (de) de.addEventListener('change', function () { post({ type: 'setDistillEffort', effort: de.value, gt: gclock.stamp('distill-effort') }); });
-  // Fast is an Opus-only research preview (render.ts fastAvailable, the same rule): a pinned
-  // non-Opus comment model makes the box a dead control, so it disables — and a model pick that
-  // strands a checked box also unchecks it, visibly, as part of the user's own gesture (never a
-  // silent per-fill flap; the kernel would otherwise ask fast on every create and toast every
-  // refusal). 'session'/'default' stay enabled: the session/account default may be Opus.
+  // Whether a model pick runs Claude Code's fast mode, the rule the chat's badge and the comment dialog read
+  // (status-controls.ts modelFastKnown, render.ts canFast): the kernel's /models list carries the CLI's own word
+  // per family default and per version (Fable 5.2 runs it under 2.1.321, Opus 4.8 no longer does). Where no CLI
+  // has named the pick, the seed from fast mode's first release, on Opus alone: an unloaded value, 'session' and
+  // 'default' (the session or account default may run it) keep the benefit of the doubt, else the opus spelling.
+  // The answer reads `choices`, so the list's every paint re-runs both gates (the onChoices hook below).
+  function modelRunsFast(val) {
+    var known = SC.modelFastKnown(choices && choices.models, val || '');
+    if (typeof known === 'boolean') return known;
+    var v = (val || '').toLowerCase();
+    return !v || v === 'session' || v === 'default' || v.indexOf('opus') !== -1;
+  }
+  // A pinned comment model that does not run fast mode (modelRunsFast) makes the box a dead control, so it
+  // disables — and a model pick that strands a checked box also unchecks it, visibly, as part of the user's own
+  // gesture (never a silent per-fill flap; the kernel would otherwise ask fast on every create and toast every
+  // refusal).
   function cmtFastGate(fromModelPick) {
     if (!cmf || !cmm) return;
-    var val = (cmm.value || '').toLowerCase();
-    var can = val === 'session' || val === 'default' || val.indexOf('opus') !== -1;
+    var can = modelRunsFast(cmm.value);
     cmf.disabled = !can;
     if (!can && (cmf.checked || cmf.indeterminate) && fromModelPick) {   // ticked, or mixed (held ticked under its dash, mixBox): some machine has it on
       cmf.indeterminate = false; cmf.checked = false;
@@ -1848,13 +1858,12 @@ function initGear(post, opts) {
   // decides per session whether the model can run fast, and the switch is a standing wish, not a per-model verdict
   if (afb) afb.addEventListener('change', function () { post({ type: 'setAlwaysFast', enabled: afb.checked, gt: gclock.stamp('always-fast') }); });
   if (rub) rub.addEventListener('change', function () { post({ type: 'setRetryUpgrade', enabled: rub.checked, gt: gclock.stamp('retry-upgrade') }); });
-  // Fast mode is an Opus-only research preview (render.ts fastAvailable and cmtFastGate above, the same rule),
-  // and the judges' opt-in rides only a call whose model is Opus: with no tier on Opus the box is inert, so it
-  // greys and its hint says why (a review finding on the setting's first cut: with the default tiers the box
-  // did nothing and the gear did not say so). The stored value is left alone, unlike cmtFastGate's uncheck:
-  // nothing fires or toasts while it is inert, and a tier pinned to Opus later brings it back without a
-  // second click. Distilling on Follow triage resolves to the triage pick; a tier whose value has not
-  // loaded is unknown, never a refusal (the benefit of the doubt fastAvailable gives an unknown model).
+  // Each tier's box follows its model through modelRunsFast (cmtFastGate's rule above): on a model that does not
+  // run fast mode the box is inert, so it greys and its hint says why (a review finding on the setting's first
+  // cut: with the default tiers the box did nothing and the gear did not say so). The stored value is left alone,
+  // unlike cmtFastGate's uncheck: nothing fires or toasts while it is inert, and a pick of a model that runs it
+  // later brings it back without a second click. Distilling on Follow triage resolves to the triage pick; a tier
+  // whose value has not loaded is unknown, never a refusal (the benefit of the doubt fastAvailable gives).
   var fastRefused = {};   // /version's record: judge tier ("triage" | "distill" | "index") -> { reason, model, t }
   function judgeFastTiers() {
     return [
@@ -1869,7 +1878,7 @@ function initGear(post, opts) {
     judgeFastTiers().forEach(function (t) {
       if (!t.box) return;
       var wrap = document.getElementById(t.wrap), sub = document.getElementById(t.sub);
-      var v = t.model(), can = !v || v.toLowerCase().indexOf('opus') !== -1;   // unknown (not loaded) = the benefit of the doubt
+      var can = modelRunsFast(t.model());   // the list's word, else the seed (unknown = the benefit of the doubt)
       t.box.disabled = !can;
       if (wrap) wrap.classList.toggle('rs-off', !can);
       var r = can && t.box.checked ? fastRefused[t.tier] : null;   // the CLI declined this tier's last fast ask: say why
@@ -2298,7 +2307,10 @@ function initGear(post, opts) {
     if (!n) { rtrLine.textContent = ''; return; }   // nothing declared: the kernel's own advisory (r.error, above) says so when that is the case; a URL-only install declares nothing and still offers the listing's rows (verify find, 2026-09-22)
     rtrLine.textContent = n + ' declared' + (r.gateway === false ? ' · no gateway configured' : '');
   }
-  onChoices = fillRouterLine;
+  // …and the fast-mode boxes, whose gates read the list (modelRunsFast): a list that lands after fill() set the tiers,
+  // or a models frame carrying a new answer from a CLI, re-gates them on that event. A repaint never unchecks a box
+  // (cmtFastGate(false)): only the user's own model pick does.
+  onChoices = function (d) { fillRouterLine(d); cmtFastGate(false); judgeFastGate(); };
   function lv() { var t = document.querySelector('script[src*="feed.js"]');
     var m = t && t.getAttribute('src').match(/[?&]v=(\d+)/); return m ? +m[1] : 0; }
   function clearAutoNudgeSplit() {

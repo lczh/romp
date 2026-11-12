@@ -159,15 +159,16 @@ class SettingsSectionsTest(unittest.TestCase):
         self.assertLess(row.index("id=rs-judgemodel"), row.index("id=rs-judgefast"), "the box follows the picker")
         self.assertIn("<span class=rs-sub id=rs-judgefast-sub>", row, "a row hint like its neighbours', swapped by the gate")
         self.assertEqual(row.count("</div>"), 1, "one row: the box closes inside the Triage model row")
-        # the one-line hint: the Opus-only condition and the premium, and where the pick goes
+        # the one-line hint: the premium, and where the pick goes; no model family named (2026-11-12: Claude Code runs fast
+        # mode on Fable 5.2 too, and the gate reads which models from the kernel's /models list)
         hint = h[h.index("var JUDGEFAST_SUB = "):]
         hint = hint[:hint.index(";\n")]
-        self.assertIn("Opus-only", hint)
+        self.assertNotIn("Opus", hint)
         self.assertIn("premium", hint)
         self.assertIn("connected machine's kernel", hint, "the copy says the pick follows to the other machines")
-        # greyed with the reason while no judge tier is on Opus (the box is inert then: the opt-in rides only Opus calls)
+        # greyed with the reason while the tier's model does not run fast mode (the box is inert then)
         self.assertIn("function judgeFastGate", h)
-        self.assertIn("var JUDGEFAST_SUB_OFF = \"Fast mode is Opus-only, and this tier is not on Opus.", h)
+        self.assertIn("var JUDGEFAST_SUB_OFF = \"This tier's model doesn't run fast mode.", h)
         # T300: the same box follows the Distilling and Indexing pickers, each greyed on ITS tier's effective model
         for sel, tier in (("rs-distillmodel", "distillfast"), ("rs-indexmodel", "indexfast")):
             row = h[h.index("<select id=%s></select>" % sel):]

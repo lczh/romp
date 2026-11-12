@@ -507,7 +507,7 @@ class ServedSettingsTabs(unittest.TestCase):
             self.assertEqual(rows["rs-autonudge"]["line"], "When a session goes idle with its work still in progress and nothing awaited, nudge it once for a status update, on every connected machine.", table)
             self.assertEqual(rows["rs-suggestcompact"]["line"], "When a session has sat idle for an hour with a lot of context built up, suggest one /compact at a natural point, once per fill-up, on every connected machine.", table)
             # the two model switches (2026-09-17) take the tab's row shape too: a line each, no hover popover
-            self.assertEqual(rows["rs-alwaysfast"]["line"], "Every Opus session runs Claude Code's fast mode, billed at a premium; a session you set to Slow stays slow.", table)
+            self.assertEqual(rows["rs-alwaysfast"]["line"], "Every session runs Claude Code's fast mode whenever its model supports it, billed at a premium; a session you set to Slow stays slow.", table)
             self.assertEqual(rows["rs-retryupgrade"]["line"], "A session whose model fell back without a pick asks for its picked model again every ten minutes, once quiet, until it is back.", table)
             for rid in ("rs-autonudge", "rs-suggestcompact", "rs-alwaysfast", "rs-retryupgrade"):
                 self.assertTrue(rows[rid]["lineShown"] and rows[rid]["lineBelowLabel"], rid + ": the line is on screen, under the label" + table)

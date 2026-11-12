@@ -68,7 +68,7 @@ test("Fast mode for the judges is a kernel setting: a stamped emitter under its 
     "one click writes every attached kernel, like the other judge settings");
 });
 
-test("the judges' fast-mode box sits on the Triage model row in the chat's words, and greys when no tier is on Opus", () => {
+test("the judges' fast-mode box sits on the Triage model row in the chat's words, and greys on a model that does not run fast mode", () => {
   // The user 2026-09-10: say Fast mode, the word the chat's statusline badge and its tip already use
   // (render.ts FAST_CHOICES / "toggle fast mode"), never a coinage of the gear's own; and put the box
   // with the model rather than on a row of its own under a paragraph. The ids and the message stay,
@@ -77,12 +77,12 @@ test("the judges' fast-mode box sits on the Triage model row in the chat's words
   assert.match(GEAR, /<select id=rs-judgemodel><\/select>" \+[\s\S]{0,600}?<label class=rs-fastin id=rs-judgefast-wrap><input type=checkbox id=rs-judgefast>Fast mode<span class=rs-mixed hidden><\/span>/,
     "the box follows the triage picker inside the same row, with its own mixed mark");
   assert.ok(GEAR.includes("<span class=rs-sub id=rs-judgefast-sub>"), "its hint is a row hint like its neighbours', not a paragraph");
-  assert.match(GEAR, /var JUDGEFAST_SUB = "[^"]*Opus-only[^"]*premium/, "the one-line hint carries the Opus-only condition and the premium");
-  // the gate, mirroring cmtFastGate: the opt-in rides only a call whose model is Opus, so with no tier on
-  // Opus the box is inert; the gear greys it and the hint says why, instead of a dead control
+  assert.match(GEAR, /var JUDGEFAST_SUB = "[^"]*fast mode, billed at a premium/, "the one-line hint carries the premium");
+  // the gate, sharing cmtFastGate's rule (modelRunsFast: the /models list's word, else the Opus seed): on a tier
+  // whose model does not run fast mode the box is inert; the gear greys it and the hint says why, instead of a dead control
   assert.ok(GEAR.includes("function judgeFastGate"), "the availability gate must exist");
   // T300: one box per tier, each greyed on ITS tier's effective model (gear-judge-fast.test.ts holds the rest)
-  assert.ok(GEAR.includes("t.box.disabled = !can;"), "a box disables when its tier is not on Opus");
+  assert.ok(GEAR.includes("t.box.disabled = !can;"), "a box disables when its tier's model does not run fast mode");
   assert.ok(GEAR.includes("sub.textContent = !can ? JUDGEFAST_SUB_OFF : (r ? judgeFastSubRefused(t.word, r) : JUDGEFAST_SUB)"), "the hint says why while greyed");
   assert.ok(GEAR.includes("v === 'triage' ? (jm ? (jm.value || '') : '') : v"), "distilling on Follow triage counts as the triage pick");
   for (const store of ["judge-model", "index-model", "distill-model"])
@@ -244,11 +244,14 @@ test("the default-comment trio is its own gear group, defaulting to same-as-the-
   assert.ok(GEAR.includes("v.commentModel"), "fill() reads the RAW comment model value");
   assert.ok(GEAR.includes("v.commentEffort"), "fill() reads the RAW comment effort value");
   assert.ok(GEAR.includes("v.commentFast === 'on'"), "the fast box reflects the stored ask");
-  // fast is an Opus-only research preview: a pinned non-Opus comment model disables the box, and a
+  // a pinned comment model that does not run fast mode (modelRunsFast) disables the box, and a
   // model pick that strands a checked box unchecks it as part of that gesture — never a silent flap
   assert.ok(GEAR.includes("function cmtFastGate"), "the availability gate must exist");
   assert.ok(GEAR.includes("cmtFastGate(true)"), "the model pick runs the gate as a user gesture");
   assert.ok(GEAR.includes("cmtFastGate(false)"), "fill() re-checks availability without posting");
+  assert.ok(GEAR.includes("var can = modelRunsFast(cmm.value);"), "the comment box asks the judges' rule of its model");
+  assert.match(GEAR, /<span class=rs-sub>Start new comment threads in fast mode, billed at a premium\. If the thread's model can't run it/,
+    "the row's hint names no model family");
 });
 
 test("every kernel-side select says so when connected machines disagree (the autoNudge rule generalized)", () => {
