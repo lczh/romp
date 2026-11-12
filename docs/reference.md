@@ -338,9 +338,11 @@ turn running or queued, no subagent, no background task), and while it waits
 the chat line says on what, as in "Applying high effort after 2 background
 tasks…". Restart session applies a waiting change at once, ending that work.
 
-A model the session's own Claude Code does not know yet, while a newer Claude
-Code is installed (a session keeps the binary it was started with across an
-update), is kept rather than refused: the model badge keeps its switching-dots,
+A model the session's own Claude Code does not know yet, or that the API says
+needs a newer Claude Code, while a newer Claude Code is installed (a session
+keeps the binary it was started with across an update; for the API's refusal,
+one at or above the version it names), is kept rather than refused: the model
+badge keeps its switching-dots,
 and the session reloads on the installed Claude Code with the new model (and
 fast mode, when the session runs fast), waiting in the same way so nothing is
 cut. Meanwhile the badge's hover and the tab's say the model and what the
@@ -349,7 +351,9 @@ and its dots survive a kernel restart; until the reload, the session is not
 treated as fallen below its pick, so Retry upgrades after downgrades does not
 arm and no "Model back on" card follows the reload. If that Claude Code refuses
 the model too, the pick goes back and the error center says so, as for any
-refused model.
+refused model; when no installed Claude Code reaches the version the API named,
+the pick goes back at once and the error center's line ends with the version to
+update Claude Code to.
 
 Picking **Bypass permissions** from the mode dropdown reloads the session too,
 since Claude Code takes bypass only at launch, and that reload waits in the

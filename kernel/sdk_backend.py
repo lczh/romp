@@ -6329,6 +6329,31 @@ def _bin_ident(path):
 # A CLI's refusal of a model id it does not know (its set_model answer): "Model "claude-fable-5-2" is not a recognized model
 # id." on 2.1.305 and 2.1.322 (the latter's catalog_unknown code rides beside it), "Unknown model: …" on older ones.
 _UNRECOGNIZED_MODEL_RE = re.compile(r"not a recognized model|unknown model|catalog_unknown", re.I)
+# …and the API's refusal of a model the session's Claude Code is too old for, which an older CLI passes on as its set_model
+# answer (2026-11-12, a session on 2.1.280 picking claude-fable-5-2): 'API error: 400 {"type":"error","error":{"type":
+# "invalid_request_error","message":"Claude Code 2.1.280 does not support this model; version 2.1.290 or newer is required.
+# Run 'claude update', or …'. It names the CLI's own version and the minimum the model needs (_cli_too_old).
+_CLI_TOO_OLD_RE = re.compile(r"(?:Claude Code (\d+(?:\.\d+)+) )?does not support this model\W+version (\d+(?:\.\d+)+) or "
+                             r"newer is required", re.I)
+
+
+def _cli_too_old(e):
+    """(the refusing CLI's version, "" when the message names none; the minimum version the model needs) when `e` is the
+    API's refusal of a model this Claude Code is too old for (_CLI_TOO_OLD_RE), else None."""
+    m = _CLI_TOO_OLD_RE.search(str(e))
+    return (m.group(1) or "", m.group(2)) if m else None
+
+
+def _cli_update_hint(need, installed=""):
+    """The remedy for a model no installed Claude Code runs: the minimum the API named, and the installed version when
+    known ("Claude Code 2.1.285 is installed; update Claude Code to ≥2.1.290")."""
+    return "%supdate Claude Code to ≥%s" % (("Claude Code %s is installed; " % installed) if installed else "", need)
+
+
+def _vtuple(v):
+    """A dotted version ("2.1.322") as a tuple of ints for comparing, or None when `v` is not one."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)*)\s*", str(v or ""))
+    return tuple(int(x) for x in m.group(1).split(".")) if m else None
 
 
 def _stale_pick_of(reg):
@@ -8717,7 +8742,8 @@ class SdkSession:
                 self._pick_answered(prev)   # a refusal is the CLI's answer too: it runs what it ran before the pick
             with self._lock:
                 superseded = prev is not None and self.chosen_model != picked
-            if refusal and not superseded and prev is not None and await self._keep_pick_for_newer_cli(e, picked, prev):
+            kept_out = {}
+            if refusal and not superseded and prev is not None and await self._keep_pick_for_newer_cli(e, picked, prev, kept_out):
                 await self._do_refresh_context()
                 self.backend._poke()
                 return
@@ -8805,8 +8831,13 @@ class SdkSession:
                         if newer:
                             self.backend._log("retry upgrade (%s): a newer pick (%s) went in while the refusal was put "
                                               "back; the retry just armed stands down" % (self.name, newer), problem=False)
+                # a model the session's Claude Code is too old for, which no installed one runs either: the line says the
+                # remedy (_keep_pick_for_newer_cli's hint, with the installed version; from the message alone otherwise)
+                _old = _cli_too_old(e)
+                hint = kept_out.get("hint") or (_cli_update_hint(_old[1]) if _old else "")
                 self.backend._log("set_model (%s -> %s) refused by the SDK: %s: %s — the switch did NOT apply; "
-                                  "the model reverted to %s" % (self.name, model, type(e).__name__, e, back),
+                                  "the model reverted to %s%s" % (self.name, model, type(e).__name__, e, back,
+                                                                  "; " + hint if hint else ""),
                                   problem=True)
                 if resend is not None:
                     asyncio.ensure_future(self._do_set_model(resend[0], None))
@@ -8841,7 +8872,7 @@ class SdkSession:
         await self._do_refresh_context()
         self.backend._poke()
 
-    async def _keep_pick_for_newer_cli(self, e, picked, prev) -> bool:
+    async def _keep_pick_for_newer_cli(self, e, picked, prev, out=None) -> bool:
         """A live pick the CLI refused because it does not know the id, while the Claude Code installed now is not the one
         this session's CLI reported: the CLI is old, not the pick wrong (2026-11-12, the switch to Fable 5.2: every live
         session ran a Claude Code from before the model, 2.1.280 or 2.1.305, while the installed binary was 2.1.322, and
@@ -8859,17 +8890,32 @@ class SdkSession:
         the CLI reported no version but this connect launched it from the installed binary unchanged since (_launched_bin),
         when a newer pick landed meanwhile, or when this pick already had its relaunch. A CLI an earlier launch made that
         has not reported its version (a reattach after a kernel restart, with no turn since) reads as older, so the worst
-        case of that guess is one quiet relaunch before the same loud revert."""
-        if not _UNRECOGNIZED_MODEL_RE.search(str(e)):
+        case of that guess is one quiet relaunch before the same loud revert.
+
+        The API's refusal of a model the session's CLI is too old for (_cli_too_old: "Claude Code 2.1.280 does not support
+        this model; version 2.1.290 or newer is required", which a 2.1.280 CLI answered set_model claude-fable-5-2 with on
+        the rollout of 2026-11-12) is the same case said by the API, and names both versions: the pick is kept when the
+        installed Claude Code is at or above that minimum and is not the refusing one. Below it, or unreadable, the revert
+        stands, and `out["hint"]` carries the remedy for its line in the error center (update Claude Code to the minimum)."""
+        too_old = _cli_too_old(e)
+        if not too_old and not _UNRECOGNIZED_MODEL_RE.search(str(e)):
             return False
         st = getattr(self, "_stale_pick", None)
-        if st and st.get("pick") == picked and st.get("phase") == "relaunched":
+        relaunched = bool(st) and st.get("pick") == picked and st.get("phase") == "relaunched"
+        if relaunched and not too_old:
             return False                  # the Claude Code it relaunched on refused it too: today's revert
         try:
             installed = await asyncio.get_running_loop().run_in_executor(None, self.backend.cli_version)
         except Exception:
             installed = ""
-        seen = str(getattr(self, "_cli_version_seen", "") or "")
+        if too_old:
+            need, have = _vtuple(too_old[1]), _vtuple(installed)
+            if relaunched or need is None or have is None or have < need:
+                if out is not None:
+                    out["hint"] = _cli_update_hint(too_old[1], installed)
+                return False              # no installed Claude Code runs it: the revert, saying what would
+        # the refusing CLI's version: the API's message names it; else what its last report said
+        seen = (too_old[0] if too_old else "") or str(getattr(self, "_cli_version_seen", "") or "")
         if not installed or installed == seen:
             return False
         if not seen and getattr(self, "_launched_bin", None) is not None \
@@ -8885,9 +8931,10 @@ class SdkSession:
             self.backend._update_reg(self.sid, stalePick={"pick": picked, "back": back})
         except Exception as e2:
             self.backend._log("model (%s): registry write failed: %s" % (self.name, e2), problem=False)
-        self.backend._log("model (%s): Claude Code%s does not know %s (%s); Claude Code %s is installed, so the session "
+        self.backend._log("model (%s): Claude Code%s %s %s (%s); Claude Code %s is installed, so the session "
                           "relaunches on it with the pick kept%s"
-                          % (self.name, " " + seen if seen else "", picked, e, installed,
+                          % (self.name, " " + seen if seen else "",
+                             "is too old for" if too_old else "does not know", picked, e, installed,
                              "" if self.quiet() else " once it is quiet"), problem=False)
         self.want_switch_reconnect("model")
         return True

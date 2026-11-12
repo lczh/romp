@@ -26,6 +26,10 @@ sb = load_source("romp_sdk_backend_stalepick", os.path.join(BIN, "romp_sdk_backe
 
 PICK = "claude-fable-5-2"
 UNKNOWN = Exception('Model "claude-fable-5-2" is not a recognized model id. Run /model to see available models.')
+# the API's refusal a Claude Code too old for the model passes on as its set_model answer (the rollout of 2026-11-12: a session
+# on 2.1.280 picking claude-fable-5-2), in the shape the SDK raised it
+TOO_OLD = Exception('API error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Claude Code 2.1.280 '
+                    'does not support this model; version 2.1.290 or newer is required. Run \'claude update\', or …"}}')
 
 
 class _Client:
@@ -370,6 +374,57 @@ class StaleCliModelPick(unittest.TestCase):
         self.assertTrue(self.be.set_model(sid2, PICK))     # a live pick the CLI takes, its answer not yet in
         self.assertTrue(s2.snapshot()["modelPending"])
         self.assertEqual(s2.snapshot()["modelWait"], "", "an ordinary pick resolves live: no relaunch to wait for")
+
+    def test_the_apis_too_old_refusal_keeps_the_pick_when_the_installed_cli_is_new_enough(self):
+        """The rollout of 2026-11-12: a session on Claude Code 2.1.280 had its pick of Fable 5.2 refused by the API, not by
+        the CLI's catalog ("Claude Code 2.1.280 does not support this model; version 2.1.290 or newer is required"), and
+        romp reverted it although 2.1.322 was installed. The same case said by the API: the pick is kept for the quiet
+        relaunch onto the installed Claude Code, nothing rung. The message names the refusing version, so a reattached CLI
+        that has reported none is read by it."""
+        for seen in ("2.1.280", ""):
+            sid, s = self._live(cli_seen=seen, refuse=TOO_OLD)
+            asks = []
+            s.want_switch_reconnect = asks.append
+            self.logs.clear()
+            self._pick_refused(s, sid)
+            self.assertEqual(asks, ["model"], "seen %r: the quiet relaunch" % seen)
+            self.assertEqual(s.chosen_model, PICK, "the pick is kept")
+            self.assertEqual(sb.read_reg(self.d, sid)["model"], PICK)
+            self.assertEqual(s._model_pending, PICK, "its switching dots stand")
+            self.assertEqual(sb.read_reg(self.d, sid).get("stalePick"), {"pick": PICK, "back": "opus"})
+            self.assertEqual(self.forgot, [], "the family's remembered version is not forgotten")
+            self.assertEqual(self._problems(), [], "nothing in the error center")
+            said = [m for m in self.logs if "is too old for" in m]
+            self.assertEqual(len(said), 1, self.logs)
+            self.assertIn("Claude Code 2.1.280 is too old for claude-fable-5-2", said[0])
+            self.assertIn("Claude Code 2.1.322 is installed", said[0])
+
+    def test_the_apis_too_old_refusal_reverts_loudly_when_no_installed_cli_reaches_the_minimum(self):
+        """Installed below the minimum the API named, or unreadable: no relaunch would run the pick, so it reverts and rings
+        as before, and the line says what would: update Claude Code to the minimum."""
+        for installed, words in (("2.1.285", "Claude Code 2.1.285 is installed; update Claude Code to ≥2.1.290"),
+                                 ("", "update Claude Code to ≥2.1.290")):
+            self.be.cli_version = lambda installed=installed: installed
+            self.forgot.clear()
+            sid, s = self._live(cli_seen="2.1.280", refuse=TOO_OLD)
+            s.want_switch_reconnect = lambda why: self.fail("no relaunch: the installed Claude Code is too old as well")
+            self._pick_refused(s, sid)
+            self.assertEqual(s.chosen_model, "opus", "installed %r: reverted to the accepted model" % installed)
+            self.assertEqual(sb.read_reg(self.d, sid)["model"], "opus")
+            self.assertNotIn("stalePick", sb.read_reg(self.d, sid))
+            self.assertEqual(self.forgot, [PICK], "the refused pin is forgotten, as before")
+            rows = [p["text"] for p in self._problems() if "did NOT apply" in p["text"]]
+            self.assertTrue(any(t.endswith("; " + words) for t in rows), rows)
+
+    def test_the_too_old_matcher_reads_both_versions_and_nothing_else(self):
+        self.assertEqual(sb._cli_too_old(TOO_OLD), ("2.1.280", "2.1.290"))
+        self.assertEqual(sb._cli_too_old(Exception("This model does not support this model; version 3.0.1 or newer is required")),
+                         ("", "3.0.1"), "a message naming no CLI version still names the minimum")
+        self.assertIsNone(sb._cli_too_old(UNKNOWN))
+        self.assertIsNone(sb._cli_too_old(Exception("restricted_by_org: claude-fable-5-2 is not available to your organization")))
+        self.assertLess(sb._vtuple("2.1.285"), sb._vtuple("2.1.290"))
+        self.assertGreaterEqual(sb._vtuple("2.1.322"), sb._vtuple("2.1.290"))
+        self.assertIsNone(sb._vtuple(""))
 
 
 if __name__ == "__main__":
