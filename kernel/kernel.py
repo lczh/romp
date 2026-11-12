@@ -37151,21 +37151,31 @@ def _read_task_output(of):
     return data
 
 
-def _task_outputs_for(reminders, path):
+def _task_outputs_for(reminders, path, memo=None):
     """For each task-notification reminder carried by a user turn, the {tool_use_id: {command, output}} its
     chat card expands into: the shell command from the launch record (the mtime-cached bg scan) plus the
     output file's tail. The webview can't read the output file, so the kernel joins it here from the
     AUTHORITATIVE launch↔notification pairing (the user 2026-07-23, who wanted the background-command card to
     open to real detail instead of re-printing its one-line summary). {} when no reminder is a
     task-notification, or nothing readable was found. `reminders` are the INNER XML (outer wrapper already
-    peeled by _split_reminders), so re-wrap before parsing."""
+    peeled by _split_reminders), so re-wrap before parsing.
+    The launch is read by its id (_bg_task_reader), and `memo`, a build's own dict (build_session's, one per
+    pass, like _path_links'), keeps the transcript's reader for the pass: one read of the scan per build. Each
+    notification used to ask the scan for EVERY task and search the copies, so a whole-history build of a
+    transcript with N background tasks copied N rows N times (lab 2026-11-12: 8 s for 4,131), and a thread's
+    popover, whose folds run fresh over its own records, re-paired those records once per notification."""
     out = {}
+    row = None if memo is None else memo.get(path)
     for r in reminders:
         note = _parse_task_notification("<task-notification>%s</task-notification>" % r)
         tid = (note or {}).get("tool_use_id")
         if not tid:
             continue
-        cmd = next((tk.get("command") or "" for tk in _bg_scan_all_cached(path) if tk.get("id") == tid), "")
+        if row is None:
+            row = _bg_task_reader(path)
+            if memo is not None:
+                memo[path] = row
+        cmd = (row(tid) or {}).get("command") or ""
         tail = _read_task_output(note.get("output_file"))
         if cmd or tail:
             out[tid] = {"command": cmd, "output": tail}
@@ -37202,6 +37212,12 @@ def _bg_scan_all_cached(path):
     other's shape.
     Folds append-incrementally since 2026-09-03 (em.fold_records), like _bg_scan_cached."""
     return em.scan_bg_tasks_cached(path, _bgall_cache, want_all=True, ckpt="bgAll")
+
+
+def _bg_task_reader(path):
+    """One read of that every-task scan, answered by launch id: row(tid), the task's row or None. For a join of
+    one task at a time (em.bg_task_reader): no row but the one asked for is copied."""
+    return em.bg_task_reader(path, _bgall_cache, ckpt="bgAll")
 
 
 def _session_started_face(nodes, nid, healed):
@@ -48636,6 +48652,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # rollback was consumed (the user 2026-08-03).
     _landed_uuids = set(parsed.get("landedTextUuids") or ())
     _pl_memo = {}   # per-BUILD-pass cache for _path_links: one repo listing serves every message here
+    _to_memo = {}   # …and for _task_outputs_for: one read of the transcript's task scan serves every notification here
     # ── THE FOLD DECISION (issue 903; see _chat_fold at module level) ──────────────────────────
     # `_fk` is the first turn this build reshapes; turns before it come from the cached prefix. The
     # last turn is never cached (live atoms, overlays). Every gate names the exact input whose change
@@ -49098,7 +49115,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                             if pp:
                                 ev["pathPins"] = pp     # mention-time snapshots: this message's embeds keep these bytes
                             if reminders:                # join each task-notification to its command + output tail
-                                to = _task_outputs_for(reminders, sess["path"])
+                                to = _task_outputs_for(reminders, sess["path"], _to_memo)
                                 if to:
                                     ev["taskOutputs"] = to
                             # The CLI's own stop record ("[Request interrupted by user]" / "… for tool use]")

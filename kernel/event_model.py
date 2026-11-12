@@ -598,11 +598,33 @@ def scan_bg_tasks_cached(path, cache, want_all=False, ckpt=None):
     2026-09-02: four such readers over one 180 MB transcript held the push loop at a full core). `cache`
     is the caller's dict (the kernel keeps a running-only and an every-task cache; the judge its own), so
     the two views never invalidate each other and a test's `.clear()` still forces a re-fold."""
+    return _bg_finish(_bg_fold(path, cache, want_all, ckpt), want_all)
+
+
+def _bg_fold(path, cache, want_all, ckpt):
+    """The pairing state of `path` folded through `cache`, in the view the caller asked for."""
     state = fold_records(cache, path, lambda: _bg_fresh(want_all), _bg_step, ckpt=ckpt)
     if state["all"] != bool(want_all):                    # the view is baked into the state at init: a cache handed to
         raise ValueError("bg fold cache for %s is shaped for want_all=%r, asked for %r"   # both views would answer
                          % (path, state["all"], bool(want_all)))                          # one of them wrong
-    return _bg_finish(state, want_all)
+    return state
+
+
+def bg_task_reader(path, cache, ckpt=None):
+    """ONE read of the every-task fold (scan_bg_tasks_cached's want_all view, the same `cache`), answered by launch
+    id: returns row(tid), that task's row (a COPY, like _bg_finish's) or None when the transcript records no launch
+    under the id. For a caller joining notifications to their launches: the state keys its rows by id already, and
+    through scan_bg_tasks_cached each join copied every row and searched the copies, N rows N times over a
+    transcript of N background tasks (lab 2026-11-12: 17 million row copies, 8 s, for 4,131 notifications). In that
+    view a row is never dropped and an id is registered once, so the row under an id IS the first launch-ordered
+    row carrying it, the one the search answered. The reader holds the state it was made from (the fold never
+    changes a state it handed out), so it answers as of its read; a caller wanting newer records asks again."""
+    tasks = _bg_fold(path, cache, True, ckpt)["tasks"]
+
+    def row(tid):
+        r = tasks.get(tid)
+        return dict(r) if r is not None else None
+    return row
 
 
 def _read_jsonl(path):
