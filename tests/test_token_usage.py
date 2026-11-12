@@ -780,25 +780,81 @@ class CostWeighting(unittest.TestCase):
 
     def test_an_unknown_version_of_a_known_model_is_a_family_guess_said_once_never_a_neighbours_row(self):
         """Review of #170: the table's id match took any known id plus a dash, so claude-sonnet-5-5 priced silently as
-        claude-sonnet-5 (Claude Code bills it about three times that) and claude-fable-5-2 as claude-fable-5 (four times
-        Fable 5.1's cache-read rate). Only a date may follow a known id; an unknown version is a family guess, said."""
+        claude-sonnet-5 (Claude Code bills it about three times that) and a Fable version the table lacked as Fable 5
+        (four times Fable 5.1's cache-read rate). Only a date may follow a known id; an unknown version is a family
+        guess, said."""
         import io
         cp = sys.modules["romp_cli_prices"]
-        for mid in ("claude-sonnet-5-5", "claude-fable-5-2", "claude-opus-5-6"):
+        for mid in ("claude-sonnet-5-5", "claude-fable-5-3", "claude-opus-5-6"):
             self.assertIsNone(cp.model_id(mid), mid)
         self.assertEqual(cp.model_id("claude-opus-5-5-20261001"), "claude-opus-5-5", "a dated id is the model")
         self.assertEqual(cp.model_id("claude-opus-5-5[1m]"), "claude-opus-5-5")
         prices = km._model_prices()
-        km._PRICE_UNKNOWN_SAID.difference_update({"claude-sonnet-5-5", "claude-fable-5-2"})
+        km._PRICE_UNKNOWN_SAID.difference_update({"claude-sonnet-5-5", "claude-fable-5-3"})
         err = io.StringIO()
         with mock.patch.object(sys, "stderr", err):
             self.assertIs(km._price_for("claude-sonnet-5-5", prices), prices["claude-sonnet-5"], "the newest Sonnet, guessed")
             self.assertIs(km._price_for("claude-sonnet-5-5", prices), prices["claude-sonnet-5"])
-            self.assertIs(km._price_for("claude-fable-5-2", prices), prices["claude-fable-5-1"], "the newest Fable, not Fable 5")
+            self.assertIs(km._price_for("claude-fable-5-3", prices), prices["claude-fable-5-2"], "the newest Fable, not Fable 5")
         said = err.getvalue().splitlines()
         self.assertEqual(len(said), 2, said)
         self.assertIn("'claude-sonnet-5-5' is not in Claude Code's price table", said[0])
-        self.assertIn("'claude-fable-5-2' is not in Claude Code's price table", said[1])
+        self.assertIn("'claude-fable-5-3' is not in Claude Code's price table", said[1])
+
+    def test_fable_and_mythos_5_2_have_their_own_rows_standard_and_fast(self):
+        """Fable 5.2 had no row (2026-11-12, the review of #453): the family guess read it at Fable 5.1's rates ($10/$50,
+        cache read $0.25), which have no fast row, so standard Fable 5.2 read 1.25 times too high and fast Fable 5.2 at
+        0.625 times, and the spend guard's ceiling let a fast session spend 1.6 times what it said. Anthropic's pricing
+        page and Claude Code 2.1.322's catalog and cost code: $8/$40, writes $10 (5 m) and $16 (1 h), cache read $0.20;
+        fast twice each. Mythos 5.2 the same. Priced from their own rows, nothing said."""
+        import io
+        prices = km._model_prices()
+        km._PRICE_UNKNOWN_SAID.difference_update({"claude-fable-5-2", "claude-mythos-5-2"})
+        err = io.StringIO()
+        before = list(km._SDK_BOOT_PROBLEMS)
+        with mock.patch.object(sys, "stderr", err):
+            for mid in ("claude-fable-5-2", "claude-mythos-5-2"):
+                row = km._price_for(mid, prices)
+                self.assertIs(row, prices[mid], mid + " is priced from its own row, not a family guess")
+                self.assertEqual([round(row[k] * 1e6, 6) for k in ("in", "out", "cache_w", "cache_w_1h", "cache_r")],
+                                 [8, 40, 10, 16, 0.2], mid)
+                self.assertEqual([round(row["fast"][k] * 1e6, 6) for k in ("in", "out", "cache_w", "cache_w_1h", "cache_r")],
+                                 [16, 80, 20, 32, 0.4], mid + " fast")
+                self.assertIs(km._price_for(mid + "[1m]", prices), row, "the 1M spelling")
+        self.assertEqual(err.getvalue(), "", "nothing to say about a model the table has")
+        self.assertEqual(km._SDK_BOOT_PROBLEMS, before, "…and nothing in the error center")
+        # one call each way, at Claude Code's arithmetic: a million input tokens and a million cache reads
+        cp = sys.modules["romp_cli_prices"]
+        u = {"input_tokens": 1e6, "cache_read_input_tokens": 1e6}
+        self.assertAlmostEqual(cp.call_cost("claude-fable-5-2", u), 8.2)
+        self.assertAlmostEqual(cp.call_cost("claude-fable-5-2", dict(u, speed="fast")), 16.4)
+        self.assertEqual(cp.cost_bounds("claude-fable-5-2", 0, 1e6, 0, 0), (40.0, 88.0),
+                         "the drift check's reach: standard to fast with US inference")
+
+    def test_a_family_guess_lands_in_the_error_center_saying_what_it_priced_it_as(self):
+        """CLAUDE.md, fail loudly: the guess was said only on stderr, a kernel log nobody tails, so a model priced at its
+        neighbour's rates looked right in the spend guard and the cost view. Now it is said in the error center too, once
+        per model per kernel life, naming the row the guess used and its rates, and saying when that row has no fast
+        rates (a fast call is then priced at the standard ones)."""
+        import io
+        prices = km._model_prices()
+        km._PRICE_UNKNOWN_SAID.difference_update({"claude-fable-5-3", "claude-sonnet-9", "claude-house-ghost"})
+        before = km._SDK_PROBLEM_SEQ[0]   # the ring keeps 20; its sequence counts past that
+        with mock.patch.object(sys, "stderr", io.StringIO()):
+            km._price_for("claude-fable-5-3", prices)
+            km._price_for("claude-fable-5-3", prices)
+            km._price_for("claude-sonnet-9", prices)
+            self.assertIsNone(km._price_for("claude-house-ghost", prices))
+        rows = [r["text"] for r in km._SDK_BOOT_PROBLEMS if r["seq"] > before]
+        self.assertEqual(len(rows), 3, rows)
+        self.assertIn("'claude-fable-5-3' is not in Claude Code's price table", rows[0])
+        self.assertIn("priced as claude-fable-5-2 ($8/$40 per MTok in/out, fast $16/$80)", rows[0])
+        self.assertIn("priced as claude-sonnet-5 ($2/$10 per MTok in/out, no fast rates, so a fast call is priced at the "
+                      "standard rates)", rows[1])
+        self.assertIn("'claude-house-ghost'", rows[2])
+        self.assertIn("dearest row", rows[2])
+        self.assertTrue(any("claude-fable-5-3" in r["text"] for r in km._sdk_problem_rows(limit=50)),
+                        "the feed's bell reads it")
 
     def test_a_partial_config_row_fills_from_the_right_rates(self):
         """A partial `fast` override fills its missing keys from Claude Code's fast rates, never the standard ones; a

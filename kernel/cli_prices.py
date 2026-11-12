@@ -7,8 +7,9 @@ prices with this table and nothing else. Before it, the kernel kept a table of i
 it had no Opus 5.5 row, so a family fallback priced Opus 5.5 at Opus 4.8's rates, and it had no fast tier, so the
 guard read standard Opus 5.5 at about 1.6 times its price and fast Opus 5.5 at about 0.9 times.
 
-The source is Claude Code's baked-in model catalog (its `pricing_tiers` and each model's `pricing` tier, 2.1.282) and,
-for fast mode, the per-model fast rates in its cost code, which are not in the catalog. Read off the binary by hand,
+The source is Claude Code's baked-in model catalog (its `pricing_tiers` and each model's `pricing` tier, 2.1.282; the
+Fable and Mythos 5.2 rows from 2.1.322, which match Anthropic's published pricing page) and, for fast mode, the
+per-model fast rates in its cost code, which are not in the catalog. Read off the binary by hand,
 not at run time: the catalog is a minified script literal inside a 230 MB executable and the fast rates are code
 constants whose names change every build, so nothing romp could parse there is a contract. The table checks against
 the ledger instead: priced by it, a turn's calls (its main transcript's and its subagents') sum to the turn's recorded
@@ -32,12 +33,14 @@ CLI_PRICES = {
     "claude-opus-4-0": (15, 75, 18.75, 30, 1.5), "claude-opus-4-1": (15, 75, 18.75, 30, 1.5),
     "claude-opus-4-5": _T_5_25, "claude-opus-4-6": _T_5_25, "claude-opus-4-7": _T_5_25, "claude-opus-4-8": _T_5_25,
     "claude-opus-5": _T_5_25, "claude-opus-5-5": (4, 20, 5, 8, 0.2),
-    "claude-fable-5": _T_10_50, "claude-fable-5-1": (10, 50, 12.5, 20, 0.25),
-    "claude-mythos-5": _T_10_50, "claude-mythos-5-1": (10, 50, 12.5, 20, 0.25),
+    "claude-fable-5": _T_10_50, "claude-fable-5-1": (10, 50, 12.5, 20, 0.25), "claude-fable-5-2": (8, 40, 10, 16, 0.2),
+    "claude-mythos-5": _T_10_50, "claude-mythos-5-1": (10, 50, 12.5, 20, 0.25), "claude-mythos-5-2": (8, 40, 10, 16, 0.2),
 }
-# fast mode: twice the standard rates on Opus 5.5, Fable-level rates on Opus 4.8 and 5, six times on Opus 4.6 and 4.7
+# fast mode: twice the standard rates on Opus 5.5, Fable 5.2 and Mythos 5.2, Fable-level rates on Opus 4.8 and 5, six times
+# on Opus 4.6 and 4.7
 CLI_FAST_PRICES = {"claude-opus-5-5": (8, 40, 10, 16, 0.4), "claude-opus-5": _T_10_50, "claude-opus-4-8": _T_10_50,
-                   "claude-opus-4-7": (30, 150, 37.5, 60, 3), "claude-opus-4-6": (30, 150, 37.5, 60, 3)}
+                   "claude-opus-4-7": (30, 150, 37.5, 60, 3), "claude-opus-4-6": (30, 150, 37.5, 60, 3),
+                   "claude-fable-5-2": (16, 80, 20, 32, 0.4), "claude-mythos-5-2": (16, 80, 20, 32, 0.4)}
 WEB_SEARCH_USD = 0.01
 US_GEO_MULTIPLIER = 1.1
 
@@ -47,7 +50,7 @@ _DATED = re.compile(r"(.+)-\d{8}")                 # a dated model id: the id, a
 def model_id(model):
     """The table's id for a model id as a transcript or a result names it: exact, or a dated form of it
     (`claude-haiku-4-5-20251001`), with any context-window suffix (`[1m]`) dropped; None for a model the table lacks.
-    Only a date may follow a known id: `claude-sonnet-5-5` is not `claude-sonnet-5`, nor `claude-fable-5-2`
+    Only a date may follow a known id: `claude-sonnet-5-5` is not `claude-sonnet-5`, nor `claude-fable-5-3`
     `claude-fable-5` (the review of #170: the first cut took any dash, and priced both silently as their neighbour)."""
     m = str(model or "").replace("[1m]", "").replace("[2m]", "").lower()
     if m in CLI_PRICES:

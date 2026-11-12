@@ -57,7 +57,7 @@ test("the visible source prefix strips for DISPLAY only, in the romp render bran
   // the plain user branch renders ev.md untouched (no strip — that is romp-only); the user's own
   // words go through userMd (newlines kept), a harness note through md
   const userBranch = RENDER.slice(RENDER.indexOf("} else if (ev.md) {", at));
-  assert.match(userBranch.slice(0, 400), /bubble\.innerHTML = kind === "user" \? userMd\(ev\.md\) : md\(ev\.md\);/);
+  assert.match(userBranch.slice(0, 600), /bubble\.innerHTML = kind === "user" \? userMd\(ev\.md, undefined, mdPaths\) : md\(ev\.md, undefined, mdPaths\);/);
 });
 
 test("the watch notices carry the marker at the injection site — no prose pattern-matching anywhere", () => {

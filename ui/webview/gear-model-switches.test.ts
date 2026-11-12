@@ -50,7 +50,7 @@ test("the rows' words: the Automation tab's row shape, a permanent one-sentence 
     assert.equal((s.match(/class=rs-line>/g) || []).length, 1, "one rs-line per row: the line that is always there");
     assert.doesNotMatch(s, /rs-sub|title=/, "no hover popover and no title: a popup under the pane's last rows ran past the card and scrolled it (T408)");
   }
-  assert.match(af, /<span class=rs-line>Every Opus session runs Claude Code's fast mode, billed at a premium; a session you set to Slow stays slow\.<\/span>/, "Always fast's line");
+  assert.match(af, /<span class=rs-line>Every session runs Claude Code's fast mode whenever its model supports it, billed at a premium; a session you set to Slow stays slow\.<\/span>/, "Always fast's line, naming no model family (fast mode moved to Fable 5.2 in Claude Code 2.1.321)");
   assert.match(ru, /<span class=rs-line>A session whose model fell back without a pick asks for its picked model again every ten minutes, once quiet, until it is back\.<\/span>/, "Retry upgrades after downgrades' line");
   assert.doesNotMatch(af + ru, /fleet/i);
 });

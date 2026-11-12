@@ -61,7 +61,9 @@ test("the gear has an Extra models from your API gateway checkbox under General,
     "…fired at the end of every paint, with the list that won (a stale payload paints nothing, so the line never moves for no reason)");
   assert.ok(!block.includes("fillRouterLine") && !block.includes("rtrLine"), "…and the block names neither the writer nor the element (the lifted harness has neither)");
   assert.ok(fnAt > blockStop, "the writer sits after the block");
-  assert.ok(GEAR.includes("\n  onChoices = fillRouterLine;\n"), "…and is the hook's one assignee");
+  assert.ok(GEAR.includes("\n  onChoices = function (d) { fillRouterLine(d); cmtFastGate(false); judgeFastGate(); };\n"),
+    "…and is the hook's one assignee, beside the fast-mode gates that read the same list");
+  assert.equal((GEAR.match(/\n  onChoices = /g) || []).length, 1, "one assignment");
   const frame = GEAR.slice(GEAR.indexOf("if (!m || (m.type !== 'models' && m.type !== 'wsup')) return;"), blockStop);
   assert.ok(frame.includes("if (d && Array.isArray(d.models) && adoptChoices(d)) paintChoices();"),
     "the models frame (the kernel's only signal for an applied flip: no echo frame) and the shim's wsup frame (a kernel restart: the documented way to change the declared list) repaint, which refreshes the line");

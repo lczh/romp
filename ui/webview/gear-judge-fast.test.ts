@@ -32,14 +32,27 @@ test("the gate greys each tier's box on ITS effective model and keeps the value"
   assert.ok(GEAR.includes("t.box.disabled = !can;"), "greyed, not hidden, not unchecked");
   assert.ok(GEAR.includes("wrap.classList.toggle('rs-off', !can);"), "the greyed look per box");
   assert.ok(GEAR.includes("v === 'triage' ? (jm ? (jm.value || '') : '') : v"), "Follow triage resolves to the triage pick");
-  assert.ok(GEAR.includes("can = !v || v.toLowerCase().indexOf('opus') !== -1"), "the Opus-only rule; an unloaded value is unknown, not a refusal");
+  assert.ok(GEAR.includes("var can = modelRunsFast(t.model());"), "each tier asks the shared rule of its effective model");
+  // the shared rule (2026-11-12, Claude Code 2.1.321 runs fast mode on Fable 5.2 and retired it for Opus 4.8): the kernel's
+  // /models list says, by the CLI's word, through the chat badge's own reader; the Opus seed only where no CLI has named
+  // the pick, and an unloaded value is unknown, not a refusal
+  const rule = GEAR.slice(GEAR.indexOf("function modelRunsFast(val) {"), GEAR.indexOf("\n  }\n", GEAR.indexOf("function modelRunsFast(val) {")));
+  assert.ok(rule.includes("var known = SC.modelFastKnown(choices && choices.models, val || '');"), "the list's word first, read as the badge reads it");
+  assert.ok(rule.includes("if (typeof known === 'boolean') return known;"), "a named model's answer stands, true or false");
+  assert.ok(rule.includes("return !v || v === 'session' || v === 'default' || v.indexOf('opus') !== -1;"), "the seed only where the list is silent");
+  assert.ok(!GEAR.includes("can = !v || v.toLowerCase().indexOf('opus') !== -1"), "the spelling rule no longer decides alone");
   assert.ok(!GEAR.includes("t.box.checked = false"), "no gesture unchecks a box: the setting is the user's to keep");
-  assert.match(GEAR, /var JUDGEFAST_SUB_OFF = "Fast mode is Opus-only, and this tier is not on Opus\./, "the hint says why, per tier");
+  assert.match(GEAR, /var JUDGEFAST_SUB_OFF = "This tier's model doesn't run fast mode\. Pick one that does to use it; the setting is kept\.";/, "the hint says why, per tier, naming no model family");
+  assert.doesNotMatch(GEAR, /Opus-only|Pick Opus|standard Opus rate/, "no copy in the gear says fast mode is Opus's alone");
   assert.ok(GEAR.includes("sub.textContent = !can ? JUDGEFAST_SUB_OFF : (r ? judgeFastSubRefused(t.word, r) : JUDGEFAST_SUB)"),
     "the hint: the greyed reason, else the CLI's refusal of this tier's last fast ask, else the description");
   for (const store of ["judge-model", "index-model", "distill-model"])
     assert.match(GEAR, new RegExp("gclock\\.stamp\\('" + store + "'\\) \\}\\); judgeFastGate\\(\\);"), `a ${store} pick re-runs the gate`);
   assert.match(GEAR, /cmtFastGate\(false\);\n\s*judgeFastGate\(\);/, "fill() re-checks after the tiers and the flags are set");
+  // the gates read the list now, so the list's every paint (the open's /models, a models frame's re-read) re-runs them,
+  // without unchecking anything: only the user's own model pick unchecks the comment box
+  assert.ok(GEAR.includes("\n  onChoices = function (d) { fillRouterLine(d); cmtFastGate(false); judgeFastGate(); };\n"),
+    "a paint of the /models list re-gates the boxes");
 });
 
 test("the CLI's refusal reaches the box's hint from /version", () => {

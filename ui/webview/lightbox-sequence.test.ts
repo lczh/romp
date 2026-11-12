@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { Marked } from "marked";
-import { mdLayout, opensInLightbox } from "./md-images";
+import { mdLayout, opensInLightbox, mdImgFile, mdImgFileSrc } from "./md-images";
 import { keyOf } from "./chat-window";
 import { chatMdExtensions } from "./chat-md";
 
@@ -39,8 +39,8 @@ function lift(sessions: Map<string, { events: Ev[] }>, thread: { sid: string; th
   `;
   const H = { sessions, thread };
   const counting = { lexer: (src: string) => { lexed.n++; return marked.lexer(src); } };
-  return (new Function("H", "marked", "mdLayout", "keyOf", "opensInLightbox", prelude + code + "\nreturn chatImagesFor;") as
-    (h: unknown, m: unknown, f: unknown, k: unknown, o: unknown) => (sid: string | null, from?: Fake | null) => Entry[])(H, counting, mdLayout, keyOf, opensInLightbox);
+  return (new Function("H", "marked", "mdLayout", "keyOf", "opensInLightbox", "mdImgFile", "mdImgFileSrc", prelude + code + "\nreturn chatImagesFor;") as
+    (h: unknown, m: unknown, f: unknown, k: unknown, o: unknown, mf: unknown, ms: unknown) => (sid: string | null, from?: Fake | null) => Entry[])(H, counting, mdLayout, keyOf, opensInLightbox, mdImgFile, mdImgFileSrc);
 }
 // a clicked element, as far as the scope reads it: which ancestor it sits under
 function inside(sel: Record<string, unknown>): Fake {
@@ -147,10 +147,36 @@ test("one stop per picture per message; a linked picture, code and a non-image p
   assert.deepEqual(show(nav), ["url:w.png", "url:w.png"], "the same picture in two messages is two stops, twice in one message one");
 });
 
-test("relative and data: pictures resolve against the page; a source the sanitizer would not load is no stop", () => {
+test("a path picture is its file's stop, a data: picture its URL; a source the sanitizer would not load is no stop", () => {
+  // a src with no scheme names a file on the session's disk since 2026-11-12 (md() loads it through the kernel), so the
+  // arrows know it as that file, never as the dashboard's own address it once resolved to and 404'd on
   const ev: Ev = { kind: "assistant", md: "![r](/media/chart.png) ![d](data:image/png;base64,AAAA) ![j](javascript:alert(1)) ![f](file:///tmp/x.png)" };
   const nav = lift(new Map([[WEB, { events: [ev] }]]))(WEB);
-  assert.deepEqual(nav.map((e) => e.url), ["https://dash.example.test/media/chart.png", "data:image/png;base64,AAAA"]);
+  assert.deepEqual(nav.map((e) => e.url || "path:" + e.path), ["path:/media/chart.png", "data:image/png;base64,AAAA"]);
+  assert.equal(nav[0].sid, WEB);
+});
+
+test("a picture written as a path is its file's stop where it is written, with the message's pin, never a second figure stop", () => {
+  // the kernel verifies the picture's path as it does any path in the text (pathLinks, pathPins), but the page draws the
+  // picture where it is written and no figure for that link: one stop, at the picture, pinned as md() loads it
+  const ev: Ev = { kind: "assistant", uuid: "a1", md: [
+    "The latency split:",
+    "",
+    "![split](/tmp/notes-api/split.png)",
+    "",
+    "and the raw counts in docs/figure.png, under home ![home](~/notes-api/hit.png) and relative ![rel](figs/p95.png).",
+    "",
+    "![web](https://img.example.test/wide.png) ![nox](/tmp/notes-api/plot)",
+  ].join("\n"), pathLinks: { "/tmp/notes-api/split.png": "/tmp/notes-api/split.png", "docs/figure.png": "docs/figure.png", "~/notes-api/hit.png": "~/notes-api/hit.png" },
+    pathPins: { "/tmp/notes-api/split.png": "v1", "docs/figure.png": "v2" } };
+  const nav = lift(new Map([[WEB, { events: [ev] }]]))(WEB);
+  assert.deepEqual(show(nav), ["path:/tmp/notes-api/split.png@v1", "path:~/notes-api/hit.png", "path:figs/p95.png", "path:docs/figure.png@v2",
+    "url:wide.png", "url:https://dash.example.test/file?path=%2Ftmp%2Fnotes-api%2Fplot&sid=" + WEB],
+    "the pictures where they are written, the paragraph's figure after it; a path with no picture extension loads by its file URL, as the page has it");
+  assert.ok(nav.slice(0, 3).every((e) => e.sid === WEB), "each resolves in the session's folder");
+  const remote = lift(new Map([["gpu1:" + WEB, { events: [ev] }]]))("gpu1:" + WEB);
+  assert.equal(remote[0].sid, "gpu1:" + WEB, "a remote session's picture is its machine's file");
+  assert.equal(remote.at(-1)!.url, "https://dash.example.test/remote/gpu1/file?path=%2Ftmp%2Fnotes-api%2Fplot&sid=" + WEB);
 });
 
 test("a user's attached pictures follow the text, and the attached path's mention in the text is no second stop", () => {
