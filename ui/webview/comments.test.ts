@@ -465,7 +465,7 @@ test("while the thread is WRITING the passage holds the await-green tint and NOT
 test("the popover renders the thread with the CHAT's own renderer from the branch point", () => {
   assert.match(UI, /renderingSid = threadSidOf\(th\);/);   // the thread's session id (host-prefixed on a linked machine)
   assert.match(UI, /const node = renderEvent\(ev, prev, turnWorkedSecs\(evs, it\.index, thWorking\)\);\s*\n\s*list\.appendChild\(node\);/);   // + the chat's worked footers (the parity bundle, 2026-08-26)
-  assert.match(KERNEL, /def _thread_events\(tsid, cut_uuid, now, live_map, tm=None, out=None\):/);   // tm: the thread's live row (thread-live-1)
+  assert.match(KERNEL, /def _thread_events\(tsid, cut_uuid, floor_t, now, live_map, tm=None, out=None\):/);   // tm: the thread's live row (thread-live-1); floor_t: the row's createdT
   assert.match(KERNEL, /evs = evs\[at \+ 1:\]/, "sliced to AFTER the branch point — the head system card never rides");
   // the thread's own statusline posts the chat's own ops through the SHARED menu, keyed to the
   // thread sid (toggleMetaMenu's opSid — 2026-08-25 parity: one builder, sid-scoped)
