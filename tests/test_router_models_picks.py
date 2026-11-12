@@ -351,7 +351,7 @@ class NewThreadRoad(_OnThenOff):
                 mock.patch.object(km, "_claim_session_name", lambda nm, kind, sid: None), \
                 mock.patch.object(km, "_load_comments", lambda sid: {"threads": []}), \
                 mock.patch.object(km, "_save_comments", lambda sid, data: None), \
-                mock.patch.object(km, "_user_send", lambda be, sid, text: None), \
+                mock.patch.object(km, "_user_send", lambda be, sid, text, **kw: None), \
                 mock.patch.object(km, "_release_name", lambda nm: None), \
                 mock.patch.object(km, "_push_soon", lambda: None), \
                 mock.patch.object(km, "_comment_launch_prefs", wraps=km._comment_launch_prefs) as prefs:

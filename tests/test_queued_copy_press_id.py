@@ -253,10 +253,12 @@ class TheNoIdRouteTakesTheTextAlone(_PlainRouteFixture):
         client = {"send": lambda s: None}
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": A}, client)
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": B}, client)
-        # the composer's send is the user's: the fifth slot says so (T315), behind the id in the fourth
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True), ("send", WORDS, "human", B, True)])
+        # the composer's send is the user's: the fifth slot says so (T315), behind the id in the fourth; the seventh holds
+        # the words typed (the mid-turn reply check's origin), past an empty attachment slot
+        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True, None, WORDS),
+                                                ("send", WORDS, "human", B, True, None, WORDS)])
         self.assertIsNone(km._cancel_parked(SID, 0, WORDS, qid=B), "the ✕ by id is exact on a held send too")
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True)])
+        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True, None, WORDS)])
         km._working_now = lambda sid: False
         km._apply_pending_ops()
         self.assertEqual(self.plain.calls, [WORDS], "the drain hands the backend the text")
@@ -383,7 +385,8 @@ class TheWireCarriesTheId(unittest.TestCase):
     def test_a_send_parks_under_the_id_it_was_posted_with(self):
         self.assertTrue(km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": A}, self.client))
         self.assertTrue(km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": B}, self.client))
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True), ("send", WORDS, "human", B, True)],
+        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True, None, WORDS),
+                                                ("send", WORDS, "human", B, True, None, WORDS)],
                          "the id is the fourth slot; the fifth says the composer's send is the user's (T315)")
         # each parked send is answered (sendAck: the kernel holds it, kernel.py _send_ack, 2026-10-09); nothing else, nothing refused
         self.assertEqual([(f["type"], f["qid"], f["ok"]) for f in self.sent], [("sendAck", A, True), ("sendAck", B, True)], "nothing refused")
@@ -407,7 +410,7 @@ class TheWireCarriesTheId(unittest.TestCase):
         # held by a parked op
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": A}, self.client)
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": A}, self.client)
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True)], "the second copy parks nothing")
+        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True, None, WORDS)], "the second copy parks nothing")
         self.assertEqual(dups(), [(A, True)], "…and is answered as the message the kernel holds")
         km._pending_ops.pop(SID, None)
         km._SEND_ACCEPTS.clear()   # from here the session's own copies alone say the id is held (a record lost, or a kernel from before it)
