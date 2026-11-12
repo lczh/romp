@@ -3646,7 +3646,14 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the parent they name): after a demotion such a refusal rewrites and marks
   nothing, the whole parse serving meanwhile, so the document stands for the
   parent's arrival, which demotes as `late-parent` and restores from it
-  (2026-11-12; a boot's refusal rewrites as below); a document written before the bit is unproven, so a standing
+  (2026-11-12; a boot's refusal rewrites as below). That restore is refused,
+  and the whole parse heals the author instead, when the document was written
+  while a postal author waited on the log (its own `postalWait`;
+  `restore:postalWait`). Any restore is refused when the tail's pre-pass gives
+  a compaction summary to a boundary before the cut, as it does when the
+  summary's own boundary is off the path (`restore:preCutSummary`): the
+  document froze that boundary's atom, so the whole parse serves and offers its
+  document as after a chain refusal; a document written before the bit is unproven, so a standing
   document is refused at its first restore after the change, booked
   `full:refused`, and rewritten from the whole parse that follows the
   refusal (`write:afterRefusal`), so the next restore takes it: then and

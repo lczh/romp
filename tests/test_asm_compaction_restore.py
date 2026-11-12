@@ -51,7 +51,10 @@ document standing rather than rewriting it from that half-written graph; when th
 (`late-parent`, or the summary's own reason when the summary lands with it) and the restore serves from the same document,
 with no second whole parse. A parent that never lands keeps every step equal to a cold parse, the settle writes the document
 from the whole entry, and a boot's refusal still rewrites at once. A parent that a record BEFORE the cut named parses whole
-on every road, a boot included: the document's verdicts were decided without it, so the chain proof refuses it.
+on every road, a boot included: the document's verdicts were decided without it, so the chain proof refuses it. From the
+review of the same day: a late parent on a document written while a postal author waited parses whole (the document's own
+`postalWait`), and a late parent that leaves the boundary off the path, so its summary belongs to a boundary before the cut,
+parses whole too (restore:preCutSummary).
 Synthetic transcripts only: invented notes-api text, placeholder uuids."""
 import json
 import os
@@ -182,7 +185,7 @@ def late_anchor_lead(t, parent):
             {"type": "queue-operation", "operation": "dequeue", "timestamp": G.iso(t + 31), "sessionId": SID}] + bookkeeping()
 
 
-def late_anchor_compaction(t):
+def late_anchor_compaction(t, late_under="la_b"):
     """An automatic compaction as the CLI wrote one on a session near 1 GB (2026-11-12, structure only, every uuid and text
     invented): the boundary (parentUuid null, logicalParentUuid the preserved segment's tail `la_tail`, written before it),
     then an attachment `la_a1` whose parent `la_late` is NOT written yet, an attachment under it, the summary (the segment's
@@ -190,7 +193,8 @@ def late_anchor_compaction(t):
     bookkeeping; and only then `la_late`, an attachment hanging off the boundary, stamped as `la_a1`, the bookkeeping again,
     an attachment under the seventeenth, and the conversation chaining on from it. The chain is la_b, la_late, la_a1, la_a2,
     la_sum, la_r1 ... la_r17, la_r18, the turn: no cycle. Returns the records and the index of `la_late` (its file position
-    24 past the boundary; a read that ends anywhere from position 1 to 23 sees its child and not it)."""
+    24 past the boundary; a read that ends anywhere from position 1 to 23 sees its child and not it). `late_under` names the
+    record `la_late` hangs off: "la_tail" puts the boundary off the conversation's path, beside the summary's chain."""
     b = dict(G.compact_line(t, "la_b", "la_tail", trigger="auto"))
     b["compactMetadata"] = dict(b["compactMetadata"], preservedSegment={"headUuid": "la_head", "anchorUuid": "la_sum",
                                                                         "tailUuid": "la_tail"})
@@ -202,7 +206,7 @@ def late_anchor_compaction(t):
         parent = "la_r%d" % k
     recs += bookkeeping()
     late = len(recs)
-    recs += [att(t + 20, "la_late", "la_b", "date")] + bookkeeping() + [att(t + 23, "la_r18", parent, "task_status")]
+    recs += [att(t + 20, "la_late", late_under, "date")] + bookkeeping() + [att(t + 23, "la_r18", parent, "task_status")]
     recs += turn(t + 40, "la", "la_r18")
     return recs, late
 
@@ -1167,6 +1171,91 @@ class CompactionRestore(Harness):
                     self.assertEqual((m1, d1.get("restore:refusedStanding", 0)), (["full"], 1),
                                      "the missing parent cut off every turn, so the writer finds no cut (noCut) and the refusal is "
                                      "marked: the next restart parses whole without a second proof, as for any tail of that shape: %s" % d1)
+
+    def test_a_late_parent_on_a_document_written_while_a_postal_author_waited_parses_whole_and_heals(self):
+        """The review of 2026-11-12: the document is written while a peer's message has a provisional author (the postal log
+        behind), then the compaction lands child first, the parent alone, and the log catches up. The compaction's own postal
+        gate sends the first read straight to a whole parse, so the whole entry it installs knows nothing of the document, and
+        the parent's arrival restored from it: a restored entry has no heal state for the pre-cut part, so it kept serving the
+        provisional author after the log caught up, and at every restart, since a restored entry writes no document, where a
+        cold parse names the peer. The late parent's road asks the document's own `postalWait` and parses whole, as every late
+        parent did before the road existed; the whole entry heals once the log catches up, and the settle's document serves
+        the restart. From the restored entry and the whole one. (A settle between the parent and the log is left out: the
+        document it writes still carries the provisional author, and the settle after the heal keeps it while the cut stands,
+        so a restart then serves that author on main as well; a follow-up beside the descent road's.)"""
+        ran = []
+        for entry in ("restored", "whole"):
+            with self.subTest(entry=entry):
+                name = "late-postal-%s" % entry
+                recs, row = postal_episode()
+                recs += late_anchor_lead(self.after(recs, 60), recs[-1]["uuid"])
+                path = self.write(name, recs)
+                self.fresh()
+                self.parse(path)
+                self.assertTrue(self.doc(path), "the premise: the document is written while the author waits")
+                self.assertIs(_doc(path).get("postalWait"), True, "the premise: the document records the wait")
+                if entry == "restored":
+                    self._restart(path)
+                comp, late = late_anchor_compaction(self.after(recs, 120))
+                steps = []
+                for grp in (comp[:late], comp[late:late + 4]):                     # the child first, then the parent alone
+                    self._append(path, grp)
+                    _t, modes, moved = self._parse_counted(path)
+                    steps.append((modes, moved))
+                    if len(steps) == 1:
+                        self.doc(path)                                             # the settle after the first read
+                self.sent = [row]                                                  # the log catches up before the next settle
+                tree, _modes, _moved = self._parse_counted(path)                   # the next build: nothing appended
+                got, _cut = self._served(tree)
+                self.doc(path)                                                     # the settle after the heal
+                self.fresh()
+                boot_modes = []
+                boot, _cut = self._served(self.parse(path, boot_modes))
+                cold = self.cold(path)
+                self.assertEqual((author_of(got) or {}).get("peer"), G.PEER, "the log caught up: the peer's author served (%r)" % author_of(got))
+                self.assertSameTree(got, cold, "after the log caught up")
+                self.assertEqual((author_of(boot) or {}).get("peer"), G.PEER, "and at the next restart (road %s)" % boot_modes)
+                self.assertSameTree(boot, cold, "at the next restart (road %s)" % boot_modes)
+                m1, d1 = steps[1]
+                self.assertEqual((m1, d1.get("g:late-parent", 0), d1.get("restore:postalWait", 0), d1.get("restore:afterDemote", 0)),
+                                 (["full"], 1, 1, 0), "the parent's arrival parses whole on the document's postalWait: %s" % d1)
+                ran.append(entry)
+        self.assertEqual(len(ran), 2, "both entries ran: %s" % ran)
+
+    def test_a_late_parent_that_leaves_the_boundary_off_the_path_parses_whole(self):
+        """The review of 2026-11-12: the late parent hangs off the preserved tail instead of the boundary, so the boundary is off
+        the conversation's path while its summary is on it. The summary then belongs, by the pre-pass's rule, to the last
+        boundary on the path before it, one BEFORE the cut, whose atom the document froze with its own summary: a cold parse
+        gives that boundary this summary's text, and a restore cannot. The restore refuses a tail whose pre-pass gives a
+        summary to a boundary before the cut (restore:preCutSummary), so the parent's arrival parses whole, as on main, and the
+        settle's document serves the restart. Reads ending at file positions 1 and 23 past the boundary (the summary landing
+        with the parent, under `summary`, and before it, under `late-parent`)."""
+        ran = []
+        for split in (1, 23):
+            with self.subTest(split=split):
+                name = "late-offpath-%d" % split
+                path, recs = self._late_anchor_documented(name)
+                self._restart(path)
+                comp, late = late_anchor_compaction(self.after(recs, 120), late_under="la_tail")
+                steps = []
+                for grp in (comp[:split + 1], comp[split + 1:]):
+                    self._append(path, grp)
+                    tree, modes, moved = self._parse_counted(path)
+                    got, _cut = self._served(tree)
+                    steps.append((modes, moved, got, self._snapshot(path, "%s-%d" % (name, len(steps)))))
+                self.doc(path)                                                     # the settle
+                self.fresh()
+                boot_modes = []
+                boot, _cut = self._served(self.parse(path, boot_modes))
+                for i, (_m, _d, g, ref) in enumerate(steps):
+                    self.assertSameTree(g, self.cold(ref), "step %d" % i)
+                self.assertSameTree(boot, self.cold(path), "at the next restart (road %s)" % boot_modes)
+                m2, d2 = steps[1][0], steps[1][1]
+                reason = "summary" if split < 3 else "late-parent"
+                self.assertEqual((m2, d2.get("g:" + reason, 0), d2.get("restore:preCutSummary", 0), d2.get("full:demoted", 0)),
+                                 (["full"], 1, 1, 1), "the parent's arrival parses whole: %s" % d2)
+                ran.append(split)
+        self.assertEqual(len(ran), 2, "both splits ran: %s" % ran)
 
     def test_a_parent_a_pre_cut_record_named_parses_whole_on_every_road(self):
         """A record landing as the parent that a record BEFORE the document's cut named (the pre-cut orphan after turn 150):
