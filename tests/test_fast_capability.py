@@ -472,6 +472,242 @@ class TheBackendWrites(unittest.TestCase):
         self.assertEqual(row["model"], "Fable 5.2")
 
 
+class _Sys:
+    def __init__(self, data):
+        self.subtype = "init"
+        self.data = data
+
+
+class _Query:
+    """The SDK client's control-request sender, recording what romp asks; `fail` makes the CLI refuse."""
+    def __init__(self, fail=None):
+        self.sent, self.fail = [], fail
+
+    async def _send_control_request(self, req):
+        self.sent.append(req)
+        if self.fail:
+            raise RuntimeError(self.fail)
+        return {}
+
+
+class TheDroppedFastIsAskedBack(unittest.TestCase):
+    """Claude Code 2.1.322 asks an explicit opt-in before it runs fast mode on Fable 5.2: a session LAUNCHED on Opus with
+    the fast-mode flag and switched live to Fable (romp's picker switches live, through set_model) reports fast mode
+    "off" with no reason, and before this ran at normal speed under its Fast pick with only the Slow badge to say so
+    (the review of #453). Now the CLI's report is the event: romp asks fast mode back with the CLI's designed request
+    (apply_flag_settings, fastMode true), once per model per connection, and says so loudly when that does not hold."""
+
+    FLAG_OFF = {"fast_mode_state": "off", "model": "claude-fable-5-2", "claude_code_version": "2.1.322"}
+
+    def _session(self, fail=None, **reg):
+        be = _backend()
+        be._logs, be._problems_said, be._toasts = [], [], []
+
+        def log(msg, problem=None, key=None, ring_text=None):
+            be._logs.append(msg)
+            if problem and "fast" in msg:        # (a synthetic init also draws the lifecycle frames' own notice)
+                be._problems_said.append((msg, key))
+        be._log = log
+        be._notify = lambda app, m: be._toasts.append(m)
+        mf.note(be.state_dir, mf.support_from_payload(_server_info()), cli="2.1.322")   # the CLI says Fable 5.2 runs fast
+        r = dict(liveModel="Opus 5.5", liveModelId="claude-opus-5-5", fast=True, liveFast="on")
+        r.update(reg)
+        s = _sess(be, **r)
+        s._fast_unlocked = True                  # launched with the fast-mode flag (the launch record's word)
+        s.client = type("C", (), {})()
+        s.client._query = _Query(fail)
+
+        async def _noop(): pass
+        s._do_refresh_context = _noop
+        return be, s
+
+    def _run(self, s, *inits):
+        async def go():
+            s.loop = asyncio.get_running_loop()
+            for data in inits:
+                s._on_message(_Sys(dict(data)), type("A", (), {}), type("R", (), {}), _Sys)
+                for _ in range(5):
+                    await asyncio.sleep(0)
+        asyncio.run(go())
+
+    def test_a_live_switch_to_fable_keeps_fast_mode(self):
+        be, s = self._session()
+        self._run(s, self.FLAG_OFF)
+        self.assertEqual(s.client._query.sent, [{"subtype": "apply_flag_settings", "settings": {"fastMode": True}}],
+                         "the CLI's own request for the fast toggle, no model key, no slash command")
+        self.assertEqual(s.fast, "on", "the badge reads Fast as soon as the CLI took the ask")
+        self.assertEqual(sb.read_reg(be.state_dir, SID)["liveFast"], "on")
+        self.assertEqual((be._problems_said, be._toasts), ([], []), "a drop that was cured is no problem")
+        self.assertTrue(any("asking it back on" in m and "Fable 5.2" in m for m in be._logs), be._logs)
+        self._run(s, dict(self.FLAG_OFF, fast_mode_state="on"))
+        self.assertEqual(len(s.client._query.sent), 1, "the next turn runs fast: nothing more is asked")
+        self.assertEqual(s.fast, "on")
+
+    def test_always_fast_with_no_pick_is_kept_too(self):
+        be, s = self._session(fast=False)
+        Path(be.state_dir, sb.ALWAYS_FAST_STORE).write_text("on")
+        s.fast_opt = False
+        self.assertTrue(s.fast_effective())
+        self._run(s, self.FLAG_OFF)
+        self.assertEqual(len(s.client._query.sent), 1, "the machine's Always fast is the session's wish too")
+
+    def test_no_loop_a_drop_that_holds_is_said_once(self):
+        be, s = self._session()
+        self._run(s, self.FLAG_OFF, self.FLAG_OFF, self.FLAG_OFF)
+        self.assertEqual(len(s.client._query.sent), 1, "one ask per model per connection, however many turns report off")
+        self.assertEqual(len(be._problems_said), 1, be._problems_said)
+        self.assertIn("fast mode is off on this session", be._problems_said[0][0])
+        self.assertIn("kept it off after romp asked for it again", be._problems_said[0][0])
+        self.assertEqual(be._problems_said[0][1], ("fast-dropped", SID, "claude-fable-5-2"))
+        self.assertEqual(len(be._toasts), 1, be._toasts)
+        self.assertEqual(be._toasts[0]["type"], "warn")
+        self.assertIn("Fast mode is off on web", be._toasts[0]["text"])
+        self.assertEqual(s.fast, "off", "the CLI's word stands")
+        # a new connection may ask once more (a fresh CLI), and a different model is its own ask
+        s._fast_rearm = {}
+        self._run(s, self.FLAG_OFF)
+        self.assertEqual(len(s.client._query.sent), 2)
+
+    def test_a_refused_ask_is_said_with_the_reason(self):
+        be, s = self._session(fail="unknown control request subtype")
+        self._run(s, self.FLAG_OFF, self.FLAG_OFF)
+        self.assertEqual(len(s.client._query.sent), 1, "refused once: never asked again on this connection")
+        self.assertEqual(len(be._problems_said), 1, be._problems_said)
+        self.assertIn("unknown control request subtype", be._problems_said[0][0])
+        self.assertEqual(len(be._toasts), 1)
+        self.assertIn("asking it back on failed", be._toasts[0]["text"])
+
+    def test_a_refusal_with_a_reason_is_answered_as_before_and_never_asked_back(self):
+        be, s = self._session()
+        self._run(s, dict(self.FLAG_OFF, fast_mode_disabled_reason="extra_usage_disabled"))
+        self.assertEqual(s.client._query.sent, [], "a reason is the CLI's refusal: nothing asks it back")
+        self.assertTrue(be._toasts and "fast mode isn't available for web" in be._toasts[0]["text"],
+                        "the refused pick's own toast, as today")
+        self.assertFalse(s.fast_opt, "…and the pick is back off, as today")
+
+    def test_a_session_that_wanted_standard_stays_standard(self):
+        # no pick of its own and Always fast off
+        be, s = self._session(fast=False)
+        s.fast_opt = False
+        self._run(s, self.FLAG_OFF)
+        self.assertEqual(s.client._query.sent, [])
+        # a Slow pick under Always fast
+        be, s = self._session(fast=False, fastOff=True)
+        Path(be.state_dir, sb.ALWAYS_FAST_STORE).write_text("on")
+        s.fast_opt, s.fast_off = False, True
+        self._run(s, self.FLAG_OFF)
+        self.assertEqual(s.client._query.sent, [], "the user's Slow beats Always fast")
+        self.assertEqual((be._problems_said, be._toasts), ([], []))
+
+    def test_only_where_the_cli_said_the_model_runs_fast(self):
+        be, s = self._session()
+        self._run(s, dict(self.FLAG_OFF, model="claude-sonnet-5"))
+        self.assertEqual(s.client._query.sent, [], "a model the CLI lists without fast mode: off is simply right")
+        self._run(s, dict(self.FLAG_OFF, model="claude-opus-4-7"))
+        self.assertEqual(s.client._query.sent, [], "a model no report named: the seed is no proof")
+        self.assertEqual((be._problems_said, be._toasts), ([], []))
+
+    def test_the_connect_time_answer_names_no_model_and_asks_nothing(self):
+        be, s = self._session(liveModelId="claude-fable-5-2", liveModel="Fable 5.2")
+
+        async def info():
+            return _server_info(fast_mode_state="off", fast_mode_disabled_reason=None)
+        s.client.get_server_info = info
+
+        async def go():
+            s.loop = asyncio.get_running_loop()
+            await s._do_adopt_server_info()
+            for _ in range(5):
+                await asyncio.sleep(0)
+        asyncio.run(go())
+        self.assertEqual(s.client._query.sent, [], "a registry id may be stale: only a report that names its model counts")
+
+    def test_a_connection_without_the_flag_is_the_relaunchs_business(self):
+        be, s = self._session()
+        s._fast_unlocked = False
+        self._run(s, self.FLAG_OFF)
+        self.assertEqual(s.client._query.sent, [], "no flag: the CLI says sdk_opt_in_required and a relaunch carries it")
+
+
+class TheSilentFallbacksAreSaid(unittest.TestCase):
+    """The review of #453: the fast gates fell back to the old Opus rule without a word when the CLI's model list
+    carried no supportsFastMode, or before any CLI had reported. Each is said once per kernel life, as a problem."""
+
+    def test_a_model_list_without_the_field_is_a_problem_once(self):
+        be = _backend()
+        said = []
+        be._log = lambda msg, problem=None, key=None, ring_text=None: said.append((msg, problem, key))
+        a = _sess(be, liveModel="Opus 5.5", liveModelId="claude-opus-5-5")
+        b = _sess(be, sid="11111111-2222-4333-8444-000000000733", name="api")
+
+        class _Client:
+            async def get_server_info(self):
+                return _server_info_without_the_field(claude_code_version="2.1.300")
+        for s in (a, b, a):
+            s.client = _Client()
+            asyncio.run(s._do_adopt_server_info())
+        rows = [m for m, p, k in said if p]
+        self.assertEqual(len(rows), 1, said)
+        self.assertIn("Claude Code 2.1.300 lists its models without saying which run fast mode", rows[0])
+        self.assertIn("old rule, fast mode on Opus and nothing else", rows[0])
+        # a list that carries the field, or no list at all (a CLI older still, every test double), says nothing
+        be2 = _backend()
+        said.clear()
+        be2._log = lambda msg, problem=None, key=None, ring_text=None: said.append((msg, problem, key))
+        for info in (_server_info(), {}, {"fast_mode_state": "off"}):
+            c = _sess(be2)
+
+            class _C:
+                async def get_server_info(self, info=info):
+                    return info
+            c.client = _C()
+            asyncio.run(c._do_adopt_server_info())
+        self.assertEqual([m for m, p, k in said if p], [])
+
+    def test_the_judges_seed_with_nothing_learned_is_said_once(self):
+        try:
+            (jd.STATE / jd.MODEL_FAST_FILE).unlink()
+        except OSError:
+            pass
+        jd._FAST_SEED_SAID.clear()
+        self.assertIn("jd._FAST_SEED_PROBLEM_FN = _sdk_problem", inspect.getsource(km), "the kernel wires the error center")
+        wired = jd._FAST_SEED_PROBLEM_FN
+        self.addCleanup(setattr, jd, "_FAST_SEED_PROBLEM_FN", wired)
+        jd._FAST_SEED_PROBLEM_FN = km._sdk_problem   # this module's kernel (another test module may have loaded its own)
+        before = km._SDK_PROBLEM_SEQ[0]
+        self.assertTrue(jd.fast_capable("opus"))
+        self.assertFalse(jd.fast_capable("fable"))
+        rows = [r["text"] for r in km._SDK_BOOT_PROBLEMS if r["seq"] > before]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIn("no Claude Code has reported yet which models run fast mode", rows[0])
+        # with something learned, a model the CLI did not name is its own silence: nothing more is said
+        jd._FAST_SEED_SAID.clear()
+        mf.note(jd.STATE, mf.support_from_payload(_server_info()), cli="2.1.322")
+        before = km._SDK_PROBLEM_SEQ[0]
+        self.assertTrue(jd.fast_capable("claude-opus-4-7"))
+        self.assertEqual([r for r in km._SDK_BOOT_PROBLEMS if r["seq"] > before], [])
+        (jd.STATE / jd.MODEL_FAST_FILE).unlink()
+
+
+class ThePriceTableCoversWhatTheCliReports(unittest.TestCase):
+    """The review of #453: Claude Code reported claude-fable-5-2 (the default and the fable alias, fast mode on) and the
+    price table had no row for it, so the spend guard and the cost view priced it as Fable 5.1, and its fast calls at
+    the standard rates. Every model a CLI-shaped initialize answer resolves an option to must have a price row, and
+    every option the CLI says runs fast mode must have fast rates."""
+
+    def test_every_resolved_model_has_a_price_row_and_every_fast_one_fast_rates(self):
+        cp = sys.modules.get("romp_cli_prices") or load_source("romp_cli_prices", os.path.join(ROOT, "kernel", "cli_prices.py"))
+        info = _server_info()
+        resolved = {str(o["resolvedModel"]) for o in info["models"] if isinstance(o, dict) and o.get("resolvedModel")}
+        self.assertIn("claude-fable-5-2", resolved)
+        missing = sorted(m for m in resolved if cp.model_id(m) is None)
+        self.assertEqual(missing, [], "models the CLI reports that romp cannot price")
+        fast = {str(o["resolvedModel"]) for o in info["models"]
+                if isinstance(o, dict) and o.get("supportsFastMode") is True and o.get("resolvedModel")}
+        no_fast = sorted(m for m in fast if cp.model_id(m) not in cp.CLI_FAST_PRICES)
+        self.assertEqual(no_fast, [], "models the CLI runs fast mode on that romp would price at the standard rates")
+
+
 class TheJudgeFollows(unittest.TestCase):
     """jd.fast_capable: the CLI's word, the seed where nothing is known; _tier_fast and the status read follow it."""
 

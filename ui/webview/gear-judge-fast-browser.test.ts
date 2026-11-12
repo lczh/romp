@@ -8,7 +8,11 @@
 // box's hint shows); a Triage pick of Sonnet greys the triage and distilling boxes, keeps them checked, swaps their
 // hints, and posts nothing for them; picking Opus again ungreys them with the hints back; a checked box on a capable
 // model whose last fast ask the CLI declined shows the refusal; ticking a box posts its op; pinning Distilling to
-// Opus keeps its box live under a Sonnet triage.
+// Opus keeps its box live under a Sonnet triage. That payload names no model fast or not (no CLI has said), so it runs
+// the seed rule. The second test serves a /models list that carries the CLI's word (Claude Code 2.1.321 runs fast mode
+// on Fable 5.2 and retired it for Opus 4.8): a Fable 5.2 tier and comment model keep their boxes live, an Opus the list
+// names as not running fast greys them, a model the list does not name falls to the seed, and a models frame carrying a
+// new answer re-gates the boxes with no other event.
 // Skips with a stated reason without a playwright browser, and fails with it where CI requires the leg
 // (browser-leg.ts). Synthetic values only.
 import { test } from "node:test";
@@ -41,7 +45,7 @@ function bundle(): string {
 
 const PAGE_HTML = `<!DOCTYPE html><html><head><meta charset=utf-8><style>${GEAR_CSS}</style></head><body>
 <script src=/dist/gear.js></script></body></html>`;
-const MODELS = { models: [{ value: "opus", label: "Opus", versions: [] }, { value: "sonnet", label: "Sonnet", versions: [] }, { value: "haiku", label: "Haiku", versions: [] }],
+const MODELS: any = { models: [{ value: "opus", label: "Opus", versions: [] }, { value: "sonnet", label: "Sonnet", versions: [] }, { value: "haiku", label: "Haiku", versions: [] }],
   efforts: [{ value: "", label: "Default" }, { value: "low", label: "Low" }] };
 // the kernel's raw picks: triage on Opus with its box on, distilling following triage with its box on, indexing on
 // Haiku with its box on too (a kept value on a tier that cannot run fast: greyed, not lost); the CLI declined the
@@ -54,10 +58,13 @@ const VERSION = { judgeModel: "opus", judgeEffort: "", indexModel: "haiku", inde
 let pw: any = null;
 try { pw = requireCjs("playwright"); } catch { pw = null; }
 
+const OFF_HINT = "This tier's model doesn't run fast mode. Pick one that does to use it; the setting is kept.";
 type Snap = { disabled: Record<string, boolean>; off: Record<string, boolean>; opacity: Record<string, string>;
   hintFade: Record<string, string>; wordColor: Record<string, string>; checked: Record<string, boolean>; hint: Record<string, string> };
 
-async function withGear(t: any, body: (page: any, errors: string[]) => Promise<void>): Promise<void> {
+// what the fake kernel answers: the second test swaps the list under a models frame, so the route reads it per request
+type Kernel = { models: any; version: any };
+async function withGear(t: any, body: (page: any, errors: string[]) => Promise<void>, kernel: Kernel = { models: MODELS, version: VERSION }): Promise<void> {
   const browser = await launchLeg(t, pw, "chromium");
   if (!browser) return;
   const errors: string[] = [];
@@ -71,8 +78,8 @@ async function withGear(t: any, body: (page: any, errors: string[]) => Promise<v
       if (u.hostname !== "romp.test") return route.fulfill({ status: 404, body: "" });
       if (u.pathname === "/gear") return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: PAGE_HTML });
       if (u.pathname === "/dist/gear.js") return route.fulfill({ status: 200, contentType: "application/javascript", body: js });
-      if (u.pathname === "/models") return json(MODELS);
-      if (u.pathname === "/version") return json(VERSION);
+      if (u.pathname === "/models") return json(kernel.models);
+      if (u.pathname === "/version") return json(kernel.version);
       if (u.pathname === "/tunnels") return json({ tunnels: [] });
       return json({});   // /palette, /analytics and the rest: empty answers, nothing under test
     });
@@ -135,7 +142,7 @@ test("each tier's box greys on its own effective model, keeps its value, says wh
     assert.deepEqual(s.checked, { judgefast: true, distillfast: true, indexfast: true }, "the boxes reflect the kernel's raw flags, greyed or not");
     assert.match(s.hint.judgefast, /^This tier's judge calls run in Claude Code's fast mode/, "a live box: the description");
     assert.match(s.hint.distillfast, /^Fast mode was declined by Claude Code for the last distilling call \(sdk_opt_in_required\)/, "a declined ask: the CLI's reason");
-    assert.match(s.hint.indexfast, /^Fast mode is Opus-only, and this tier is not on Opus\./, "a greyed box: why");
+    assert.equal(s.hint.indexfast, OFF_HINT, "a greyed box: why");
     for (const ty of ["setJudgeFast", "setDistillFast", "setIndexFast"]) assert.deepEqual(await posts(page, ty), [], `${ty}: a fill posts nothing`);
     // hovering the greyed box shows its hint unfaded, in the colour a live box's hint shows: the label's grey stops at
     // the word, and no rule fades the hint itself (its own opacity reads 1 before the fix too, so this is a guard)
@@ -157,7 +164,7 @@ test("each tier's box greys on its own effective model, keeps its value, says wh
     s = await snap(page);
     assert.deepEqual(s.disabled, { judgefast: true, distillfast: true, indexfast: true }, "no tier can run fast now");
     assert.deepEqual(s.checked, { judgefast: true, distillfast: true, indexfast: true }, "the values are kept: nothing was unchecked");
-    for (const tier of ["judgefast", "distillfast"]) assert.match(s.hint[tier], /^Fast mode is Opus-only, and this tier is not on Opus\./, `${tier}: greyed, says why`);
+    for (const tier of ["judgefast", "distillfast"]) assert.equal(s.hint[tier], OFF_HINT, `${tier}: greyed, says why`);
     const model = await posts(page, "setJudgeModel");
     assert.equal(model.length, 1); assert.equal(model[0].model, "sonnet"); assert.equal(typeof model[0].gt, "number");
     for (const ty of ["setJudgeFast", "setDistillFast", "setIndexFast"]) assert.deepEqual(await posts(page, ty), [], `${ty}: a model pick posts nothing for the boxes`);
@@ -192,4 +199,79 @@ test("each tier's box greys on its own effective model, keeps its value, says wh
     assert.equal(await page.evaluate(() => (document.getElementById("rs-indexfast") as HTMLInputElement).disabled), true);
     assert.deepEqual(errors, [], "no page errors");
   });
+});
+
+// The CLI's word, as the kernel's /models carries it (`fast` on a family row for its default and on each version row,
+// absent where no CLI has named the id). Synthetic: Fable runs fast mode, Fable 5.2 named so; Opus and its 4.8 named
+// not, its 4.7 listed but never named; Sonnet and Haiku never named.
+const LEARNED = { rev: 2, models: [
+  { value: "fable", label: "Fable", fast: true, versions: [{ value: "claude-fable-5-2", label: "Fable 5.2", fast: true }, { value: "claude-fable-5-1", label: "Fable 5.1", fast: false }] },
+  { value: "opus", label: "Opus", fast: false, versions: [{ value: "claude-opus-4-8", label: "Opus 4.8", fast: false }, { value: "claude-opus-4-7", label: "Opus 4.7" }] },
+  { value: "sonnet", label: "Sonnet", versions: [] }, { value: "haiku", label: "Haiku", versions: [] }],
+  efforts: [{ value: "", label: "Default" }, { value: "low", label: "Low" }] };
+// triage on the Fable 5.2 version, distilling following it, indexing on an Opus id the list does not carry (the gear
+// shows it as off-list; the seed reads the spelling), comments pinned to Fable 5.2 with their box on
+const LEARNED_VERSION = { ...VERSION, judgeModel: "claude-fable-5-2", indexModel: "claude-opus-4-1", distillModel: "triage",
+  commentModel: "claude-fable-5-2", commentFast: "on", fastRefused: {} };
+const cmt = (page: any): Promise<{ disabled: boolean; checked: boolean }> => page.evaluate(() => {
+  const b = document.getElementById("rs-cmtfast") as HTMLInputElement;
+  return { disabled: b.disabled, checked: b.checked };
+});
+
+test("the boxes follow the CLI's word in /models: live on Fable 5.2, greyed on an Opus it names not fast, the seed for an unnamed model, re-gated by a models frame", { timeout: 90000 }, async (t) => {
+  const kernel: Kernel = { models: LEARNED, version: LEARNED_VERSION };
+  await withGear(t, async (page, errors) => {
+    // 1. filled: every tier can run fast (Fable 5.2 by the list, distilling through triage, the off-list Opus id by the seed)
+    let s = await snap(page);
+    assert.deepEqual(s.disabled, { judgefast: false, distillfast: false, indexfast: false }, "Fable 5.2 runs fast by the list; the unnamed Opus id by the seed");
+    assert.deepEqual(s.off, { judgefast: false, distillfast: false, indexfast: false });
+    assert.match(s.hint.judgefast, /^This tier's judge calls run in Claude Code's fast mode, billed at a premium\./, "a live box: the description");
+    assert.equal(await page.evaluate(() => (document.getElementById("rs-indexmodel") as HTMLSelectElement).selectedOptions[0].textContent),
+      "claude-opus-4-1 — not in this kernel's list", "the index tier is a model the list does not name");
+    assert.deepEqual(await cmt(page), { disabled: false, checked: true }, "a comment model of Fable 5.2 keeps the comment box live");
+
+    // 2. the Opus family, which the list names as not running fast (its row's `fast` is its default's): both dependent boxes grey, kept
+    await pickModel(page, "rs-judgemodel", "Opus");
+    s = await snap(page);
+    assert.deepEqual(s.disabled, { judgefast: true, distillfast: true, indexfast: false }, "the CLI's false greys an Opus tier");
+    assert.deepEqual(s.checked, { judgefast: true, distillfast: true, indexfast: true }, "the values are kept");
+    for (const tier of ["judgefast", "distillfast"]) assert.equal(s.hint[tier], OFF_HINT, `${tier}: greyed, says why without naming a family`);
+
+    // 3. the Fable family: live again by its row's own word
+    await pickModel(page, "rs-judgemodel", "Fable");
+    s = await snap(page);
+    assert.deepEqual(s.disabled, { judgefast: false, distillfast: false, indexfast: false }, "the Fable family runs fast by the list");
+    assert.equal(await page.evaluate(() => (document.getElementById("rs-judgemodel") as HTMLSelectElement).value), "fable");
+
+    // 4. the seed where the list is silent: Sonnet is listed with no word, and its spelling is not Opus
+    await pickModel(page, "rs-indexmodel", "Sonnet");
+    s = await snap(page);
+    assert.equal(s.disabled.indexfast, true, "an unnamed non-Opus model greys by the seed");
+    assert.equal(s.hint.indexfast, OFF_HINT);
+
+    // 5. the comment model (its rows live on the Chat tab): an Opus pick (named not fast) disables the box and, as the
+    // user's own gesture, unchecks it
+    await page.evaluate(() => { window.postMessage({ romp: "openSettings", tab: "chat" }, "*"); });
+    await page.waitForFunction(() => !(document.querySelector(".rs-pane[data-pane=chat]") as HTMLElement).hidden, null, { timeout: 5000 });
+    await pickModel(page, "rs-cmtmodel", "Opus");
+    assert.deepEqual(await cmt(page), { disabled: true, checked: false }, "the comment box greys and unchecks on the pick");
+    assert.deepEqual((await posts(page, "setCommentFast")).map((m: any) => m.fast), ["session"], "the uncheck is posted, once");
+    await pickModel(page, "rs-cmtmodel", "Fable");
+    assert.deepEqual(await cmt(page), { disabled: false, checked: false }, "Fable brings the box back; the uncheck stands");
+
+    // 6. a models frame carrying a new answer re-gates with no other event: the CLI now says the Fable family's default
+    // does not run fast, and Sonnet does (synthetic flips, to see both directions)
+    kernel.models = { ...LEARNED, rev: 3, models: LEARNED.models.map((m: any) => m.value === "fable" ? { ...m, fast: false }
+      : m.value === "sonnet" ? { ...m, fast: true } : m) };
+    await page.evaluate(() => { window.postMessage({ type: "models" }, "*"); });
+    await page.waitForFunction(() => (document.getElementById("rs-judgefast") as HTMLInputElement).disabled === true, null, { timeout: 5000 });
+    s = await snap(page);
+    assert.deepEqual(s.disabled, { judgefast: true, distillfast: true, indexfast: false }, "the frame's list greys the Fable tiers and frees the Sonnet one");
+    assert.equal(s.hint.judgefast, OFF_HINT); assert.match(s.hint.indexfast, /^This tier's judge calls/);
+    assert.deepEqual(s.checked, { judgefast: true, distillfast: true, indexfast: true }, "a repaint unchecks nothing");
+    assert.deepEqual(await cmt(page), { disabled: true, checked: false }, "the comment box follows the same list");
+    assert.deepEqual((await posts(page, "setCommentFast")).length, 1, "a repaint posts nothing");
+    for (const ty of ["setJudgeFast", "setDistillFast", "setIndexFast"]) assert.deepEqual(await posts(page, ty), [], `${ty}: no gate posts a box`);
+    assert.deepEqual(errors, [], "no page errors");
+  }, kernel);
 });

@@ -338,6 +338,14 @@ turn running or queued, no subagent, no background task), and while it waits
 the chat line says on what, as in "Applying high effort after 2 background
 tasks…". Restart session applies a waiting change at once, ending that work.
 
+A model the session's own Claude Code does not know yet, while a newer Claude
+Code is installed (a session keeps the binary it was started with across an
+update), is kept rather than refused: the model badge keeps its switching-dots,
+and the session reloads on the installed Claude Code with the new model (and
+fast mode, when the session runs fast), waiting in the same way so nothing is
+cut. If that Claude Code refuses the model too, the pick goes back and the
+error center says so, as for any refused model.
+
 Picking **Bypass permissions** from the mode dropdown reloads the session too,
 since Claude Code takes bypass only at launch, and that reload waits in the
 same way. The chat shows no reloading line for it: until the reload completes,
@@ -389,7 +397,9 @@ while fast requests are rate-limited. Picking On or Off sends the CLI's own
 fast mode. Which models can is what each session's Claude Code reports when it
 connects (its model list names the ones that support fast mode), learned
 across sessions and kept under the state directory (`model-fast.json`); until
-the first report, the kernel takes the Opus family as the answer. When
+the first report, the kernel takes the Opus family as the answer, and the error
+center says so once per kernel life, as it does when a Claude Code's model list
+names no model as supporting fast mode. When
 sessions run different Claude Code versions (a session keeps the binary it was
 started with across an update), the newest version's report stands, and a
 session the CLI reports running fast mode keeps its badge whatever the table
@@ -571,6 +581,17 @@ following to every connected machine's kernel):
   still applies. The switch is
   never the literal `/fast on`, which on a non-Opus session would make the CLI
   change model.
+- **A live model switch that drops fast mode.** Claude Code 2.1.322 asks for an
+  explicit opt-in before it runs fast mode on Fable 5.2 and Mythos 5.2: a session
+  launched on one of them with the opt-in runs fast, but one switched to them live
+  from another model reports fast mode off, with no reason. When a session that
+  should run fast (its own **Fast** pick, or Always fast without a **Slow** pick)
+  reports that on a model Claude Code says supports fast mode, the kernel asks for
+  fast mode back once, with Claude Code's `apply_flag_settings` control request
+  (`fastMode: true`), and the badge reads **Fast** again. If it stays off, or the
+  request is refused, a toast and the error center say that fast mode is off on
+  that session and why; nothing asks again on that model until the session's next
+  connection. A refusal with a reason is answered as above.
 - **Retry upgrades after downgrades** acts when a session's model changes to a
   lower tier without a pick, the automatic fallback the Completed card reports
   (`Model changed automatically: … → …`). A lower tier is a smaller model family
@@ -6404,7 +6425,8 @@ hour. Each call is priced the way Claude Code prices it, from its own rates
 held for an hour at their own rate, the same table the cost view uses, so the
 rate reads beside the dollars the CLI records. A model the table lacks is
 priced as the newest model of its family, or the dearest row when no family
-matches, and named once in the kernel log; only a date may follow a known id
+matches, and named once per kernel life in the kernel log and the error center,
+with the row and rates it was priced at; only a date may follow a known id
 (`claude-sonnet-5-5` is not `claude-sonnet-5`). The table is kept by hand, so
 each result's per-model dollars from Claude Code are checked against what its
 rates can give that model's tokens at any speed and cache duration, the model

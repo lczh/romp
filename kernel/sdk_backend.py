@@ -6257,6 +6257,11 @@ def swap_sdk_default(state_dir: Path, key: str, value):
         return _swap_sdk_default_locked(state_dir, key, value)
 
 
+# A CLI's refusal of a model id it does not know (its set_model answer): "Model "claude-fable-5-2" is not a recognized model
+# id." on 2.1.305 and 2.1.322 (the latter's catalog_unknown code rides beside it), "Unknown model: …" on older ones.
+_UNRECOGNIZED_MODEL_RE = re.compile(r"not a recognized model|unknown model|catalog_unknown", re.I)
+
+
 def _cli_refusal(e: BaseException) -> bool:
     """Did the CLI ANSWER a control request with an error — or did the answer never arrive? The SDK
     (claude_agent_sdk 0.2.132, _internal/query.py) raises a BARE Exception for both, so the type alone says
@@ -7002,6 +7007,15 @@ class SdkSession:
         # write it too — and is ruled per WRITE, by token, in SdkBackend._seed_write_*: no per-session
         # view of that layer exists here on purpose (see _seed_write_refused). Under self._lock.
         self._model_accepted = reg.get("model")
+        self._stale_pick = None   # a pick the serving CLI did not know while a newer Claude Code is installed: {"pick",
+        #   "back" (the accepted model before it), "prev" (set_model's), "phase": "waiting" | "relaunched", "from", "to"};
+        #   kept, not reverted, until the quiet relaunch's CLI rules on it (_keep_pick_for_newer_cli, _send_stale_pick).
+        #   The registry keeps {pick, back} as `stalePick`, so a kernel restart before the relaunch still relaunches
+        _sp = reg.get("stalePick")
+        if isinstance(_sp, dict) and _sp.get("pick") and _sp.get("pick") == reg.get("model"):
+            self._stale_pick = {"pick": _sp["pick"], "back": _sp.get("back"), "phase": "waiting",
+                                "prev": {"picked": _sp["pick"], "tok": None, "seq": 0, "chain": ()}}
+            self._model_accepted = _sp.get("back")   # the attached CLI never took the pick
         self._pick_seq = 0                           # bumped by every live pick (SdkBackend.set_model), at the pick
         self._pick_taken = 0                         # the latest pick the CLI has had: its set_model answered (taken or
         #   refused), or a spawn's --model carried it (never an attach, which tells the CLI nothing). A context refresh
@@ -7090,6 +7104,8 @@ class SdkSession:
         self._fast_guess_asked = False   # a relaunch was asked for this connection's guessed refusal (_adopt_fast_state)
         self._fast_off_sent = False      # a literal '/fast off' went to this connection's CLI, which takes its opt-in away
         #   (_ask_missing_opt_in: such a CLI lacks the opt-in although its launch carried it); per connection
+        self._fast_rearm = {}            # model id -> "sent" | "done" | "said": fast mode this connection's CLI dropped on that
+        #   model without a reason and romp asked back (_rearm_dropped_fast); per connection, one ask per model, never a loop
         self._fast_opt_in_said = False   # a CLI launched here with the opt-in still lacks it: said once (_ask_missing_opt_in)
         self._upgrade_retry = None   # Retry upgrades after downgrades (the user 2026-09-17): while set, {"from", "to",
         #   "pick", "since", "next", "attempts"} — this session's model fell from `from` to `to` without a pick and the
@@ -8594,6 +8610,10 @@ class SdkSession:
                 self._pick_answered(prev)   # a refusal is the CLI's answer too: it runs what it ran before the pick
             with self._lock:
                 superseded = prev is not None and self.chosen_model != picked
+            if refusal and not superseded and prev is not None and await self._keep_pick_for_newer_cli(e, picked, prev):
+                await self._do_refresh_context()
+                self.backend._poke()
+                return
             if superseded:
                 # Standing down from the SESSION's layers — the newer pick owns chosen_model and the reg.
                 # Not from the shared store: this write's node still sits under the newer pick's. A REFUSAL
@@ -8621,6 +8641,19 @@ class SdkSession:
                                   % (self.name, picked if prev else model, type(e).__name__, e), problem=False)
             else:
                 back = "the account default"
+                stale = getattr(self, "_stale_pick", None)
+                resend = None
+                if stale and stale.get("pick") == picked:
+                    # the pick an older CLI did not know, refused by the Claude Code the session relaunched on too: a
+                    # verdict on the id after all. The relaunch's connect took the pick as accepted (it rode --model), so
+                    # the accepted model goes back to the one before it first, for the revert below; and that CLI was
+                    # launched on the refused id, so the model put back is sent to it once the revert is done
+                    self._forget_stale_pick()
+                    with self._lock:
+                        self._model_accepted = stale.get("back")
+                    if stale.get("phase") == "relaunched":
+                        b = stale.get("back")
+                        resend = (None if b in (None, "", "default") else b,)
                 if prev is not None:
                     back = self.backend._revert_model(self, prev) or back
                     # Retry upgrades, judged again against the pick put back (the #33 follow-up's review, 2026-10-01). The
@@ -8668,6 +8701,8 @@ class SdkSession:
                 self.backend._log("set_model (%s -> %s) refused by the SDK: %s: %s — the switch did NOT apply; "
                                   "the model reverted to %s" % (self.name, model, type(e).__name__, e, back),
                                   problem=True)
+                if resend is not None:
+                    asyncio.ensure_future(self._do_set_model(resend[0], None))
             # The kernel recorded a version as its family's pin BEFORE the CLI ruled (_note_model_pick at
             # its choke point), and the revert never reached that memory — so the family row kept sending
             # the refused id and re-ringing this on every click. Class-level hook, the on_model_fallback
@@ -8686,6 +8721,9 @@ class SdkSession:
                         self.backend._log("model-pick forget (%s): %s" % (self.name, e2), problem=True)
         else:
             self._pick_answered(prev)
+            st = getattr(self, "_stale_pick", None)
+            if st and prev is not None and st.get("pick") == prev.get("picked"):
+                self._forget_stale_pick()   # the Claude Code the session relaunched on took the pick
             if prev is not None:
                 self._model_accept(prev.get("picked"))   # the verdict that moves the accepted state
                 self.backend._seed_write_settled(prev.get("tok"))
@@ -8695,6 +8733,83 @@ class SdkSession:
         # resolves the pending switch the moment the CLI applies it.
         await self._do_refresh_context()
         self.backend._poke()
+
+    async def _keep_pick_for_newer_cli(self, e, picked, prev) -> bool:
+        """A live pick the CLI refused because it does not know the id, while the Claude Code installed now is not the one
+        this session's CLI reported: the CLI is old, not the pick wrong (2026-11-12, the switch to Fable 5.2: every live
+        session ran a Claude Code from before the model, 2.1.280 or 2.1.305, while the installed binary was 2.1.322, and
+        each refusal reverted the pick and the remembered default, forgot the family's pinned version and rang the error
+        center, once per session). The pick is KEPT: no revert, no forgotten pin, nothing rung. The session asks for a
+        relaunch (want_switch_reconnect("model"), the quiet road Retry upgrades takes: applied once no turn, queued
+        message, subagent, background task or question to the user is running, never cutting one), and the relaunch
+        launches the installed Claude Code with --model <the pick> and the fast-mode flag where the session wants fast
+        mode (_options), so Fable 5.2 starts fast without the live re-arm. Meanwhile the pick's switching dots stand, the
+        sign that it is pending, not lost. The relaunch's CLI then rules on the pick (_send_stale_pick): a refusal there
+        is a verdict on the id, reverted and rung as any refusal is (the revert branch of _do_set_model).
+
+        Returns whether the pick was kept. Not kept, so today's revert, when the refusal is not about an unknown id (an
+        org restriction, a malformed id), when the installed version cannot be read or equals the session's CLI's, when
+        a newer pick landed meanwhile, or when this pick already had its relaunch. A session whose CLI has not reported
+        its version (an attach with no turn since) reads as older, so the worst case of that guess is one quiet relaunch
+        before the same loud revert."""
+        if not _UNRECOGNIZED_MODEL_RE.search(str(e)):
+            return False
+        st = getattr(self, "_stale_pick", None)
+        if st and st.get("pick") == picked and st.get("phase") == "relaunched":
+            return False                  # the Claude Code it relaunched on refused it too: today's revert
+        try:
+            installed = await asyncio.get_running_loop().run_in_executor(None, self.backend.cli_version)
+        except Exception:
+            installed = ""
+        seen = str(getattr(self, "_cli_version_seen", "") or "")
+        if not installed or installed == seen:
+            return False
+        with self._lock:
+            if self.chosen_model != picked:
+                return False              # a newer pick landed while the version was read: it owns every layer
+            self._stale_pick = {"pick": picked, "back": self._model_accepted, "prev": prev, "phase": "waiting",
+                                "from": seen, "to": installed}
+            back = self._model_accepted
+        try:
+            self.backend._update_reg(self.sid, stalePick={"pick": picked, "back": back})
+        except Exception as e2:
+            self.backend._log("model (%s): registry write failed: %s" % (self.name, e2), problem=False)
+        self.backend._log("model (%s): Claude Code%s does not know %s (%s); Claude Code %s is installed, so the session "
+                          "relaunches on it with the pick kept%s"
+                          % (self.name, " " + seen if seen else "", picked, e, installed,
+                             "" if self.quiet() else " once it is quiet"), problem=False)
+        self.want_switch_reconnect("model")
+        return True
+
+    def _send_stale_pick(self) -> bool:
+        """The connect after a pick an older CLI did not know (_keep_pick_for_newer_cli): when it LAUNCHED a CLI (an attach
+        reaches the same old one, so the pick waits for the relaunch still asked for), hand the pick to it as a live
+        set_model under the pick's own bookkeeping (`prev`), so this CLI rules on it. It was launched with --model <the
+        pick> and runs it when it knows it, and the answer then settles the pick like any accepted one; a CLI that does
+        not know it either answers with the refusal, which reverts and rings (_do_set_model). Returns whether a model
+        pick was sent. Loop thread."""
+        st = getattr(self, "_stale_pick", None)
+        if not st or st.get("phase") != "waiting":
+            return False
+        if st.get("pick") != getattr(self, "chosen_model", None):
+            self._forget_stale_pick()     # a newer pick owns the session now
+            return False
+        if getattr(self, "_host_is_attach", False):
+            self.want_switch_reconnect("model")   # the same old CLI (a kernel restart's reattach): the relaunch still stands
+            return False
+        st["phase"] = "relaunched"
+        asyncio.ensure_future(self._do_set_model(st["pick"], st["prev"]))
+        return True
+
+    def _forget_stale_pick(self) -> None:
+        """The pick an older CLI did not know is settled (taken, refused by the relaunch's CLI, or replaced by a newer
+        pick): drop the record, in memory and in the registry."""
+        self._stale_pick = None
+        try:
+            if "stalePick" in (read_reg(self.backend.state_dir, self.sid) or {}):
+                self.backend._update_reg_dropping(self.sid, drop=("stalePick",))
+        except Exception as e:
+            self.backend._log("model (%s): registry write failed: %s" % (self.name, e), problem=False)
 
     async def _do_set_mode(self, mode, prev="default"):
         try:
@@ -8870,7 +8985,10 @@ class SdkSession:
         (fast_opt) is set_fast's to reconnect, not this. One ask per connection: a reconnect already requested or wanted
         (the flag, or anything else) is not asked for again. Nor for a CLI that was launched with the flag and still
         answered without it (_opt_in_cannot_take, 2026-10-09): its report cleared _fast_unlocked, and every live model
-        change then asked for a relaunch that carried the same flag and heard the same."""
+        change then asked for a relaunch that carried the same flag and heard the same. A CLI that drops fast mode at the
+        switch although the connection carries the flag (Fable 5.2's explicit opt-in, Claude Code 2.1.322) is asked back
+        when it reports so, by _rearm_dropped_fast: the CLI's own request, which applies at once, where a relaunch would
+        wait for a quiet session."""
         try:
             aside = ["always fast"] if self.fast_effective() and not self._opt_in_cannot_take() else []
             with self._lock:
@@ -10155,7 +10273,122 @@ class SdkSession:
             self.want_switch_reconnect("fast mode")
         if lacks:
             self._ask_missing_opt_in(wants)   # the flag this CLI lacks, asked for from the CLI's own word
+        self._rearm_dropped_fast(d, fast, str(d.get("fast_mode_disabled_reason") or ""))
         return changed or refused_ask
+
+    def _rearm_dropped_fast(self, d, fast: str, raw_reason: str) -> None:
+        """Ask fast mode back from a CLI that dropped it on a model switch (2026-11-12, the review of #453). Claude Code
+        2.1.322 asks for an explicit opt-in before it runs fast mode on Fable 5.2 or Mythos 5.2: a launch on one of them
+        with the fast-mode flag counts as that opt-in, but a LIVE switch onto one from another model (romp's picker
+        switches live, through set_model) turns fast mode off and reports fast_mode_state "off" with no reason. The
+        connection already carries the flag, so _after_model_change asks for no relaunch, _adopt_fast_state records
+        "off", and the session ran at normal speed under a Fast pick or Always fast with only its Slow badge to say so.
+
+        The event is the CLI's own report, a turn's init, which names the model it runs (the connect-time answer names
+        none, and a launch carries the opt-in for its own model anyway): fast mode off, no refusal reason, on a
+        connection made with the flag, for a session that wants fast mode (fast_effective: its own pick, or Always fast
+        without a Slow pick or a standing refusal), on a model the CLI itself said runs fast mode (the learned table,
+        model_fast.fast_known: the CLI's word, never the Opus seed). Then the designed path, the one Claude Code's own
+        thin client takes for its fast toggle: the `apply_flag_settings` control request with `fastMode: true`. A
+        fastMode the session's inline flag layer does not already hold counts as a fresh opt-in there: the CLI marks the
+        model it runs as chosen and recomputes fast mode (its handler, read in the 2.1.322 bundle). romp's flag rides a
+        --settings FILE, so that inline layer starts empty. No `model` key: with it the CLI would also run the
+        PreModelSwitch hooks and write the model into the session's flag layer, for a switch nobody asked for. Not the
+        literal '/fast on' the badge sends, which also works but goes into the conversation as a message; this is a
+        control request beside it. Verified against Claude Code 2.1.322 in a sandbox (2026-11-12): launched on Opus
+        with the flag, set_model to fable, the next turn's init reports fast "off" with no reason; after this request
+        the next init reports "on".
+
+        Never a loop: one ask per model per connection (_fast_rearm). A report of fast mode still off with no reason
+        after the CLI answered the ask, or an ask the CLI or the SDK refused, is said once, as a problem and a warn toast
+        naming the session and why (_say_fast_dropped); nothing asks again on that model until the next connection. A
+        refusal WITH a reason never reaches here as a drop: _adopt_fast_state answers it as before (the refused pick's
+        toast, the Always fast switch's memory)."""
+        try:
+            sd = getattr(self.backend, "state_dir", None)
+            mid = str((d.get("model") if isinstance(d, dict) else "") or "").strip()   # the report's OWN model, never a
+            if not mid:                                                               # stale registry id
+                return
+            key = mid.lower()
+            rearm = getattr(self, "_fast_rearm", None)
+            if rearm is None:
+                rearm = self._fast_rearm = {}
+            if fast == "on":
+                if rearm.get(key) == "sent":
+                    rearm[key] = "done"   # the ask took before its answer was read: a later drop is said, not asked again
+                return
+            if fast != "off" or raw_reason or not getattr(self, "_fast_unlocked", False):
+                return
+            if not self.fast_effective() or _mf.fast_known(mid, sd) is not True:
+                return
+            phase = rearm.get(key)
+            if phase == "sent" or phase == "said":
+                return                    # an ask in flight, or a drop already said: nothing more on this model
+            if phase == "done":
+                rearm[key] = "said"
+                self._say_fast_dropped(mid, "Claude Code turned it off on %s without a reason and kept it off after romp "
+                                            "asked for it again" % (pretty_model(mid) or mid))
+                return
+            rearm[key] = "sent"
+            loop = getattr(self, "loop", None)
+            if loop is None or not getattr(self, "client", None):
+                rearm[key] = "said"
+                self._say_fast_dropped(mid, "Claude Code turned it off on %s without a reason, and the session has no "
+                                            "connection to ask it back on" % (pretty_model(mid) or mid))
+                return
+            self.backend._log("fast mode (%s): Claude Code turned fast mode off on %s without a reason; asking it back on"
+                              % (self.name, pretty_model(mid) or mid))
+            loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._do_rearm_fast(mid)))
+        except Exception as e:
+            self.backend._log("fast mode (%s): %s" % (self.name, e), problem=True)
+
+    async def _do_rearm_fast(self, mid: str) -> None:
+        """Send _rearm_dropped_fast's ask: apply_flag_settings with fastMode true, through the SDK's control-request
+        sender (no public wrapper in the Python SDK; _set_cwd_request's idiom). Answered: the badge reads Fast at once,
+        as set_fast's flip does, and the next init re-asserts the truth (a drop it still reports is said then).
+        Refused, or no sender to ask with: said now."""
+        key = mid.lower()
+        q = getattr(getattr(self, "client", None), "_query", None)
+        send = getattr(q, "_send_control_request", None)
+        err = ""
+        if not callable(send):
+            err = "this Claude Agent SDK has no control channel to ask with"
+        else:
+            try:
+                await send({"subtype": "apply_flag_settings", "settings": {"fastMode": True}})
+            except Exception as e:
+                err = "Claude Code refused the request (%s: %s)" % (type(e).__name__, e)
+        rearm = getattr(self, "_fast_rearm", None)
+        if rearm is None:
+            rearm = self._fast_rearm = {}
+        if err:
+            rearm[key] = "said"
+            self._say_fast_dropped(mid, "Claude Code turned it off on %s without a reason, and asking it back on failed: %s"
+                                        % (pretty_model(mid) or mid, err))
+            return
+        if rearm.get(key) == "sent":
+            rearm[key] = "done"
+        self.backend._log("fast mode (%s): Claude Code took the ask; fast mode is back on for %s"
+                          % (self.name, pretty_model(mid) or mid))
+        if self.fast != "on":
+            self.fast = "on"              # optimistic, as set_fast's flip; the next init says what the CLI runs
+            try:
+                self.backend._update_reg(self.sid, liveFast="on")
+            except Exception as e:
+                self.backend._log("fast-state persist (%s): registry write failed: %s" % (self.name, e))
+        self.backend._poke()
+
+    def _say_fast_dropped(self, mid: str, why: str) -> None:
+        """Fast mode is off on this session although it wants it, and asking it back did not work: said where the user
+        looks, a problem row (keyed per session and model, so a repeat counts on it) and a warn toast, not only the
+        badge's Slow (CLAUDE.md, fail loudly)."""
+        self.backend._log("fast mode (%s): fast mode is off on this session: %s; it runs at normal speed"
+                          % (self.name, why), problem=True, key=("fast-dropped", self.sid, mid.lower()))
+        try:
+            self.backend._notify("chat", {"type": "warn", "text":
+                "Fast mode is off on %s: %s. It runs at normal speed." % (self.name, why)})
+        except Exception as e:
+            self.backend._log("fast mode (%s): could not tell the chat: %s" % (self.name, e))
 
     def _fast_refusal_new_billing(self) -> bool:
         """At a launch (_amain, before _options reads fast_effective): a refusal of fast mode that the CLI gave under
@@ -10337,8 +10570,38 @@ class SdkSession:
             self._cli_version_seen = v
         self._fast_support_connect = None if v else _mf.support_from_payload(info)
         self._learn_fast_support(info, cli=v or getattr(self, "_cli_version_seen", "") or "")
+        self._note_fast_list_silent(info, v or getattr(self, "_cli_version_seen", "") or "")
         if self._adopt_fast_state(info):
             self.backend._poke()
+
+    def _note_fast_list_silent(self, info, cli="") -> None:
+        """The connect-time answer lists the CLI's models and not one option carries supportsFastMode: the list teaches
+        the learned table nothing (model_fast.support_from_payload, which cannot tell a Claude Code that predates the
+        field from an account none of whose models runs fast mode), so every fast gate keeps deciding by romp's old rule
+        (fast mode on Opus, nothing else) for any model no report has named. That fallback was silent (the review of
+        #453); now it is said, once per kernel life, as a problem (CLAUDE.md, fail loudly). An answer with no model list
+        at all is a CLI older still, whose silence the table never read either; said nowhere new, as before."""
+        try:
+            models = info.get("models") if isinstance(info, dict) else None
+            opts = [o for o in models if isinstance(o, dict)] if isinstance(models, list) else []
+            if not opts or any("supportsFastMode" in o for o in opts):
+                return
+            be = self.backend
+            with be._lock:
+                if getattr(be, "_fast_list_silent_said", False):
+                    return
+                be._fast_list_silent_said = True
+            known = bool(_mf.read_table(getattr(be, "state_dir", None)))
+            be._log("fast mode: Claude Code%s lists its models without saying which run fast mode (no supportsFastMode "
+                    "on any of them), either because it predates that report or because no model on this account runs "
+                    "fast mode; %s romp's old rule, fast mode on Opus and nothing else, for the fast badge, Always fast "
+                    "and the judges, until a Claude Code that says so connects"
+                    % (" " + cli if cli else "",
+                       "for any model an earlier Claude Code did not name, romp falls back to" if known
+                       else "romp falls back to"),
+                    problem=True, key=("fast-list-silent",))
+        except Exception as e:
+            self.backend._log("fast support (%s): %s" % (self.name, e))
 
     def _learn_fast_support(self, d, cli="") -> bool:
         """Record what a CLI payload says about fast-mode support, in the kernel-wide learned table
@@ -10937,6 +11200,7 @@ class SdkSession:
             #   toggle sent on the old one — never hold a pre-reconnect expectation against it
             self._fast_guess_asked = False   # a guessed "preference" asks its relaunch once per connection
             self._fast_off_sent = self._fast_opt_in_said = False   # a fresh CLI: nothing sent to it, nothing said of it
+            self._fast_rearm = {}                    # …and nothing asked back of it (_rearm_dropped_fast)
             connected = False
             try:
                 transport = None
@@ -10979,6 +11243,7 @@ class SdkSession:
                     self._connected.set()   # the control channel exists from here (move() waits on this)
                     self._release_launch_slot()   # a relaunch's CLI is up: its launch slot goes to the next one waiting
                     held_model = self._send_held_picks(opts)   # a model or mode picked while no client was up
+                    held_model = self._send_stale_pick() or held_model   # a pick an older CLI did not know, to this one
                     if self._host is None:
                         self.backend._lease_open(self, client)   # ownership by lease (T305): pid + start time, heartbeat
                     #   (under a host the HOST holds the lease)

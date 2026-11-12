@@ -23700,6 +23700,9 @@ def _sdk_problem(text):
         del _SDK_BOOT_PROBLEMS[:-20]
 
 
+jd._FAST_SEED_PROBLEM_FN = _sdk_problem   # the judges' fast gate falling to its seed with nothing learned (jd._say_fast_seed)
+
+
 def _auth_key_present():
     """Whether a session with no login pick bills the API key on this box: an apiKeyHelper is configured in
     Claude Code's settings (the SDK backend's key_available: read, never run). A bool on purpose: romp holds
@@ -60956,9 +60959,11 @@ def _price_for(model, prices):
     """The price row for a model: exact id, else the row of the Claude Code model it is a dated form of
     (`claude-opus-5-5-2026…` on claude-opus-5-5, never on claude-opus-5), else the priced model with the same
     (family, major, minor) signature (a config-only id), else the newest priced model of the same family, else None.
-    A model id that reaches the family guess or the miss is said once per kernel life on stderr (the kernel log): a
-    family guess is how Opus 5.5 came to be priced as Opus 4.8 without a word. A record the CLI wrote itself
-    (`<synthetic>`, no API call) is no model and is not said."""
+    A model id that reaches the family guess or the miss is said once per kernel life, in the kernel log AND in the
+    error center (_price_unknown): a family guess is how Opus 5.5 came to be priced as Opus 4.8 without a word, and
+    how Fable 5.2 was read at Fable 5.1's rates with no fast row (2026-11-12), the spend guard's ceiling then letting
+    fast Fable 5.2 spend about 1.6 times what it says, with only a log line nobody tails to say so. A record the CLI
+    wrote itself (`<synthetic>`, no API call) is no model and is not said."""
     if model in prices:
         return prices[model]
     mid = cpr.model_id(model)
@@ -60974,19 +60979,47 @@ def _price_for(model, prices):
         if fam in m:
             for k, v in prices.items():
                 if fam in k.lower():
-                    _price_unknown(model, "priced as " + k)
+                    _price_unknown(model, "priced as %s (%s)" % (k, _price_rates_text(v)))
                     return v
     if m and not m.startswith("<"):
-        _price_unknown(model, "and no model of its family is")
+        _price_unknown(model, "and no model of its family is: the spend guard prices its calls at the dearest row's "
+                              "rates and the cost view counts them at $0")
     return None
 
 
-def _price_unknown(model, how):
-    if model in _PRICE_UNKNOWN_SAID:
-        return
-    _PRICE_UNKNOWN_SAID.add(model)
+_PRICE_UNKNOWN_LOCK = threading.Lock()
+
+
+def _price_rates_text(row):
+    """A price row's rates as the error center says them: $ per million tokens in and out, and whether it has fast
+    rates (a fast call on a row without them is priced at the standard rates, whatever the model really bills fast)."""
     try:
-        sys.stderr.write("prices: model %r is not in Claude Code's price table (kernel/cli_prices.py); %s\n" % (model, how))
+        txt = "$%g/$%g per MTok in/out" % (float(row.get("in") or 0) * 1e6, float(row.get("out") or 0) * 1e6)
+        f = row.get("fast")
+        if isinstance(f, dict):
+            return txt + ", fast $%g/$%g" % (float(f.get("in") or 0) * 1e6, float(f.get("out") or 0) * 1e6)
+        return txt + ", no fast rates, so a fast call is priced at the standard rates"
+    except Exception:
+        return "its rates"
+
+
+def _price_unknown(model, how):
+    """Say once per kernel life that `model` has no row of its own in the price table and what the fallback did with it:
+    in the kernel log and in the error center (_sdk_problem; CLAUDE.md, fail loudly), because a guessed price is
+    wrong money in the spend guard and the cost view that looks right (2026-11-12: Fable 5.2 at Fable 5.1's rates, its
+    fast calls at the standard ones). The table changes only with the code, so a kernel life is the episode."""
+    with _PRICE_UNKNOWN_LOCK:
+        if model in _PRICE_UNKNOWN_SAID:
+            return
+        _PRICE_UNKNOWN_SAID.add(model)
+    line = ("prices: model %r is not in Claude Code's price table (kernel/cli_prices.py); %s. The spend guard and the "
+            "cost view use that until the table gains a row for it" % (model, how))
+    try:
+        sys.stderr.write(line + "\n")
+    except Exception:
+        pass
+    try:
+        _sdk_problem(line)
     except Exception:
         pass
 
