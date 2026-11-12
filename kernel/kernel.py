@@ -14843,6 +14843,7 @@ _ASM_REBUILD_STARTER = {"running": False}   # the rebuild starter's thread is in
 _ASM_REBUILD_STARTER_SAID = {}               # exception type name -> said once per kernel life (the starter's)
 
 
+@_stage_marked("asm.rebuild.start")                 # its own reads (a stat per pending leaf) count under their own stage (T401)
 def _asm_rebuild_starter():
     """The document rebuild's starter thread (2026-11-12), started in main() beside the pusher: waits until the background gate
     is OPEN and something changed (em.asm_rebuild_wait: the gate opened, a parse noted a leaf, a refresh or a rebuild released
