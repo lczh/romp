@@ -22728,7 +22728,7 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
             be.connect(tsid)
             # the opening message (row["sent"] above); the comment was typed into the page, a dispatched thread's prompt
             # (raw_opener: /fork-comment, a tool's caller) was not
-            _user_send(be, tsid, "%s\n\n%s" % (sent, said), typed="" if raw_opener else said)
+            _user_send(be, tsid, "%s\n\n%s" % (sent, said), typed=not raw_opener)
         except Exception as e:
             with _comments_lock:                       # loud + lossless: no half-born thread row
                 data = _load_comments(parent_sid)
@@ -22774,7 +22774,7 @@ def _comment_reply(parent_sid, tid, text):
         # explicit alive=False a kill writes; a thread with no reg at all is gone, and refused below)
         be.resume(reg.get("name") or ("thread-" + tsid[:8]), tsid)   # alive again; names/ untouched
         _lift_end_latch(tsid)                                        # ...and any End latch on its sid lifts with it (2026-09-21)
-    if not _user_send(be, tsid, str(text), typed=str(text)):    # typed into the thread's pane
+    if not _user_send(be, tsid, str(text), typed=True):    # typed into the thread's pane
         return "couldn't reach this thread's session; it may have been removed."
     _push_soon()
     return None
@@ -24581,7 +24581,7 @@ def _drive(msg, client):
                 _push_soon()
             else:
                 _ok = _send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be), user=True, paths=_wire_paths(msg),
-                                    typed=str(msg["text"])) is not None   # typed into the page: the arrival note's origin
+                                    typed=True) is not None   # typed into the page: the arrival note's origin
                 if not _ok:
                     if be is not _UNOWNED and sid in _ending_sids:
                         # the session is ENDING (the End doors' cancel latched it, _drop_parked_on_end): its park was refused, or
@@ -24687,10 +24687,11 @@ def _drive(msg, client):
             return True                                   # a copy of a follow-up this kernel already has: answered, nothing reopened twice
         try:
             # a follow-up is the user's; a nudge is romp's; its attachments ride as a send's do (T373 fold round two). Typed
-            # (the arrival note's origin) unless it is the Nudge button's words or Continue, which says no reply is needed
+            # (the arrival note's origin) only when the person typed the words: never the Nudge button's, Continue's, or
+            # a canned ask the page marks on the wire (`canned`: the card's Check status buttons, the review of #412)
             _handed = _send_or_park(be, sid, body, qid=_client_qid(msg, sid, be),
                                     user=not msg.get("nudge"), paths=_wire_paths(msg),
-                                    typed="" if (msg.get("nudge") or msg.get("cont")) else text)
+                                    typed=not (msg.get("nudge") or msg.get("cont") or msg.get("canned")))
         except OSError as e:
             # the send's own state write refused (a parked op's file, the queue's mirror; the second executed review of PR 1935, 2026-09-21): the
             # refusal this arm already has, with the cause, where the raise used to reach the receive loop's OSError arm and tear
@@ -45466,16 +45467,16 @@ def _takes_kw(fn, name):
         return False
 
 
-def _user_send(be, sid, text, typed=""):
-    """be.send for a message the USER typed, with user=True when the backend's send takes it. `typed`: the words the user
-    typed into a page (a comment thread's opener or reply), passed on when the send takes it (_send_with_id's)."""
-    kw = {"typed": str(typed)} if typed and _takes_kw(be.send, "typed") else {}
+def _user_send(be, sid, text, typed=False):
+    """be.send for a message the USER typed, with user=True when the backend's send takes it. `typed`: the user typed the
+    words into a page (a comment thread's opener or reply), passed on when the send takes it (_send_with_id's)."""
+    kw = {"typed": True} if typed is True and _takes_kw(be.send, "typed") else {}
     if _takes_user(be.send):
         return be.send(sid, text, user=True, **kw)
     return be.send(sid, text, **kw)
 
 
-def _send_with_id(be, sid, text, qid=None, user=False, paths=None, typed=""):
+def _send_with_id(be, sid, text, qid=None, user=False, paths=None, typed=False):
     """be.send, with the copy's press-time id when one rode and the backend's send takes it (_takes_qid:
     SdkBackend, whose queued copy and echo then wear the id the chat's bubble already has). A send that takes
     no id (Codex; a stand-in) gets the text alone, as before. `user`: a message the user typed (the composer, the phone, a user's `romp send`, a parked
@@ -45487,8 +45488,8 @@ def _send_with_id(be, sid, text, qid=None, user=False, paths=None, typed=""):
         kw["user"] = True
     if paths and _takes_kw(be.send, "paths"):
         kw["paths"] = list(paths)                          # the attachment list, beside the copy's id (T373 fold)
-    if typed and _takes_kw(be.send, "typed"):
-        kw["typed"] = str(typed)                           # the words typed into a page: the origin the arrival note goes on
+    if typed is True and _takes_kw(be.send, "typed"):
+        kw["typed"] = True                                 # typed into a page: the origin the arrival note goes on
     return be.send(sid, text, **kw)
 
 
@@ -45510,21 +45511,21 @@ def _op_paths(op):
     return list(op[5]) if op[0] == "send" and len(op) > 5 and isinstance(op[5], (list, tuple)) else []
 
 
-def _op_typed(op) -> str:
-    """The words the user TYPED into a page that a parked send carries (its seventh slot, _send_or_park): the composer,
-    a card reply, a comment thread's reply; "" for anything else (a `romp send`, a relay, a canned button, anything romp
-    sends on its own). The replay hands them to the backend as `typed`, the origin the arrival note goes on
-    (sdk_backend's _arrival_note). Length-guarded like every reader of an optional slot."""
-    return op[6] if op[0] == "send" and len(op) > 6 and isinstance(op[6], str) else ""
+def _op_typed(op) -> bool:
+    """Whether a parked send is words the user TYPED into a page (its seventh slot, _send_or_park: a flag, never a second
+    copy of the text): the composer, a card reply, a comment thread's reply. The replay hands the backend typed=True
+    for it, the origin the arrival note goes on (sdk_backend's _arrival_note); a `romp send`, a relay, a canned button
+    and anything romp sends on its own carry none. Length-guarded like every reader of an optional slot."""
+    return op[0] == "send" and len(op) > 6 and op[6] is True
 
 
-def _send_or_park(be, sid, text, echo=None, qid=None, user=False, paths=None, typed=""):
+def _send_or_park(be, sid, text, echo=None, qid=None, user=False, paths=None, typed=False):
     """`user` (T315): the text is the USER's (the composer, the phone, an untagged `romp send`, a typed command),
     handed to the backend as its word to retry a stood-down attach and remembered on a parked op's fifth slot for the
     replay; a machine caller (a watch notice, a nudge, a tagged `romp send`) passes nothing and is queued behind a
     stand-down instead. Classified by the caller that knows who speaks, never by the route.
 
-    `typed` (2026-11-12): narrower than `user`, the words the user TYPED into a page (the composer, a card reply), the
+    `typed` (2026-11-12): narrower than `user`, the user TYPED the text into a page (the composer, a card reply), the
     one origin the ARRIVAL NOTE goes on when the message reaches a turn already running (sdk_backend's _arrival_note);
     remembered on a parked send's seventh slot (_op_typed). An untagged `romp send` is `user` and never `typed`:
     another session sends that way too.
@@ -45596,8 +45597,8 @@ def _send_or_park(be, sid, text, echo=None, qid=None, user=False, paths=None, ty
         op = op + (None,) * (4 - len(op)) + (True,)     # the fifth slot: the user's words (_op_user); the fourth stays the id or None
     if paths and not cmd:
         op = op + (None,) * (5 - len(op)) + (list(paths),)   # the sixth slot: the attachments the trailing line named (_op_paths, T373 fold)
-    if typed and not cmd:
-        op = op + (None,) * (6 - len(op)) + (str(typed),)   # the seventh slot: the words typed into a page (_op_typed)
+    if typed is True and not cmd:
+        op = op + (None,) * (6 - len(op)) + (True,)     # the seventh slot: typed into a page, a flag (_op_typed)
     if _compacting_now(sid) or _pending_ops.get(sid) or _limit_hold(sid):
         return True if _park_op(sid, op) else None       # None: the park was refused, the session is ending (2026-09-21)
     if _working_now(sid) and (cmd or not _forwards_sends(be)):

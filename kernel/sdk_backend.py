@@ -3939,22 +3939,37 @@ def fed_text_opener(text: str) -> str:
 # (SdkSession._prompt_submit_hook) hands back this note as additional context, which the CLI attaches right after the
 # message. It names romp on purpose (the user asked that romp never impersonate them; tests/test_injected_voice.py lists
 # it beside the housekeeping note). Only on words typed into a page, by the origin the kernel's send door records on the
-# queued copy (send's `typed`), never by the text's shape; only on a delivery into a turn already running, never on a
-# message that starts one (SdkSession._arrival_note). The wording is the user's, approved verbatim.
+# queued copy (send's `typed` flag), never by the text's shape; only on a delivery into a turn already running, never on
+# a message that starts one (SdkSession._arrival_note). The wording is the user's, approved verbatim.
 ARRIVAL_NOTE = ("[romp] The user won't see an answer that stays in your thinking, and is waiting on a reply to the "
                 "message above. Answer it now in one or two plain sentences, then carry on.")
-TYPED_KEEP = 400              # characters of the typed words a queued copy keeps (its mirror included)
 # The hook waits for the receive loop to have handled every frame the CLI wrote before it called the hook (the SDK runs
 # a hook as its own task, beside the loop): a bound on the event-loop turns it yields while it waits, never a clock.
 STREAM_DRAIN_YIELDS = 2000
 
 
-def arrival_note_applies(typed) -> bool:
-    """Do the words a fed copy's send door recorded as typed into a page (`typed`: "" for every other origin, an untagged
-    `romp send`, a relay, a canned button, a lost wakeup's prompt, anything romp sends on its own) earn the arrival
-    note? A slash command is a command, not a message awaiting an answer, and a blank text asks nothing."""
-    t = typed if isinstance(typed, str) else ""
+def arrival_note_applies(hold) -> bool:
+    """Does a fed copy's hold (_untaken) earn the arrival note by its origin and text? Its send door recorded it as typed
+    into a page (`typed`; never set for an untagged `romp send`, a relay, a canned button, a lost wakeup's prompt or
+    anything romp sends on its own), and it is a message: a slash command is a command, not a message awaiting an
+    answer, and a blank text asks nothing."""
+    if not isinstance(hold, dict) or hold.get("typed") is not True:
+        return False
+    t = str(hold.get("text") or "")
     return bool(t.strip()) and not t.lstrip().startswith("/")
+
+
+def mirror_meta(text, meta) -> dict:
+    """One queued copy as the registry mirror lists it (reg['queueMeta'], _persist_queue and _unqueue_mirror alike): its
+    text, and for an identified copy its id, its stamp, its attachment list and its typed origin (the arrival note's)."""
+    if not (isinstance(meta, dict) and meta.get("qid")):
+        return {"text": text}
+    out = {"text": text, "qid": meta["qid"], "qts": meta.get("qts")}
+    if meta.get("paths"):
+        out["paths"] = meta["paths"]
+    if meta.get("typed") is True:
+        out["typed"] = True
+    return out
 
 
 # A turn that ended while no kernel was listening (2026-10-14; plans/federated-push.md, "The feed across a restart"): a
@@ -6731,8 +6746,8 @@ def queue_meta_from_reg(reg: dict) -> list:
         out = {"qid": m["qid"], "qts": m.get("qts")}
         if isinstance(m.get("paths"), list) and m["paths"]:
             out["paths"] = [str(x) for x in m["paths"] if isinstance(x, str)]   # the attachment list survives a restart with the copy (T373 fold)
-        if isinstance(m.get("typed"), str) and m["typed"].strip():
-            out["typed"] = m["typed"]                    # …and so does its origin (the arrival note's)
+        if m.get("typed") is True:
+            out["typed"] = True                          # …and so does its origin (the arrival note's)
         return out
 
     # the mirror lists EVERY position (text alone for an id-less copy): align the mirrored run as one block of the
@@ -6820,6 +6835,8 @@ class SdkSession:
     # …and one line per SystemMessage subtype the handler has no branch for (per kernel life), so a
     # CLI that starts forwarding a new frame kind is noticed in the log instead of silently dropped.
     _sys_subtypes_seen: set = set()
+    # …and the arrival note's order check (_arrival_note_unhooked): once per kernel life.
+    _arrival_unhooked_said = False
 
     def __init__(self, backend: "SdkBackend", reg: dict):
         self.backend = backend
@@ -7500,7 +7517,7 @@ class SdkSession:
                 if echo_text_key(f.get("text", "")) == k:
                     hit = self._fed_meta.pop(j)
                     break
-            metas.append({"qid": hit["qid"], "qts": hit.get("qts"), **({"typed": hit["typed"]} if hit.get("typed") else {})}
+            metas.append({"qid": hit["qid"], "qts": hit.get("qts"), **({"typed": True} if hit.get("typed") is True else {})}
                          if hit else None)   # …and its origin, for the arrival note
         return metas
 
@@ -7532,7 +7549,7 @@ class SdkSession:
         text, meta = self._q_pop(idx)
         if meta and meta.get("qid"):
             self._fed_meta.append({"qid": meta["qid"], "qts": meta.get("qts"), "text": text, "t": int(time.time()),
-                                   **({"typed": meta["typed"]} if meta.get("typed") else {})})
+                                   **({"typed": True} if meta.get("typed") is True else {})})
             del self._fed_meta[:-64]                       # bounded: a landing is paired within a turn or two
         # A /clear's echo is tracked at the TAKE, not here at the feed: the copy sits in self._untaken until the
         # CLI demonstrably takes it (_untaken_taken), and only then is its qid recorded for retirement (round
@@ -7599,21 +7616,21 @@ class SdkSession:
             self._fed_meta = [f for f in self._fed_meta if f.get("qid") != qid]
 
     def enqueue(self, text: str, qid: str | None = None, qts: int | None = None, paths: list | None = None,
-                typed: str = ""):
+                typed: bool = False):
         """Deliver a user turn (called from the kernel thread). Held in self._pending —
         VISIBLE to pending_queued — until the input generator releases it at turn end. Works
         before the loop is ready too (the generator drains _pending on its first pass). `qid`/`qts`:
-        the copy's identity (send() mints them; a caller without one queues an id-less copy). `typed`: the words the user
-        typed into a page (send's), kept beside the identity, cut to TYPED_KEEP, and handed to the feed (inputs():
-        _untaken), where the arrival note reads it (_arrival_note)."""
+        the copy's identity (send() mints them; a caller without one queues an id-less copy). `typed`: the user typed it
+        into a page (send's), a flag kept beside the identity and handed to the feed (inputs(): _untaken), where the
+        arrival note reads it (_arrival_note)."""
         with self._lock:
             if qid:
                 self._fed_meta = [f for f in self._fed_meta if f.get("qid") != qid]   # back in the queue: not fed (a re-delivery)
             meta = {"qid": qid, "qts": qts} if qid else None
             if meta is not None and paths:
                 meta["paths"] = [str(x) for x in paths if isinstance(x, str) and x]   # the attachments the send carried, beside its id (T373 fold)
-            if meta is not None and typed and str(typed).strip():
-                meta["typed"] = str(typed)[:TYPED_KEEP]    # typed into a page: the origin the arrival note goes on
+            if meta is not None and typed is True:
+                meta["typed"] = True                       # typed into a page: the origin the arrival note goes on
             self._q_append(text, meta)
             loop, wake = self.loop, self._input_wake
         self._persist_queue()
@@ -7787,9 +7804,7 @@ class SdkSession:
             with self._lock:
                 snap = list(self._pending)
                 metas = list(self._pending_meta)
-            qmeta = [{"text": t, "qid": m["qid"], "qts": m.get("qts"), **({"paths": m["paths"]} if m.get("paths") else {}),
-                      **({"typed": m["typed"]} if m.get("typed") else {})} if isinstance(m, dict) and m.get("qid") else {"text": t}
-                     for t, m in zip(snap, metas)]        # every position, so the restore aligns the run as a block
+            qmeta = [mirror_meta(t, m) for t, m in zip(snap, metas)]   # every position, so the restore aligns the run as a block
             try:
                 self.backend._update_reg(self.sid, queue=snap, queueMeta=qmeta)
             except Exception:
@@ -12547,12 +12562,13 @@ class SdkSession:
     @staticmethod
     def _hold_for_feed(item, meta, fresh) -> dict:
         """The hold (_untaken) a copy the feeder pops leaves standing until the CLI takes it: the text, whether it was fed
-        from idle (`fresh`), the turn-settled mark, the copy's id, the words its send door recorded as typed into a page
-        (send's `typed`; "" for any other origin, and what the arrival note reads, _arrival_note), the uuid it is sent
+        from idle (`fresh`), the turn-settled mark, the copy's id, whether its send door recorded it as typed into a page
+        (send's `typed`, what the arrival note reads, _arrival_note; and `hookSeen`, set once the prompt hook has matched
+        it), the uuid it is sent
         under (the CLI's lifecycle frames name it) and the landing scan's mark, filled in after the pop."""
         return {"text": str(item), "item": item, "fresh": fresh, "settled": False,
                 "qid": (meta or {}).get("qid"),            # the copy's id, for the /clear-echo retire at the TAKE
-                "typed": str((meta or {}).get("typed") or ""),
+                "typed": (meta or {}).get("typed") is True,
                 "cu": str(uuid.uuid4()),                   # the uuid it is sent under: the CLI's lifecycle frames name it
                 "t": int(time.time()), "off": None, "fsid": None}
 
@@ -12602,6 +12618,8 @@ class SdkSession:
             elif not u.get("fresh"):
                 # fed mid-turn and taken while that turn still runs: spliced in at a tool boundary
                 self._note_turn_opener(fed_text_opener(u.get("text") or ""), False)
+                if not u.get("settled") and not u.get("hookSeen") and arrival_note_applies(u):
+                    self._arrival_note_unhooked(u)   # the prompt hook should have seen it first (_arrival_note)
         else:
             self.backend._log("feed hold (%s): the CLI reports the held text %s without running it; the next queued text "
                               "goes in" % (self.name, cl.state))
@@ -14021,13 +14039,13 @@ class SdkSession:
         try:
             return await asyncio.wait_for(self._prompt_submit_body(inp), timeout=cap)
         except asyncio.TimeoutError:
-            self.backend._log("cron dedupe (%s): the prompt hook ran past its %.2fs cap "
+            self.backend._log("prompt hook (%s): ran past its %.2fs cap "
                               "(ROMP_PROMPT_HOOK_TIMEOUT_S) — prompt allowed rather than left for the SDK "
                               "to refuse at its own deadline" % (self.name, cap), problem=True,
                               key=("prompt-hook-cap", self.sid))
             return {}
         except Exception as e:
-            self.backend._log("cron dedupe (%s): %s — prompt allowed" % (self.name, e))
+            self.backend._log("prompt hook (%s): %s — prompt allowed" % (self.name, e))
             return {}
 
     async def _prompt_submit_body(self, inp):
@@ -14059,18 +14077,26 @@ class SdkSession:
     async def _arrival_note(self, inp) -> bool:
         """Does the prompt this hook runs for earn the ARRIVAL NOTE (see ARRIVAL_NOTE's note)? Yes exactly when it is the
         text romp fed and the CLI has not yet taken (the hold, _untaken: one fed text at a time, so the prompt is that
-        text), words its send door recorded as typed into a page (arrival_note_applies), fed while a turn ran (not
-        `fresh`) and with that turn still running at delivery (not `settled`). The CLI runs this hook for a message it
-        splices into a running turn BEFORE it reports the message `started` (verified on CLI 2.1.322, 2026-11-12), so
-        the hold is still standing here; a message that starts a turn is reported `started` first and its hook finds
-        the hold released, or `fresh`. A text fed while the model wrote its final message is taken only after the
-        turn's result, as a turn of its own: the hook waits until the receive loop has read every frame written before
-        it (_stream_caught_up), so that result has marked the hold `settled`. When the loop cannot be shown caught up the
+        text), typed into a page by its send door's record (arrival_note_applies), fed while a turn ran (not `fresh`) and
+        with that turn still running at delivery (not `settled`). The CLI runs this hook for a message it splices into a
+        running turn BEFORE it reports the message `started` (verified on CLI 2.1.322, 2026-11-12), so the hold is still
+        standing here, and the match is marked on it (`hookSeen`) for the lifecycle's check that the order still holds
+        (_on_command_lifecycle). A message that starts a turn is reported `started` first and its hook finds the hold
+        released, or `fresh`. A text fed while the model wrote its final message is taken only after the turn's result,
+        as a turn of its own: the hook waits until the receive loop has read every frame written before it
+        (_stream_caught_up), so that result has marked the hold `settled`. When the loop cannot be shown caught up the
         note is left off and the reason logged (a message keeps reaching the session either way)."""
-        u = getattr(self, "_untaken", None)
         prompt = str((inp or {}).get("prompt") or "") if isinstance(inp, dict) else ""
-        if (u is None or not prompt or u.get("fresh") or u.get("settled") or not arrival_note_applies(u.get("typed"))
-                or echo_text_key(prompt) != echo_text_key(u.get("text") or "")):
+
+        def held():
+            u = getattr(self, "_untaken", None)
+            if u is None or not prompt or echo_text_key(prompt) != echo_text_key(u.get("text") or ""):
+                return None
+            u["hookSeen"] = True
+            return u
+
+        u = held()
+        if u is None or u.get("fresh") or u.get("settled") or not arrival_note_applies(u):
             return False
         caught = await self._stream_caught_up()
         if caught is not True:
@@ -14078,9 +14104,22 @@ class SdkSession:
                               % (self.name, "could not be read" if caught is None else "did not settle before its hook"),
                               problem=True, key=("arrival-note", "stream"))
             return False
-        u = getattr(self, "_untaken", None)
-        return (u is not None and not u.get("fresh") and not u.get("settled") and arrival_note_applies(u.get("typed"))
-                and echo_text_key(prompt) == echo_text_key(u.get("text") or ""))
+        u = held()
+        return u is not None and not u.get("fresh") and not u.get("settled") and arrival_note_applies(u)
+
+    def _arrival_note_unhooked(self, u) -> None:
+        """A message typed into a page, fed mid-turn, has just been reported `started` while its turn still runs, and the
+        prompt hook never matched it (`hookSeen`): the CLI took it without running the hook first, so the arrival note
+        was not added and will not be while that order holds. Said once per kernel life, to the error center, naming the
+        CLI version, since nothing else would show the note stopped (the review of #412)."""
+        if SdkSession._arrival_unhooked_said:
+            return
+        SdkSession._arrival_unhooked_said = True
+        ver = str(getattr(self, "_cli_version_seen", "") or "") or "an unknown version"
+        self.backend._log("arrival note (%s): Claude Code %s took a message typed mid-turn without running the prompt hook "
+                          "for it first, so the note asking for a visible answer was not added; while it does this, no "
+                          "message sent mid-turn gets the note" % (self.name, ver), problem=True,
+                          key=("arrival-note", "unhooked"))
 
     async def _prompt_submit_gate(self, inp):
         """The replay gate proper — the body _prompt_submit_hook runs under its cap. Its first step
@@ -19845,9 +19884,7 @@ class SdkBackend:
             item = texts.pop(idx)
             metas.pop(idx)
             reg["queue"] = texts
-            reg["queueMeta"] = [{"text": t, "qid": m["qid"], "qts": m.get("qts"), **({"paths": m["paths"]} if m.get("paths") else {}),
-                      **({"typed": m["typed"]} if m.get("typed") else {})}
-                                if isinstance(m, dict) and m.get("qid") else {"text": t} for t, m in zip(texts, metas)]
+            reg["queueMeta"] = [mirror_meta(t, m) for t, m in zip(texts, metas)]
             write_reg(self.state_dir, sid, reg)
         return item
 
@@ -19875,7 +19912,7 @@ class SdkBackend:
                         or (s._rewind_to and not getattr(s, "_rewind_armed", False)))
 
     def send(self, sid: str, text: str, qid: str | None = None, user: bool = False, paths: list | None = None,
-             typed: str = "") -> bool:
+             typed: bool = False) -> bool:
         """`user`: the text is a message the USER typed (the composer, the phone, an untagged `romp send`, a comment
         reply or merge, a parked user send replayed, a compact click), the one word that retries a stood-down
         attach (T315). Romp's own automatic messages (the default: the nudge, the awaiting backstop, the debt
@@ -19884,8 +19921,8 @@ class SdkBackend:
         the thread, so it rides the attach the user's next message makes, in order; True means accepted, as ever.
         The stand-down refuses the ATTACH, never the message (the commit-13 review's first item: a refusal
         dropped the nudge after its ledger row had said fired).
-        `typed`: the words the user typed into a page (the kernel's composer and card-reply doors, a comment thread's
-        opener or reply), carried on the queued copy to its feed: the one origin the ARRIVAL NOTE goes on
+        `typed`: the user typed the text into a page (the kernel's composer and card-reply doors, a comment thread's
+        opener or reply): a flag carried on the queued copy to its feed, the one origin the ARRIVAL NOTE goes on
         (_arrival_note)."""
         opened = False                            # the fork's opening line is taken at most once per send
         if user:
@@ -19927,8 +19964,8 @@ class SdkBackend:
         # writes the real user atom.
         key = qid or "echo:" + uuid.uuid4().hex
         try:
-            if typed:
-                s.enqueue(text, qid=key, qts=int(time.time() * 1000), paths=paths or None, typed=str(typed))
+            if typed is True:
+                s.enqueue(text, qid=key, qts=int(time.time() * 1000), paths=paths or None, typed=True)
             else:
                 s.enqueue(text, qid=key, qts=int(time.time() * 1000), paths=paths or None)
         except TypeError:                                    # a stand-in session that takes the text alone: an id-less copy
