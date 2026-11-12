@@ -1421,6 +1421,8 @@ class _PerfStats:
                 # T323 stage 4a: the assembly documents: written, restored, fallbacks per reason, skips per reason (noEntry,
                 # restored, noCut, unsplittable, oversize, ...), hydrated bodies and bytes since boot
                 "asmCheckpoint": em.asm_checkpoint_stats(),
+                "docWorker": _doc_worker_stats(),          # document rebuilds in a worker process (2026-11-12): every fallback
+                #                                            and every refusal of that road, counted
                 "asmIndex": em.asm_index_stats(),          # the lazy index (T323 stage 4c): atoms built, by caller, resident
                 "chatPages": dict(_PAGE_STATS),   # the pre-floor history pages (T323 stage 4b): hits, misses, evictions, resident
                 "repoIndex": _repo_index_stats()}   # the path links' repo listing, taken off the pusher (2026-10-07): refreshes, forks, time
@@ -14923,6 +14925,562 @@ def _asm_refresh_maybe(leaf, sid):
     return True
 
 
+# The document worker (plans/process-split.md, stage two; its first step, 2026-11-12, for the user, who wanted pages to stay
+# responsive after a restart). A document rebuild is a whole parse and a document write, and on a thread of this kernel
+# every page, the pusher and the judges wait behind it for the interpreter (tools/doc_worker_latency.py measures a small
+# build's latency beside each road). With STATE/doc-worker reading `on`, the rebuild road (_asm_rebuild_maybe)
+# runs each job in a bin/romp-doc-worker process instead (kernel/doc_worker.py): a fresh interpreter, spawned and never a
+# fork of this process, one job at a time under the shared claim, the same build function over the same arguments
+# (em.asm_build_document), and one `done` line back. What crosses the boundary is the document on disk, never the parse.
+# Absent, `off` or anything else, the road is the thread it always was, exactly. Everything the worker road does
+# differently is counted on /perf (docWorker) and said on stderr: no fallback and no refusal is silent.
+DOC_WORKER_FILE = "doc-worker"             # STATE/doc-worker: the literal `on` runs document rebuilds in a worker process
+DOC_WORKER_LOST_SPAWNS_MAX = 3             # consecutive jobs the worker lost (a start that failed, no done line, a failure not
+#                                            of memory, the backstop below) before every later rebuild runs in this kernel,
+#                                            for the kernel's life (an event count, never a clock; the judges' process has
+#                                            the same rule)
+DOC_WORKER_MEM_BASE = 64 << 20             # a worker's memory estimate: this, plus the bytes of every file its parse reads, plus
+DOC_WORKER_MEM_PER_RECORD = 8 << 10        #  this per record of them. A review measured the peak at about 24 MB + 0.9 x the
+#                                            bytes + 6 to 7 KiB a record (2026-11-12): 9.5 x the bytes at 756 B a record, 5.1 x
+#                                            at 1.7 KB, 3.3 x at 3.8 KB, so no factor of the bytes alone sizes every transcript
+DOC_WORKER_MEM_MARGIN = 1.5                # the admitted figure is the estimate this many times over: MemAvailable must cover it,
+#                                            and it is the worker's address-space limit (RLIMIT_AS), so a worker can never take
+#                                            more than the machine had free when it was admitted
+DOC_WORKER_AS_GUARD = 256 << 20            # the soft bound sits this far under that limit (a third of the limit at most, so
+#                                            never under the estimate): an allocation up to this size can only fail with the
+#                                            soft bound already passed, so a failure the parser swallowed never reaches a
+#                                            published document
+DOC_WORKER_SIZING_V = 1                    # the sizing above, by version: a memory verdict filed under another one is moot
+DOC_WORKER_TIME_FLOOR_S = 600              # the backstop on a worker that never answers (a hang has no event to key on): this,
+DOC_WORKER_TIME_RATE = 256 << 10           #  plus a second per this many bytes of transcript, a tenth of the slowest rate the
+#                                            latency lab measured (about 2.3 MB/s at nice 19 on a loaded machine, 2026-11-12)
+DOC_WORKER_KILL_GRACE_S = 30               # after the backstop's SIGTERM, the wait before SIGKILL
+DOC_WORKER_EXIT_MEMORY = 86                # the worker's exit code for a memory failure outside its build (doc_worker.py)
+DOC_WORKER_EXIT_DRIFT = 87                 # the worker's exit code when the kernel code it loaded is not this kernel's
+_DOC_WORKER_OUTCOMES = ("written", "declined", "moot", "failed")   # what a rebuild's done line may say
+_DOC_WORKER_LOCK = threading.Lock()
+_DOC_WORKER = {"job": None,                # the running job: {"key", "pid", "t0", "bytes", "cancelled", "stopped", "timedOut"}; a
+               #                             signal is sent to its pid only under the lock and only while it is here, which is
+               #                             until the job's thread is about to reap it, so never to a pid the OS has given away
+               "lost": 0, "latched": False, "switchFault": None, "held": 0, "said": set()}
+_DOC_WORKER_STATS = {"spawned": 0, "done": {}, "fallbacks": {}, "refused": 0, "cancelled": 0, "stopped": 0, "memory": 0,
+                     "verdicts": 0, "verdictHeld": 0, "seconds": 0.0, "peak": None}
+_DOC_WORKER_VERDICTS = {}                  # realpath -> (the verdict file's stat key, the verdict as read from it): its parse,
+#                                            memoized on the file's stat, which every question takes (_doc_worker_verdict)
+
+
+def _doc_worker_say(text, once=None, problem=None):
+    """One stderr line of the document worker's road; with `once`, said the first time for that key alone; with `problem`,
+    a row for the error center too (_sdk_problem), where the user looks: what happened and what to do, in plain words and
+    without the paths the log line carries. Returns whether it was said."""
+    if once is not None:
+        with _DOC_WORKER_LOCK:
+            if once in _DOC_WORKER["said"]:
+                return False
+            if len(_DOC_WORKER["said"]) > 4096:
+                _DOC_WORKER["said"].clear()
+            _DOC_WORKER["said"].add(once)
+    try:
+        sys.stderr.write("document worker: %s\n" % text)
+    except Exception:
+        pass
+    if problem:
+        _sdk_problem(str(problem))
+    return True
+
+
+def _doc_worker_size(nbytes):
+    """An amount of memory as the error center says it: GB from one up, MB below."""
+    return "%.1f GB" % (nbytes / 1073741824.0) if nbytes >= 1 << 30 else "%.0f MB" % (nbytes / 1048576.0)
+
+
+def _doc_worker_who(sid):
+    """A session as the error center names it: its display name, else the start of its id."""
+    try:
+        return _name_of(sid) or str(sid)[:8]
+    except Exception:                                      # noqa: BLE001 - a name is a courtesy; the row goes out regardless
+        return str(sid)[:8]
+
+
+def _doc_worker_switch():
+    """The switch file as it reads now: "on", "off" (absent, or any other text) or "unreadable: <fault>"."""
+    try:
+        return "on" if (jd.STATE / DOC_WORKER_FILE).read_text(encoding="utf-8").strip().lower() == "on" else "off"
+    except FileNotFoundError:
+        return "off"
+    except (OSError, UnicodeDecodeError) as e:
+        return "unreadable: %s: %s" % (type(e).__name__, e)
+
+
+def _doc_worker_on():
+    """Whether document rebuilds go to the worker: STATE/doc-worker reads `on`. A file that cannot be read or decoded is OFF
+    and says so once per fault, where the user looks (the sync notice road) and on stderr."""
+    sw = _doc_worker_switch()
+    fault = sw if sw.startswith("unreadable") else None
+    if fault is not None and _DOC_WORKER["switchFault"] != fault:
+        _sync_notice("the document worker's switch (%s) could not be read (%s): documents are rebuilt in this kernel"
+                     % (DOC_WORKER_FILE, fault[len("unreadable: "):]), ok=False)
+        _doc_worker_say("the switch %s is %s; documents are rebuilt in this kernel" % (DOC_WORKER_FILE, fault))
+    _DOC_WORKER["switchFault"] = fault
+    return sw == "on"
+
+
+def _mem_available_bytes():
+    """MemAvailable of /proc/meminfo in bytes (what the machine can give a new process without swapping), None when it
+    cannot be read (not Linux)."""
+    try:
+        with open("/proc/meminfo", encoding="ascii", errors="replace") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _doc_worker_estimate(nbytes, records):
+    """The memory a worker's whole parse of `nbytes` of transcript holding `records` records is estimated to want."""
+    return int(DOC_WORKER_MEM_BASE + max(0, int(nbytes)) + DOC_WORKER_MEM_PER_RECORD * max(0, int(records)))
+
+
+def _doc_worker_bounds(estimate):
+    """(limit, soft) for a worker whose estimate is `estimate`: the admitted figure, which is both what MemAvailable must
+    cover and the worker's address-space limit, and the soft bound under it (its peak past that publishes nothing)."""
+    limit = int(DOC_WORKER_MEM_MARGIN * estimate)
+    return limit, limit - min(int(DOC_WORKER_AS_GUARD), limit // 3)
+
+
+def _doc_worker_time_bound(nbytes):
+    """Seconds a worker may run before the backstop ends it (DOC_WORKER_TIME_FLOOR_S, DOC_WORKER_TIME_RATE)."""
+    return DOC_WORKER_TIME_FLOOR_S + max(0, int(nbytes)) / float(DOC_WORKER_TIME_RATE)
+
+
+def _doc_worker_plan(leaf, sid, human):
+    """The job a worker would get for `leaf`, sized: its inputs as the kernel's own road computes them
+    (jd.asm_refresh_inputs: the candidate files, the leaf first, the states log, the postal log, the owner bit), the bytes
+    and records of every candidate file (em.transcript_records: counted exactly, once per file state), the estimate and the
+    bounds. One basis for the admission and for the worker's limits: the same files. `exact` is False when a file could not
+    be counted (it is then left out of the figures, and a memory failure files no verdict: _doc_worker_verdict_note). Stats
+    and, for a file not counted at its current size, a read of its new bytes; nothing is decoded."""
+    files, states, postal, human = jd.asm_refresh_inputs(sid, leaf, sdk_human=human)
+    nbytes = records = 0
+    exact = True
+    for f in files:
+        try:
+            size = os.stat(f).st_size
+        except OSError:
+            exact = False
+            continue
+        n = em.transcript_records(f)
+        if n is None:
+            exact = False
+            continue
+        nbytes += size
+        records += n
+    est = _doc_worker_estimate(nbytes, records)
+    limit, soft = _doc_worker_bounds(est)
+    return {"files": files, "states": states, "postal": postal, "human": human, "bytes": nbytes, "records": records,
+            "exact": exact, "estimate": est, "limit": limit, "soft": soft}
+
+
+def _doc_worker_verdict_file(leaf):
+    cp = em._asm_ckpt_file(leaf)
+    return None if cp is None else cp.with_name(cp.name[:-len(".asm.json.gz")] + ".asm.memory")
+
+
+def _doc_worker_verdict(leaf):
+    """The leaf's memory verdict when it still holds, else None. A worker that ran past its OWN memory bound on an exact
+    count leaves one beside the leaf's document (`<key>.asm.memory`, as the writer keeps an oversize verdict; see
+    _doc_worker_verdict_note), and while it holds the leaf's rebuilds run in the kernel instead (_doc_worker_road): the
+    same transcript file, at least as long, under the same sizing (DOC_WORKER_SIZING_V). A transcript replaced or
+    truncated, or a new sizing, is looked at again, and the boot's sweep removes a verdict whose transcript is gone. The
+    file is the verdict: it is statted at every question, so deleting it lets a worker try again at once, and its parse
+    is memoized on that stat. Two stats when a verdict exists, one when none does."""
+    rp = os.path.realpath(str(leaf))
+    f = _doc_worker_verdict_file(rp)
+    try:
+        fst = os.stat(f) if f is not None else None
+    except OSError:
+        fst = None
+    if fst is None:
+        with _DOC_WORKER_LOCK:
+            _DOC_WORKER_VERDICTS.pop(rp, None)
+        return None
+    key = (int(fst.st_ino), int(fst.st_size), int(fst.st_mtime_ns))
+    with _DOC_WORKER_LOCK:
+        memo = _DOC_WORKER_VERDICTS.get(rp)
+    if memo is not None and memo[0] == key:
+        v = memo[1]
+    else:
+        try:
+            v = json.loads(f.read_text(encoding="utf-8"))
+            v = v if isinstance(v, dict) and v.get("path") == rp else None
+        except (OSError, ValueError):
+            v = None
+        with _DOC_WORKER_LOCK:
+            _DOC_WORKER_VERDICTS[rp] = (key, v)
+    if v is None:
+        return None
+    try:
+        st_ = os.stat(rp)
+        if v.get("sv") != DOC_WORKER_SIZING_V or (st_.st_dev, st_.st_ino) != (int(v["dev"]), int(v["ino"])) \
+                or st_.st_size < int(v["size"]):
+            return None
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
+    return v
+
+
+def _doc_worker_verdict_note(leaf, sid, plan, size0, reason, vm_peak):
+    """A worker ran past its own memory bound (its soft bound at the replace, a MemoryError, its memory exit code): keep the
+    verdict (see _doc_worker_verdict) when the job was sized on an EXACT count of every file it read, since only then does
+    the failure say the sizing cannot fit this transcript; the leaf's identity and size as the job began, the sizing it
+    ran under and what was seen. Filed in the error center in plain words, the file's path in the log alone. Never on a
+    kill from outside (the OS's memory killer picks the worker when something else on the machine grows: that is a lost
+    job, _doc_worker_run). Returns the verdict, or None when none was kept."""
+    rp = os.path.realpath(str(leaf))
+    f = _doc_worker_verdict_file(rp)
+    try:
+        st_ = os.stat(rp)
+    except OSError:
+        return None
+    if not plan.get("exact") or f is None:
+        _doc_worker_say("the worker for %s ran past its memory bound (%s); no verdict is kept, since %s" % (
+            leaf, str(reason or "no reason")[:200],
+            "a file it reads could not be counted" if f is None or not plan.get("exact") else "there is nowhere to keep it"))
+        return None
+    v = {"path": rp, "dev": int(st_.st_dev), "ino": int(st_.st_ino),
+         "size": int(min(size0 if size0 is not None else st_.st_size, st_.st_size)), "sv": DOC_WORKER_SIZING_V,
+         "bytes": plan["bytes"], "records": plan["records"], "estimate": plan["estimate"], "limit": plan["limit"],
+         "vmPeak": vm_peak, "reason": str(reason or "")[:300], "t": time.time()}
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = em._writer_tmp(f)
+        tmp.write_text(json.dumps(v), encoding="utf-8")
+        os.replace(tmp, f)
+    except OSError as e:
+        _doc_worker_say("the worker for %s ran past its memory bound; its verdict could not be kept (%s)" % (leaf, e))
+        return None
+    with _DOC_WORKER_LOCK:
+        _DOC_WORKER_STATS["verdicts"] += 1
+    _doc_worker_say("the worker for %s ran past its memory bound (%s; %.0f MB in %d records, admitted at %.0f MB): its "
+                    "rebuilds run in this kernel from now on, until the transcript is replaced; delete %s to let a worker "
+                    "try it again" % (leaf, v["reason"] or "no reason", plan["bytes"] / 1048576.0, plan["records"],
+                                      plan["limit"] / 1048576.0, f),
+                    once=("verdict", rp),
+                    problem="The document worker ran out of memory rebuilding the saved history of session %s. That "
+                            "session's rebuilds now run inside the kernel, as they did before the worker; nothing needs "
+                            "doing. The kernel log says how to let the worker try it again." % _doc_worker_who(sid))
+    return v
+
+
+def _doc_worker_road(leaf, sid, human):
+    """Which road the rebuild of `leaf` takes, asked before its claim with the switch on: (road, cause, plan).
+    ("worker", None, plan): admitted. ("thread", cause, plan or None): the kernel's own road, a fallback the caller counts
+    once the claim is its own, when the worker cannot be used: the latch stands; a memory verdict holds for the leaf
+    (`verdict`: the session is never worse off than with the switch off, so it is rebuilt here as it was then; said in
+    the log once per leaf per kernel life); the checkout holds kernel code this process does not run (`drift`: a worker
+    would run the new event model, whose documents this kernel refuses and deletes, until the restart; _restart_pending,
+    and the same answer when it cannot tell); the machine's free memory cannot be read, which the admission needs; or
+    the job cannot be sized (`noPlan`). (None, None, plan): the machine lacks the room NOW, MemAvailable under the
+    admitted figure (_doc_worker_plan): the leaf stays pending, counted at every refusal and said once while it is held
+    (the log, and the error center in plain words), and is asked about again at the starter's next wake (the gate's next
+    opening, a claim's release): an event, never a timer of its own. Stats, a memo, the count of a file's new bytes;
+    nothing is parsed."""
+    if _DOC_WORKER["latched"]:
+        return "thread", "latched", None
+    rp = os.path.realpath(str(leaf))
+    v = _doc_worker_verdict(leaf)
+    if v is not None:
+        with _DOC_WORKER_LOCK:
+            _DOC_WORKER_STATS["verdictHeld"] += 1
+        _doc_worker_say("%s is rebuilt in this kernel: a worker ran past its memory bound on this transcript (%s); delete "
+                        "%s to let a worker try it again" % (leaf, v.get("reason") or "no reason",
+                                                             _doc_worker_verdict_file(rp)), once=("verdict", rp))
+        return "thread", "verdict", None
+    if _restart_pending() is not False:
+        return "thread", "drift", None
+    avail = _mem_available_bytes()
+    if avail is None:
+        return "thread", "noMemInfo", None
+    try:
+        plan = _doc_worker_plan(leaf, sid, human)
+    except Exception as e:                                 # noqa: BLE001 - the kernel's own road computes its inputs itself
+        _doc_worker_say("the job for %s could not be sized (%s: %s)" % (leaf, type(e).__name__, e))
+        return "thread", "noPlan", None
+    key = ("held", rp)
+    if avail < plan["limit"]:
+        with _DOC_WORKER_LOCK:
+            _DOC_WORKER_STATS["refused"] += 1
+        _doc_worker_say("the rebuild of %s waits for memory: %.0f MB of transcript in %d records is admitted at %.0f MB and "
+                        "%.0f MB is available; it stays pending and is asked about again as the rebuild gate next opens "
+                        "(said once while it waits)" % (leaf, plan["bytes"] / 1048576.0, plan["records"],
+                                                        plan["limit"] / 1048576.0, avail / 1048576.0), once=key,
+                        problem="Rebuilding the saved history of session %s needs about %s of free memory and the "
+                                "machine has %s, so it waits and starts by itself once memory frees up. Nothing needs "
+                                "doing; meanwhile the session opens more slowly." % (
+                                    _doc_worker_who(sid), _doc_worker_size(plan["limit"]), _doc_worker_size(avail)))
+        return None, None, plan
+    with _DOC_WORKER_LOCK:
+        _DOC_WORKER["said"].discard(key)
+    return "worker", None, plan
+
+
+def _doc_worker_fallback(kind, leaf, detail="", problem=None):
+    """One rebuild ran (or will run) in this kernel though the switch is on: counted under docWorker.fallbacks[kind] and
+    said. `latched` and `noMemInfo` are said once (they hold for every later job), `drift` once per checkout identity,
+    `verdict` and `memory` where they were decided (_doc_worker_road, _doc_worker_verdict_note), the rest every time;
+    `problem`, a plain-words row for the error center beside the log line."""
+    with _DOC_WORKER_LOCK:
+        fb = _DOC_WORKER_STATS["fallbacks"]
+        fb[kind] = fb.get(kind, 0) + 1
+    if kind == "noMemInfo":
+        _doc_worker_say("this machine's free memory cannot be read (no MemAvailable in /proc/meminfo), so no job can be "
+                        "admitted to a worker: documents are rebuilt in this kernel (said once; counted at every job)",
+                        once=("noMemInfo",))
+    elif kind == "drift":
+        _doc_worker_say("the checkout holds kernel code this kernel does not run, so a worker would build documents this "
+                        "kernel refuses: documents are rebuilt in this kernel until it restarts (said once per checkout; "
+                        "counted at every job)%s" % ((": " + detail) if detail else ""), once=("drift", _checkout_code_ident()))
+    elif kind == "noCheckpointDir":
+        _doc_worker_say("no checkpoint directory is set, so a worker for %s would have nowhere to write; the rebuild runs "
+                        "in this kernel" % leaf)
+    elif kind not in ("latched", "verdict", "memory"):
+        _doc_worker_say("the worker for %s gave no outcome (%s%s); the rebuild runs in this kernel"
+                        % (leaf, kind, (": " + detail) if detail else ""), problem=problem)
+
+
+def _doc_worker_lost(kind, leaf, detail="", problem=None):
+    """A job the worker lost (`spawn`: it could not be started; `crash`: it left with no done line; `killed`: a SIGKILL it
+    did not bring on itself, the OS's memory killer picking it as something else on the machine grew; `failed`: its done
+    line reports a failure not of memory, or a document that does not stand; `timeout`: the backstop ended it): the
+    fallback is counted and said, and DOC_WORKER_LOST_SPAWNS_MAX of them in a row latch the kernel's own road for the
+    kernel's life, filed in the error center. A done line of any other outcome starts the count again."""
+    _doc_worker_fallback(kind, leaf, detail, problem=problem)
+    with _DOC_WORKER_LOCK:
+        _DOC_WORKER["lost"] += 1
+        latch = _DOC_WORKER["lost"] >= DOC_WORKER_LOST_SPAWNS_MAX and not _DOC_WORKER["latched"]
+        if latch:
+            _DOC_WORKER["latched"] = True
+    if latch:
+        _doc_worker_say("%d jobs in a row were lost (the last: %s); every later rebuild runs in this kernel until it restarts "
+                        "(counted under docWorker.fallbacks.latched)" % (DOC_WORKER_LOST_SPAWNS_MAX, kind),
+                        problem="The document worker failed %d rebuilds in a row, so the kernel does every document rebuild "
+                                "itself until it restarts. Nothing needs doing; the kernel log lists each failure."
+                                % DOC_WORKER_LOST_SPAWNS_MAX)
+
+
+def _doc_worker_argv():
+    """The worker's command: ROMP_DOC_WORKER_CMD (a test's stand-in speaking the same two lines) or this checkout's
+    bin/romp-doc-worker under this interpreter."""
+    forced = os.environ.get("ROMP_DOC_WORKER_CMD")
+    if forced:
+        return shlex.split(forced)
+    return [sys.executable, str(ROOT / "bin" / "romp-doc-worker")]
+
+
+def _doc_worker_signal(match, flag, sig=signal.SIGTERM):
+    """Signal the running worker (SIGTERM unless `sig` says) when `match(job)` holds, marking why (`flag`): by pid, under the
+    lock, while the job's thread has not begun to reap it. Returns whether a signal was sent."""
+    with _DOC_WORKER_LOCK:
+        j = _DOC_WORKER["job"]
+        if j is None or not match(j):
+            return False
+        j[flag] = True
+        try:
+            os.kill(j["pid"], sig)
+        except OSError:
+            return False
+    return True
+
+
+def _doc_worker_released(rp, rompuuid):
+    """A leaf's use ended (em.release_assembly's hook: a /clear or a resume fork retired it, its lane died): a worker
+    building that leaf's document is ended, since nothing will restore from it. Never blocks: a dict read and a signal."""
+    return _doc_worker_signal(lambda j: j["key"][0] == rp and (rompuuid is None or j["key"][1] == rompuuid), "cancelled")
+
+
+em.set_assembly_release_hook(_doc_worker_released)
+
+
+def _doc_worker_stop():
+    """The exit's stand-down reaches the worker: it is ended now (the death signal it asked for would end it only when the
+    process is gone), and its end is not read as a crash."""
+    return _doc_worker_signal(lambda j: True, "stopped")
+
+
+def _doc_worker_done(raw):
+    """The worker's done line out of everything it wrote to its stdout (the last line), or None: no line, not JSON, not a
+    done, or an outcome a rebuild cannot have."""
+    try:
+        lines = [ln for ln in (raw or b"").decode("utf-8", "replace").splitlines() if ln.strip()]
+        d = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return None
+    if not (isinstance(d, dict) and d.get("op") == "done" and d.get("outcome") in _DOC_WORKER_OUTCOMES):
+        return None
+    return d
+
+
+def _doc_worker_wait(proc, line, rec, bound):
+    """Hand the worker its job line and read its stdout to the end, which comes with the done line or with its death: the
+    output, or None when the backstop (`bound` seconds) ran out first. Then the worker is sent SIGTERM by pid, marked
+    `timedOut`, and SIGKILL after DOC_WORKER_KILL_GRACE_S more if it is still there; it is reaped by the caller."""
+    try:
+        return proc.communicate(line, timeout=bound)[0]
+    except subprocess.TimeoutExpired:
+        pass
+    _doc_worker_signal(lambda j: j is rec, "timedOut")
+    try:
+        proc.communicate(timeout=DOC_WORKER_KILL_GRACE_S)
+    except subprocess.TimeoutExpired:
+        _doc_worker_signal(lambda j: j is rec, "timedOut", signal.SIGKILL)
+        proc.communicate()
+    return None
+
+
+def _doc_worker_run(leaf, sid, human, why, plan=None):
+    """One claimed rebuild on the worker road, on the rebuild's own thread ("asm-rebuild"), which only waits here: the job
+    _doc_worker_plan sized before the claim (or sizes now), a bin/romp-doc-worker process started with no preexec_fn (so the
+    interpreter starts it without a fork of this process's address space), the job on its stdin, and a read of its stdout
+    to the end, which comes with the done line or with the worker's death. Then the handback (em.asm_document_handback,
+    external): the claim released, the outcome counted and said as any rebuild's, the starter woken. The restore stays
+    lazy: the leaf's next parse finds the document.
+
+    Returns whether a document was written, or None when the caller must run the job on this thread: the worker lost it
+    (a start that failed, no done line, a SIGKILL from outside it, a done line that reports a failure not of memory or a
+    document that does not stand, the backstop: counted, said, and latched after DOC_WORKER_LOST_SPAWNS_MAX in a row); it
+    refused to run code this kernel does not (`drift`, not a loss); or it ran past its OWN memory bound (its done line
+    says so, or it left with DOC_WORKER_EXIT_MEMORY: not a loss, and the leaf keeps a memory verdict when the job was
+    sized on an exact count, _doc_worker_verdict_note), since the session must never be worse off than with the switch
+    off, where the kernel rebuilds it. No fallback, and the claim released here, when the worker was ended on purpose
+    (the leaf's use ended: `released`; the kernel is leaving: `stopped`). A transcript that grew while the worker ran
+    needs nothing here: the document describes a prefix of it, which is what every document of a live session is by the
+    time it is read."""
+    ckpt = em._ckpt_dir()
+    if ckpt is None:                                       # checkpoints went off since the leaf was noted: nowhere to write
+        _doc_worker_fallback("noCheckpointDir", leaf)
+        return None
+    if plan is None:
+        plan = _doc_worker_plan(leaf, sid, human)
+    files, human = plan["files"], plan["human"]
+    job = {"op": "build", "leaf": files[0], "rompuuid": sid, "sdkHuman": bool(human), "cands": files,
+           "states": plan["states"], "postalLog": plan["postal"], "now": int(time.time()), "rebuild": why,
+           "ckptDir": str(ckpt), "softBytes": plan["soft"], "limitBytes": plan["limit"], "parent": os.getpid(),
+           "codeIdent": _code_ident()}
+    ticket = em.asm_document_job(files[0], sid, human)
+    t0 = time.monotonic()
+    try:
+        proc = subprocess.Popen(_doc_worker_argv(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
+                                cwd=str(ROOT), env=dict(os.environ))
+    except Exception as e:                                 # noqa: BLE001 - no interpreter, no script, no process slot
+        _doc_worker_lost("spawn", leaf, repr(e))
+        return None
+    rec = {"key": ticket["key"], "pid": proc.pid, "t0": t0, "bytes": plan["bytes"], "cancelled": False, "stopped": False,
+           "timedOut": False}
+    with _DOC_WORKER_LOCK:
+        _DOC_WORKER["job"] = rec
+        _DOC_WORKER_STATS["spawned"] += 1
+    raw, unread = b"", True
+    try:
+        raw = _doc_worker_wait(proc, (json.dumps(job) + "\n").encode("utf-8"), rec, _doc_worker_time_bound(plan["bytes"]))
+        unread = False
+    finally:
+        with _DOC_WORKER_LOCK:
+            _DOC_WORKER["job"] = None                      # no signal goes to this pid from here: it is about to be reaped
+        if unread:
+            proc.kill()                                    # the wait itself raised: the worker is not left running unread
+        rc = proc.wait()
+        for pipe in (proc.stdin, proc.stdout):
+            try:
+                pipe.close()
+            except (OSError, ValueError):
+                pass
+    done = _doc_worker_done(raw)
+    if done is not None and done.get("wrote") and not em.asm_document_stands(files[0]):
+        done = dict(done, outcome="failed", wrote=False, docCut=None, newPre=None, memory=False,
+                    reason="the worker reported a document that does not stand")
+    with _DOC_WORKER_LOCK:
+        st = _DOC_WORKER_STATS
+        st["seconds"] += time.monotonic() - t0
+        if done is not None:
+            st["done"][done["outcome"]] = st["done"].get(done["outcome"], 0) + 1
+            st["peak"] = {"bytes": plan["bytes"], "records": plan["records"], "estimate": plan["estimate"],
+                          "vmPeak": done.get("vmPeak"), "vmHWM": done.get("vmHWM"), "softBytes": plan["soft"],
+                          "limitBytes": plan["limit"]}
+            if done["outcome"] != "failed" or done.get("memory"):
+                _DOC_WORKER["lost"] = 0
+    if done is not None and done["outcome"] == "failed" and not done.get("memory"):
+        _doc_worker_lost("failed", leaf, str(done.get("reason") or "no reason")[:200])
+        return None
+    own_bound = bool(done.get("memory")) if done is not None else rc == DOC_WORKER_EXIT_MEMORY
+    if own_bound and not (rec["cancelled"] or rec["stopped"] or _EXIT_STAND_DOWN.is_set()):
+        # Its OWN bound tripped (the soft bound at the replace, a MemoryError, its memory exit): the verdict is kept when the
+        # count was exact, and the job runs in this kernel now, as it would with the switch off. Not a loss: the worker
+        # did what it was built to do.
+        reason = (done or {}).get("reason") or "the worker's memory exit (%d)" % DOC_WORKER_EXIT_MEMORY
+        with _DOC_WORKER_LOCK:
+            _DOC_WORKER_STATS["memory"] += 1
+        _doc_worker_verdict_note(files[0], sid, plan, (ticket["st0"] or (None,))[0], reason, (done or {}).get("vmPeak"))
+        _doc_worker_fallback("memory", leaf, reason)
+        return None
+    if done is not None:
+        res, cause = done, None
+    elif rec["cancelled"]:
+        res, cause = {"outcome": "released"}, "cancelled"
+    elif rec["stopped"] or _EXIT_STAND_DOWN.is_set():
+        res, cause = {"outcome": "stopped"}, "stopped"
+    elif rec["timedOut"]:
+        bound = _doc_worker_time_bound(plan["bytes"])
+        _doc_worker_lost("timeout", leaf, "none within its bound of %.0f s, so it was ended" % bound,
+                         problem="The document worker stopped answering while it rebuilt the saved history of session %s "
+                                 "and was ended after %.0f minutes; the kernel rebuilds it instead. Nothing needs doing "
+                                 "unless this repeats." % (_doc_worker_who(sid), bound / 60.0))
+        return None
+    elif rc == DOC_WORKER_EXIT_DRIFT:
+        _doc_worker_fallback("drift", leaf, "the worker found other kernel code on disk than this kernel runs")
+        return None
+    elif rc == -int(signal.SIGKILL):                       # not its own bound (that is a MemoryError, never a kill): the OS's
+        _doc_worker_lost("killed", leaf, "SIGKILL from outside it, most likely the OS's memory killer")   # memory killer
+        return None                                        #  as something else grew, or a person: a loss, no verdict
+    else:
+        _doc_worker_lost("crash", leaf, "exit %s" % rc)
+        return None
+    if cause is not None:
+        with _DOC_WORKER_LOCK:
+            _DOC_WORKER_STATS[cause] += 1
+        _doc_worker_say("the worker for %s %s; the rebuild does not run in this kernel instead" % (leaf, {
+            "cancelled": "was ended: the leaf's use ended while it ran",
+            "stopped": "was ended: the kernel is leaving"}[cause]))
+    em.asm_document_handback(ticket, why, res, external=True)
+    return bool(res.get("wrote"))
+
+
+def _doc_worker_stats():
+    """The /perf docWorker block: counts and seconds, no paths. `switch` as the file reads now; `latched` once the kernel's own
+    road took over for good; `spawned` workers started; `done` their done lines by outcome; `fallbacks` the jobs that ran in
+    this kernel with the switch on, by cause (spawn, crash, killed, failed, timeout, memory, verdict, drift, latched,
+    noMemInfo, noCheckpointDir, noPlan); `refused` the admission's refusals (a leaf held for memory is refused at every
+    start attempt) and `heldForMemory` how many leaves the last attempt left pending; `cancelled` (the leaf's use ended)
+    and `stopped` (the kernel was leaving) the jobs that ended without a document and without a fallback; `memory` the
+    workers that ran past their own memory bound (each also a `memory` fallback); `verdicts` the memory verdicts filed
+    and `verdictHeld` the rebuilds a standing one sent to this kernel; `seconds` the workers' wall time; `peak` the last
+    finished job's transcript bytes and records, estimate, peak address space and resident peak beside its bounds;
+    `running` the job in flight. The clock is read for a job in flight alone: a snapshot with none
+    reads no clock (the perf collector's own tests count the pusher's reads around one)."""
+    sw = _doc_worker_switch()
+    with _DOC_WORKER_LOCK:
+        st, j = _DOC_WORKER_STATS, _DOC_WORKER["job"]
+        now = time.monotonic() if j is not None else 0.0
+        return {"switch": sw, "latched": bool(_DOC_WORKER["latched"]), "lostInARow": int(_DOC_WORKER["lost"]),
+                "spawned": st["spawned"], "done": dict(st["done"]), "fallbacks": dict(st["fallbacks"]),
+                "refused": st["refused"], "heldForMemory": int(_DOC_WORKER["held"]), "cancelled": st["cancelled"],
+                "stopped": st["stopped"], "memory": st["memory"], "verdicts": st["verdicts"],
+                "verdictHeld": st["verdictHeld"], "seconds": round(st["seconds"], 1),
+                "peak": dict(st["peak"]) if st["peak"] else None,
+                "running": None if j is None else {"pid": j["pid"], "seconds": round(now - j["t0"], 1), "bytes": j["bytes"]}}
+
+
 ASM_REBUILD = os.environ.get("ROMP_ASM_REBUILD", "1") != "0"   # the document rebuild (2026-10-23); 0 turns it off
 
 
@@ -14945,6 +15503,7 @@ def _asm_rebuild_maybe():
     if not ASM_REBUILD or _EXIT_STAND_DOWN.is_set() or em.asm_refresh_running() or not em.asm_background_open():
         return False
     converge_on = ASM_CONVERGE and CKPT_CONVERGE_MS > 0 and em.checkpoint_drop_writes_on()
+    worker_on, held = None, 0
     for leaf, sid, why, size in em.asm_rebuild_pending():
         if _subagent_leaf_agent(leaf) is not None:
             em.asm_rebuild_drop(leaf, sid, "subagent")
@@ -14953,15 +15512,27 @@ def _asm_rebuild_maybe():
         if (converge_on and _converge_assembly_est(size) <= CKPT_CONVERGE_BYTES
                 and em.asm_entry_whole(leaf, sid, human) and em.entry_whole_resident(leaf)):
             continue                                       # the converge pass (or the settle) writes it from the read in hand
+        if worker_on is None:
+            worker_on = _doc_worker_on()                   # the switch, read once a leaf is due (STATE/doc-worker, 2026-11-12)
+        road, fell, plan = _doc_worker_road(leaf, sid, human) if worker_on else ("thread", None, None)
+        if road is None:
+            held += 1                                      # the machine lacks the memory for this one's worker now: it stays
+            continue                                       #  pending, and a smaller one behind it may still go
         why = em.asm_rebuild_claim(leaf, sid, human)
         if why is None:
             return False                                   # another whole parse took the claim meanwhile: the next cycle
+        _DOC_WORKER["held"] = held
+        if fell is not None:
+            _doc_worker_fallback(fell, leaf)               # the switch is on and this job runs here all the same: counted
 
-        def _run(leaf=leaf, sid=sid, human=human, why=why):
+        def _run(leaf=leaf, sid=sid, human=human, why=why, road=road, plan=plan):
             _set_stage("asm.rebuild")                      # its reads count under their own stage on /perf
             _lower_thread_priority()
             try:
-                wrote = jd.asm_refresh(sid, leaf, int(time.time()), sdk_human=human, rebuild=why)
+                wrote = _doc_worker_run(leaf, sid, human, why, plan) if road == "worker" else None
+                if wrote is None:                          # the kernel's own road: the switch is off, or the worker gave no
+                    #                                        outcome (counted and said there); the claim is still this thread's
+                    wrote = jd.asm_refresh(sid, leaf, int(time.time()), sdk_human=human, rebuild=why)
             except Exception as e:                         # asm_refresh_document releases the claim itself; a raise before it ran
                 em.asm_rebuild_abandon(leaf, sid, human, why, repr(e))
                 sys.stderr.write("assembly document rebuild: %s\n" % traceback.format_exc())
@@ -14977,6 +15548,7 @@ def _asm_rebuild_maybe():
             em.asm_rebuild_abandon(leaf, sid, human, why, repr(e))
             raise
         return True
+    _DOC_WORKER["held"] = held
     return False
 
 
@@ -92483,6 +93055,10 @@ def _exit_quiesce():
     _LOOPS_STOP.set()
     try:
         em.asm_rebuild_wait_release()        # the rebuild starter waits on the gate's condition: it wakes, sees the stop, and ends
+    except Exception:
+        pass
+    try:
+        _doc_worker_stop()                   # a document worker in flight is ended: no rebuild outlives the kernel that reads it
     except Exception:
         pass
 

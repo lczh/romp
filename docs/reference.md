@@ -2453,7 +2453,9 @@ changes (a decline of the moment, such as the reader's offsets evicted under
 the parse, gets one more try, and so does a rebuild that raised; a second
 raise is logged loudly, with its traceback). Each rebuilt leaf is logged
 once, and a drain that rebuilt or declined anything ends with a summary line
-(`rebuilt N documents`). `ROMP_ASM_REBUILD=0` turns it off. Before it, a
+(`rebuilt N documents`). `ROMP_ASM_REBUILD=0` turns it off. With the
+`doc-worker` switch on, the rebuild's parse and write run in a process of
+their own (The document worker, below). Before it, a
 document came back only from a whole entry the settle or the converge pass
 still held, so after PR #313 moved the document version to 9, ten to sixteen
 sessions parsed whole at every boot for three days.
@@ -7012,6 +7014,72 @@ Where to read it: `/version` carries `taskTracking` at the top level and in `set
 `settingsGt` as `task-tracking`; `/perf` carries `judge.tierStarts`, the count of judge tier threads started, flat while
 off. `kernel/judge.py` `MODEL_CALLERS` is the census of every judge that makes a model call, each declaring its relation
 to the switch; an ast test holds it to the module's call sites, and the entry point refuses an undeclared name.
+
+## The document worker (stage two, step one)
+
+`~/.local/state/romp/doc-worker` reading `on` runs each document rebuild (a leaf a parse found with no current
+document) in a `romp-doc-worker` process of its own instead of on a thread of the kernel (plans/process-split.md,
+stage two; its first step, 2026-11-12). Absent, or anything but `on`, the rebuild runs in the kernel as before and no
+process starts; a file that cannot be read or decoded reads as off and says so once (a sync notice and a log line).
+Read when a rebuild is about to start. The switch covers the rebuild alone: a settle's refresh, the settle's and the
+converge pass's writes and every restore stay in the kernel, and so do the rebuild's order, its starter and the claim
+it shares with the refresh.
+
+The worker is a fresh interpreter, started per job and never a fork of the kernel. It reads one job line on its stdin
+(the arguments the kernel's own road would have used, the checkpoint directory, its memory bounds and the kernel's
+pid), parses the transcript whole, writes the document and its sidecar through the same function the kernel's own road
+runs, prints one `done` line and leaves. It writes no fold checkpoint (the kernel stays their only writer) and hands
+back nothing but the document on disk and that line: the kernel then does the bookkeeping its own writer would have
+done (the oversize verdict read from disk again, the cut of the last write, a refusal older than the job retired, the
+outcome counted, the claim released, the starter woken), and the leaf's next parse restores from the document. A
+transcript that grew while the worker ran is accepted: the restore reads the tail past the document's cut, as after
+any writer. While a worker runs, the kernel's rebuild thread only waits for the line, so the background gate's chunk
+points do not apply, and the claim is not lent out meanwhile: one whole parse of this kind at a time.
+
+Bounds and counters, all on `/perf` under `docWorker`:
+
+- `spawned`, `done` (the done lines by outcome: `written`, `declined`, `moot`, `failed`), `seconds` (the workers' wall
+  time), `peak` (the last finished job's transcript bytes and records, its estimate, peak address space and resident
+  peak beside its bounds) and `running` (the job in flight: its pid, age and bytes).
+- `refused`, `heldForMemory`: a job's memory is estimated as 64 MiB, plus the bytes of every file its parse reads, plus
+  8 KiB per record of them (a parse holds memory per record as well as per byte: a review measured about 9.5 times
+  the transcript at 756-byte records and 3.3 times at 3.8 KB). Records are counted exactly, by reading each file once
+  per state: a file that only grew has its new bytes counted from where the last count stopped. A job starts only when
+  the machine's `MemAvailable` is at least 1.5 times the estimate. Otherwise the leaf stays pending, counted at every
+  look and said once per leaf in the log and the error center, and a smaller leaf behind it may still go; it is asked
+  again whenever the starter next looks. Where `MemAvailable` cannot be read (anything but Linux) the job runs in the
+  kernel, counted `fallbacks.noMemInfo`.
+- `memory`, `verdicts`, `verdictHeld`: the admitted figure is also the worker's address-space limit (`RLIMIT_AS`), so
+  a worker never takes more than the machine had free when it started. The parser reads any error on a record as a
+  malformed line, so an allocation that failed at that limit could leave a document that misses history and still
+  looks whole; a worker whose address space peaked past a soft bound (256 MiB under the limit, or a third of it for a
+  small job) therefore publishes nothing and reports `failed`. That and the worker's memory exit code mean its own
+  bound tripped: counted under `memory`, said in the log and the error center, and the job runs in the kernel at once,
+  as it would with the switch off (`fallbacks.memory`). When every file the job read was counted, the leaf also keeps
+  a memory verdict beside its document (`<key>.asm.memory` under the checkpoint directory, as an oversize verdict is
+  kept): while it holds, the leaf's rebuilds run in the kernel without a worker (`fallbacks.verdict`). It holds until
+  the transcript is replaced or the sizing changes and leaves with the transcript; it is read at every rebuild, so
+  deleting the file lets a worker try again at once. With the switch off it is never read. A kill from outside the
+  worker (the OS's memory killer picks it first when something else on the machine grows) keeps no verdict: it is a
+  lost job, below.
+- `fallbacks.spawn`, `fallbacks.crash`, `fallbacks.killed`, `fallbacks.failed`, `fallbacks.timeout`, `lostInARow`,
+  `latched`: a job the worker lost runs in the kernel, counted and said. Lost means it could not be started, left with
+  no done line, was killed from outside, answered `failed` for a reason other than memory, reported a document that is not on disk, or gave no outcome
+  within its bound: ten minutes plus a second per 256 KiB of transcript (a tenth of the slowest rate measured), after
+  which it is sent SIGTERM, and SIGKILL 30 seconds later. Three in a row latch the kernel's own road for the kernel's
+  life (said in the error center; each later job counts `fallbacks.latched`); any other done line starts the count
+  again.
+- `fallbacks.drift`: when the checkout holds kernel code this kernel does not run (a pull before the restart), or the
+  two cannot be compared, the job runs in the kernel, said once per checkout and not counted as a loss: a worker would
+  run the newer event model, whose documents this kernel refuses and deletes. The job names the kernel's code
+  identity, and a worker that finds other code on disk refuses it the same way.
+- `cancelled`, `stopped`: a leaf whose use ends mid-job (`/clear`, a dead lane) has its worker ended by pid, and the
+  kernel's exit ends the running one; neither is a fallback. The worker also asks the OS to end it when the thread
+  that started it ends (a parent-death signal, requested by the worker itself as its first act, so the kernel spawns
+  it without forking), and refuses a job whose kernel is already gone.
+
+`tools/doc_worker_latency.py` measures what a small chat build waits beside a rebuild on each road, over synthetic
+transcripts, outside CI.
 
 ## The judges' process (stage three)
 
