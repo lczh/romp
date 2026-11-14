@@ -1214,18 +1214,21 @@ class AssemblyEstimate(Base):
         takes them out of the gauge (release_assembly), as it takes the entry. Red before the gauge: no `assemblyEstimate` key."""
         leaf = self.leaf("estimate", _recs(40))
         sid = SID % 40
-        with em._ASM_LOCK:
-            base = len(em._ASM_CACHE)
+        # The gauge sums EVERY assembly entry the process holds, and a shared test process (CI's shards run half the tree
+        # in one interpreter) carries other modules' entries: every reading here is a delta against what stood before
+        # the parse, never an absolute (the 2026-11-14 CI shard read 174 records where this leaf has 40).
+        before = _heap()["assemblyEstimate"]
         em.parse_session(str(leaf), rompuuid=sid, name="web")
         h = _heap()["assemblyEstimate"]
-        self.assertEqual(h["entries"], base + 1)
-        self.assertEqual(h["records"], 40, "every record of the leaf is in the adapter's uuid map")
-        self.assertEqual(h["bytes"], 40 * em.ASM_ENTRY_RECORD_BYTES)
+        self.assertEqual(h["entries"], before["entries"] + 1)
+        self.assertEqual(h["records"] - before["records"], 40, "every record of the leaf is in the adapter's uuid map")
+        self.assertEqual(h["bytes"] - before["bytes"], 40 * em.ASM_ENTRY_RECORD_BYTES)
         self.assertEqual(h["recordBytes"], em.ASM_ENTRY_RECORD_BYTES)
-        self.assertGreater(h["atoms"], 0, "the entry's emitted atoms")
+        self.assertGreater(h["atoms"], before["atoms"], "the entry's emitted atoms")
         self.assertEqual(em.release_assembly(str(leaf), rompuuid=sid), 1)
         h2 = _heap()["assemblyEstimate"]
-        self.assertEqual((h2["entries"], h2["records"]), (base, 0))
+        self.assertEqual((h2["entries"], h2["records"], h2["atoms"]),
+                         (before["entries"], before["records"], before["atoms"]), "the release takes the entry out of the gauge")
 
 
 class Counters(unittest.TestCase):
