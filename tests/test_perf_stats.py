@@ -630,6 +630,7 @@ class MallocBooks(unittest.TestCase):
 
         km._PROCESS_SAID.discard("malloc")
         self.addCleanup(km._PROCESS_SAID.discard, "malloc")
+        self._clear_handle()                                  # the kept handle would answer without consulting the patched CDLL
         err = io.StringIO()
         with mock.patch.object(ctypes, "CDLL", return_value=_NoMallinfo2()), mock.patch.object(sys, "platform", "linux"), \
                 redirect_stderr(err):
@@ -638,10 +639,46 @@ class MallocBooks(unittest.TestCase):
         self.assertIn("malloc", first)
         self.assertIsNone(first["malloc"], "no mallinfo2: None, never a crash or a missing key")
         self.assertIsNone(second["malloc"])
+        self.assertEqual(km._MALLINFO2_FN, [], "a failed resolve keeps nothing: the next read on a libc that has it resolves afresh")
         lines = [ln for ln in err.getvalue().splitlines() if "perf: process.malloc unavailable" in ln]
         self.assertEqual(len(lines), 1, "said once across two snapshots: %r" % err.getvalue())
         for k in ("rss_kb", "threads", "cpu_s", "pid"):
             self.assertIn(k, first, "the rest of the block is unharmed")
+
+    def _clear_handle(self):
+        """Empty the module's kept mallinfo2 handle for this test and put it back after, so a test that patches ctypes.CDLL
+        is the one that resolves it."""
+        saved = list(km._MALLINFO2_FN)
+        km._MALLINFO2_FN.clear()
+        self.addCleanup(lambda: (km._MALLINFO2_FN.clear(), km._MALLINFO2_FN.extend(saved)))
+
+    def test_the_libc_handle_is_resolved_once_not_per_read(self):
+        """Review 2026-11-14 (low): `ctypes.CDLL("libc.so.6")` per read defines a new _FuncPtr class per instance, so ten
+        reads left ninety unreachable cyclic objects (none with a kept handle), the very class-per-read garbage the struct
+        class stopped making in 7f7591ca3, half done; and the GIL is released for the arena walk, so a fold-in on the pusher
+        thread can freeze that garbage live until a backstop. The handle, its configured function and the struct class are
+        resolved on the first read and kept in one module slot: two reads load libc once."""
+        import ctypes
+        if not sys.platform.startswith("linux"):
+            self.skipTest("glibc only")
+        self._clear_handle()
+        real, made = ctypes.CDLL, []
+        def counting(*a, **k):
+            made.append(a)
+            return real(*a, **k)
+        with mock.patch.object(ctypes, "CDLL", counting):
+            try:
+                first = km._malloc_stats(1000)
+            except AttributeError:
+                self.skipTest("this libc has no mallinfo2")
+            second = km._malloc_stats(1000)
+        self.assertEqual(len(made), 1, "one libc load across two reads: %r" % made)
+        self.assertEqual(len(km._MALLINFO2_FN), 1, "the configured function sits in the module slot")
+        fn = km._MALLINFO2_FN[0]
+        self.assertTrue(issubclass(fn.restype, ctypes.Structure), "with its struct class set once as the return type")
+        self.assertEqual(set(first), set(second), "and both reads answer the same books")
+        with mock.patch.object(ctypes, "CDLL", side_effect=AssertionError("a third read loaded libc again")):
+            km._malloc_stats(1000)
 
     def test_off_linux_the_key_is_none_without_a_libc_load(self):
         import ctypes

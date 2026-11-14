@@ -182,7 +182,9 @@ def _set_perf_log(on):
 
 
 _PROCESS_SAID = set()   # the process block's gauges whose read failed and said so once (the heap block's _HEAP_SAID, for this block)
-_MALLINFO2_STRUCT = []  # the ctypes struct class mallinfo2 returns, built on the first read (_malloc_stats) and kept
+_MALLINFO2_FN = []      # glibc's mallinfo2 through ctypes, resolved on the first read (_malloc_stats) with its struct class set as the
+#                         return type, and kept: a CDLL per read defines a _FuncPtr class per instance, and the struct class per read did
+#                         the same, cyclic garbage per poll that a fold-in on the pusher thread can freeze live (review 2026-11-14)
 
 
 def _malloc_stats(rss_kb):
@@ -201,15 +203,17 @@ def _malloc_stats(rss_kb):
     Linux, musl, an older glibc); the caller reads it through _heap_read, which answers None and says so once."""
     if not sys.platform.startswith("linux"):
         raise OSError("glibc mallinfo2 is read on Linux only")
-    import ctypes
-    if not _MALLINFO2_STRUCT:                     # the struct class once per process: a class per read is cyclic garbage per poll
+    if not _MALLINFO2_FN:                         # the handle, the function and its struct class once per process, never per read
+        import ctypes
+
         class MallInfo2(ctypes.Structure):
             _fields_ = [(name, ctypes.c_size_t) for name in ("arena", "ordblks", "smblks", "hblks", "hblkhd", "usmblks",
                                                               "fsmblks", "uordblks", "fordblks", "keepcost")]
-        _MALLINFO2_STRUCT.append(MallInfo2)
-    fn = ctypes.CDLL("libc.so.6").mallinfo2       # AttributeError on a libc without the symbol: said once by the caller
-    fn.restype = _MALLINFO2_STRUCT[0]
-    fn.argtypes = ()
+        fn = ctypes.CDLL("libc.so.6").mallinfo2   # AttributeError on a libc without the symbol: said once by the caller, nothing kept
+        fn.restype = MallInfo2
+        fn.argtypes = ()
+        _MALLINFO2_FN.append(fn)
+    fn = _MALLINFO2_FN[0]
     t0 = time.perf_counter()
     mi = fn()
     read_ms = (time.perf_counter() - t0) * 1000.0
