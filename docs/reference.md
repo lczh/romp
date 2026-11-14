@@ -1525,7 +1525,7 @@ that hangs is
 killed with everything under it, TERM then KILL, so a version manager's shim that
 runs `node` without replacing itself leaks nothing.
 
-The installed unit also sets `MALLOC_ARENA_MAX=2` for the manager and every kernel it spawns (2026-09-11): the kernel is a many-threaded Python process that rebuilds large record lists, and the allocator's per-thread arenas kept hundreds of megabytes of freed memory between restarts; two arenas return it. A line in `service.env` overrides it.
+The installed unit also sets `MALLOC_ARENA_MAX=2` for the manager and every kernel it spawns (2026-09-11): the kernel is a many-threaded Python process that rebuilds large record lists, and the allocator's per-thread arenas kept hundreds of megabytes of freed memory between restarts; two arenas return it. A line in `service.env` overrides it. The kernel's memory-scaled bounds (the record cache budget, the hydrated-body cap, the atom slots, the memo bounds) read the unit's `MemoryHigh=` or `MemoryMax=` when one is set (`systemctl --user set-property romp-manager.service MemoryHigh=24G`, or a drop-in), taking the smaller of it and the machine's memory, and `recordCache.cgroupLimitBytes` on `GET /perf` shows what was read. The kernel reads the limit once, at its start, so a `set-property` on the running unit takes effect at the kernel's next restart (`romp refresh`), and `cgroupLimitBytes` reads the old value until then. With `MemorySwapMax=0` a cgroup high throttles the process rather than freeing anything, so the setting is a sizing hint for romp and not a mitigation on its own.
 
 Romp holds no API key (the user 2026-09-08, who wants romp to hold no key). A
 session's credential is Claude Code's own resolution: the `apiKeyHelper` in its
@@ -3084,7 +3084,26 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   seconds since the process started, and whether the `romp-perf` log is on.
 - `process`: `rss_kb` (resident set size in KB: the current size on Linux,
   read from `/proc`; the peak, `ru_maxrss`, on macOS, which has no `/proc`),
-  `threads`, `cpu_s`, `pid`.
+  `threads`, `cpu_s`, `pid`, and `malloc`, glibc's own books for the process
+  (2026-11-14; `mallinfo2`, glibc 2.33 and later): `arena` (the main heap and
+  every further arena, in use and free), `mmapped` (chunks served by `mmap`
+  outright, where a record list or a decoded document over the mmap threshold
+  lands), `inUse` (what the process holds through malloc, both kinds), `free`
+  (chunks glibc keeps for reuse: the slack `MALLOC_ARENA_MAX=2` bounds),
+  `keepcost` (what `malloc_trim` would return from the main arena's top),
+  `other` (the resident size less `arena` and `mmapped`: the interpreter's
+  small-object arenas, code, stacks and libraries; a difference of a resident
+  figure and two virtual ones, so it reads under 0 while glibc counts pages the
+  process has not touched, an sbrk'd top or a fresh mmapped chunk, and nothing
+  clamps it) and `readMs`, the read's own
+  cost. `rss_kb` less `inUse` less `other` is glibc's retained slack, exactly,
+  on every plain read, so a resident size past everything `heap` weighs can be
+  split between the allocator and a holder no gauge weighs. The read walks
+  every arena's free bins under their locks (about 18 ms at 200k free chunks),
+  so it is taken on the plain GET alone, never by the pusher or the restart
+  ledger's samplers; a runtime without `mallinfo2` (macOS, musl, an older
+  glibc) reads `null`, said once on stderr. `romp perf` prints `rss_kb`,
+  `inUse`, `free` and `other` on its memory line.
 - `heap`: where that resident size sits at the moment of the read, so a
   large `process.rss_kb` can be attributed live, without a restart or a
   debugger (the lag investigation, 2026-09-15, had to attribute a 5-6 GiB
@@ -3174,11 +3193,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `recordCache.released` counts the pop as it counts every pop. A tail
   left behind by an upgrade counts here while `recordCache.bytes` rises to
   the whole file. It weighs records alone: the assembly entries' own atoms
-  and lookup maps are still only the count `assemblyEntries` (a whole
-  entry measured about 0.9 to 1.1 KB per record of its leaf on two
-  synthetic leaves, 0.3 to 4 bytes per file byte as the records run long
-  or short), so a `pinnedByAssembly` of 0 does not mean the entries are
-  free.
+  and lookup maps are `assemblyEstimate`'s (below), so a `pinnedByAssembly`
+  of 0 does not mean the entries are free. `assemblyEstimate` is the
+  entries' own weight: `entries`, `records` (each entry's adapter's uuid
+  map, summed: the whole leaf for a whole parse, the tail past the cut for
+  a restored one), `atoms` (the entries' emitted atoms) and `bytes`, records
+  times `recordBytes` (1,100: a whole entry measured 1,053 to 1,180 bytes
+  per record of its leaf on three synthetic leaves, short rows and 2 KB
+  tool results alike, 0.9 to 2.5 bytes per file byte as the records run
+  long or short); a restored entry's pre-cut seed and the parse store's
+  served copies (about 0.6 KB an atom) are not in it and stay the counts
+  `assemblyEntries` and `parseSlots`.
   `builtAtoms` is the materialized atoms: `slots` (the LRU's length),
   `live` (the atoms the live lazy indexes count as built in the LRU),
   `overSlots` (how far `live` runs past `slots`, 0 unless a count drifted)
@@ -3259,22 +3284,63 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   registered is bounded by the next thousand loads, not the process lifetime.
   The backstop walks the frozen heap, so an idle cycle runs it; a busy cycle
   runs it only once the fold-ins reach twice `backstopFoldins`, so a pusher that
-  never idles still bounds it. A busy cycle judges the ended sessions only
+  never idles still bounds it. The backstop is also owed by the heap's GROWTH
+  (2026-11-14): a fold-in freezes every live object, the soon-to-die cycles of
+  every other thread's work in flight included, and a cycle frozen live that dies
+  later is out of every collection's reach until the next frozen-heap walk; a
+  loaded kernel made about 40 fold-ins an hour, so the count alone was more than
+  a day. Each run reads the heap after its freeze (`sys.getallocatedblocks()`,
+  the small-object allocator's live blocks, about a millisecond per nine million;
+  `heapBlocks`), and once it has grown past `backstopGrowth` (a quarter, CPython's
+  own full-collection trigger applied to the generation the freeze hides from it)
+  of the reading at the last walk (`heapBlocksAtWalk`: the initial freeze, a full
+  release or a backstop) and by at least two million blocks (a small kernel's
+  warm-up never walks), the next idle cycle runs the backstop; a busy cycle takes
+  it at a half. The walk comes once per quarter of growth whether the growth was
+  garbage or a cache filling, so it costs a constant per allocated block, as
+  CPython's rule does. The floor protects a small kernel's warm-up only: the
+  baseline is the first freeze's reading, so a loaded kernel's warm-up walks at
+  every quarter of its fill, several walks in a restart's first minutes (a
+  tenfold fill walks eight times), bounded by the series rather than the floor,
+  since each walk costs its heap's size and the sizes grow by a quarter: their
+  sum is under five times the final heap's, under three on busy cycles. A backstop is staged as a release is: a cheap collect
+  with the freeze in place first (the fold-in that cycle would have run, taking
+  the young garbage since the last collection), then the unfreeze and the walk,
+  so a reclaim's count is what the freeze held and not that plus the young. A
+  reclaim records what its unfrozen collection found, `lastReclaimCollected`
+  (the garbage the freeze had held) and `reclaimCollected` (summed), and
+  `frozenAtReclaim`, `gc.get_freeze_count()` after its re-freeze, read only
+  there, where the walk was just paid for; each backstop also writes one stderr
+  line with those figures. The walk's pause at a loaded kernel's size is not
+  measured: the lab read half a second per million tracked objects, a kernel at
+  8 GB holds tens of millions, so a walk there is plausibly several seconds with
+  every other thread waiting on the GIL, four or five times in twelve hours at
+  the growth seen live, and that is a projection until the first walk is read.
+  `lastReclaimMs` is the last reclaim's whole run (both collections, the
+  re-freeze and the frozen count read, itself 14 ms per million frozen), held
+  until the next reclaim where `lastReconcileMs` is the next fold-in's within
+  minutes, and `reclaimMsMax` the largest since the process started; the
+  backstop's stderr line carries the same figure, and
+  `ROMP_GC_FREEZE_BACKSTOP_GROWTH=0` turns the growth bound off while that
+  reading is weighed. A busy cycle judges the ended sessions only
   before the first freeze, as an idle one does: the initial freeze's collect
   takes their pre-freeze garbage, so the owed ones are dropped at no cost. Once
   a freeze is held, a busy cycle never judges an ended session. The
   sub-block carries `enabled`, `active` (whether a freeze is held now; named
   apart from the `frozen` count above, `gc.get_freeze_count()` on `?walk=1`),
-  `loadTrees` and `backstopFoldins` (the two thresholds), `gen2Threshold` (the
+  `loadTrees`, `backstopFoldins` and `backstopGrowth` (the three thresholds),
+  `heapBlocks`, `heapBlocksAtWalk`, `lastReclaimCollected`, `reclaimCollected` and
+  `frozenAtReclaim` (the growth bound's readings and the last reclaim's finds,
+  above), `gen2Threshold` (the
   full-collection trigger the controller set, below, or `null` while the
   stock one stands), `busyRuns` (of the
   runs, those a busy cycle made: a first freeze, load fold-ins and a busy
   backstop), `freezes` and
-  `reclaims` (a freeze ran one collection and a reclaim ran one, EXCEPT a full
-  release that unfroze runs TWO generation-2 collections for its one reclaim, so
-  `reclaims` alone cannot derive the organic count), `collections` (every
+  `reclaims` (a freeze ran one collection, and a reclaim that unfroze, a full
+  release or a backstop, ran TWO generation-2 collections for its one reclaim,
+  so `reclaims` alone cannot derive the organic count), `collections` (every
   `gc.collect()` the run step issued, so the organic full collections are
-  `gen."2".collections` less `collections`, an EQUALITY: a full release's two
+  `gen."2".collections` less `collections`, an EQUALITY: a reclaim's two
   collects are both counted here), `endedPending` (ended sessions
   registered by weakref and not yet judged, awaiting their worker thread to
   finish), `lastReconcileMs` and
@@ -3291,19 +3357,24 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   live-root release reads no sids, 0 survivors and its own kind, as an idle run
   that owed nothing does; a full release also
   writes one stderr line, "reclaimed" when nothing survived and otherwise naming the kept sids),
-  `totalReconcileMs` and `errors` (a reconcile that raised is counted here and
-  said once on stderr, never ending the pusher). The reconcile runs on the
+  `totalReconcileMs`, `lastReclaimMs` and `reclaimMsMax` (the last reclaim's
+  whole run and the largest, above) and `errors` (a reconcile that raised is
+  counted here and said once on stderr, never ending the pusher). The reconcile runs on the
   pusher thread after the pusher cycle closed its ring row, so the pusher ring
   never shows its pause. A jobs row can: when a jobs pass was open across the
   reconcile (common on a busy kernel, where the jobs thread is working when the
   pusher reconciles), the row's `n2` and `ms2` count the controller's
   collection along with any automatic one. `lastReconcileMs` is where a
-  reconcile's pause is read. The
+  reconcile's pause is read, `lastReclaimMs` where a frozen-heap walk's is. The
   freeze is on by default; `ROMP_GC_FREEZE=off` (or `0`/`false`) turns it off
   for a measurement, and `ROMP_GC_FREEZE_LOAD_TREES` sets the load threshold (a
   value that is not a positive integer falls back to the default, said once and
   counted under `errors`, and it is floored at 1 so it cannot make the reconcile
-  fire every cycle). While the freeze is on, the kernel also raises CPython's
+  fire every cycle). `ROMP_GC_FREEZE_BACKSTOP_GROWTH` sets the growth fraction
+  that owes the backstop (`backstopGrowth`, default 0.25): 0 turns the growth
+  bound off and leaves the fold-in count as the only backstop, a value above 1 is
+  clamped to 1, and one that is not a number from 0 to 1 falls back to the
+  default, said once and counted under `errors`. While the freeze is on, the kernel also raises CPython's
   full-collection trigger (the third of `thresholds`, stock 10) to 100 at boot,
   and `gen2Threshold` reads it. CPython runs an automatic full collection once
   generation 2 has seen more than that many generation-1 collections and the
@@ -4011,7 +4082,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `ROMP_RECORD_CACHE_DECODED_MULTIPLE` sets it, over 0 and at most 1000, and
   1 weighs file bytes as before 2026-10-01); `budgetBytes`, the byte budget
   in memory, per process, which `realBytes` is weighed against, the least
-  recently used entries going past it (half of MemTotal; never under 4 GiB of file bytes,
+  recently used entries going past it (half of MemTotal, or of the process's
+  cgroup memory limit where one sits below it, the smallest `memory.max` or
+  `memory.high` of its cgroup and their ancestors, a service unit's
+  `MemoryMax=` or `MemoryHigh=`, shown as `cgroupLimitBytes`, 0 when none;
+  never under 4 GiB of file bytes,
   which is 4 GiB times `decodedMultiple` in memory, so a machine under about
   23 GiB, or one without `/proc/meminfo` such as macOS, holds 4 GiB of file
   bytes (before 2026-10-01 a Linux machine over 8 GiB held half its memory

@@ -52,7 +52,7 @@ km = load_source("romp_kernel_perf_heap", os.path.join(BIN, "romp-kernel"))
 em, jd = km.em, km.jd
 
 HEAP_KEYS = {"allocatedBlocks", "gc", "tracing", "hydrated", "assemblyEntries", "parseSlots", "lazyIndexes",
-             "materializedLruSlots", "judgeUsageRows", "builtChat", "imgCache",
+             "materializedLruSlots", "judgeUsageRows", "builtChat", "imgCache", "assemblyEstimate",
              # the estimates in memory units beside the counts (the memory diagnosis, 2026-10-01; tests/test_perf_resident_gauges.py)
              "recordCacheResident", "pinnedByAssembly", "builtAtoms", "restoredIndexes"}
 SID = "11111111-2222-3333-4444-%012d"       # placeholder uuids, one per synthetic tab
@@ -177,11 +177,14 @@ class _Caches(unittest.TestCase):
 
     def setUp(self):
         self.st = km._PerfStats()
-        self.imgs, self.tabs, self.hyd, self.mat = [], [], [], []
+        self.imgs, self.tabs, self.hyd, self.mat, self.asm = [], [], [], [], []
         self.rows_before = None
         km._HEAP_SAID.clear()
 
     def tearDown(self):
+        with em._ASM_LOCK:
+            for k in self.asm:
+                em._ASM_CACHE.pop(k, None)
         for k in self.imgs:
             km._img_cache.pop(k, None)
         for k in self.tabs:
@@ -231,9 +234,20 @@ class _Caches(unittest.TestCase):
         self.rows_before = km._JUDGE_USAGE_CACHE["rows"]
         km._JUDGE_USAGE_CACHE["rows"] = [{"t": i, "in": 1, "out": 1} for i in range(n)]
 
+    def add_asm_entries(self, n, records, atoms, adapter=True):
+        """Assembly entries as the parse installs them, cut to what the gauge reads: an adapter with a by_uuid map of `records`
+        uuids (a stand-in object, as the adapter is to the gauge) and an atoms list of `atoms`; `adapter=False` plants an entry
+        with no adapter, the shape a gauge must count as atoms alone."""
+        with em._ASM_LOCK:
+            for i in range(n):
+                k = ("/notes-api/web/heap-%d.jsonl" % len(self.asm), SID % (len(self.asm) + 1))
+                ad = types.SimpleNamespace(by_uuid={"11111111-2222-3333-4444-%012d" % j: None for j in range(records)}) if adapter else None
+                em._ASM_CACHE[k] = {"ad": ad, "atoms": [None] * atoms, "st": {}, "landed": set(), "kept": set()}
+                self.asm.append(k)
+
     def remove_all(self):
         self.tearDown()
-        self.imgs, self.tabs, self.hyd, self.mat = [], [], [], []
+        self.imgs, self.tabs, self.hyd, self.mat, self.asm = [], [], [], [], []
         self.rows_before = None
 
 
@@ -248,6 +262,8 @@ class Gauges(_Caches):
         self.assertEqual(set(h["hydrated"]), {"entries", "bytes", "capBytes"})
         self.assertEqual(set(h["builtChat"]), {"tabs", "events", "serializedBytes"})
         self.assertEqual(set(h["imgCache"]), {"entries", "bytes"})
+        self.assertEqual(set(h["assemblyEstimate"]), {"entries", "records", "atoms", "recordBytes", "bytes"})
+        self.assertEqual(h["assemblyEstimate"]["recordBytes"], em.ASM_ENTRY_RECORD_BYTES)
         self.assertIsInstance(h["tracing"], bool)
         self.assertEqual(h["hydrated"]["capBytes"], em._HYDRATED_CAP)
         self.assertEqual(h["gc"]["enabled"], gc.isenabled())
@@ -280,6 +296,22 @@ class Gauges(_Caches):
         h2 = self.st.snapshot()["heap"]
         for k in ("imgCache", "builtChat", "hydrated", "materializedLruSlots", "judgeUsageRows"):
             self.assertEqual(h2[k], h0[k], k)
+
+    def test_the_assembly_estimate_weighs_each_entrys_records_at_the_measured_figure(self):
+        """The assembly entries' own weight (2026-11-14): records are the adapters' uuid maps summed, atoms the entries' atoms
+        lists summed, bytes records times the measured per-record figure; an entry with no adapter counts its atoms and no
+        records; the gauge falls back when the entries go; and assemblyEntries, the count, moves by the same entries."""
+        h0 = self.st.snapshot()["heap"]
+        self.add_asm_entries(2, records=300, atoms=120)
+        self.add_asm_entries(1, records=0, atoms=7, adapter=False)
+        h1 = self.st.snapshot()["heap"]
+        d = {k: h1["assemblyEstimate"][k] - h0["assemblyEstimate"][k] for k in ("entries", "records", "atoms", "bytes")}
+        self.assertEqual(d, {"entries": 3, "records": 600, "atoms": 247, "bytes": 600 * em.ASM_ENTRY_RECORD_BYTES})
+        self.assertEqual(h1["assemblyEntries"] - h0["assemblyEntries"], 3, "the count and the estimate see the same entries")
+        self.assertEqual(h1["assemblyEstimate"]["recordBytes"], 1100, "the lab's figure: 1,053 to 1,180 bytes a record")
+        self.remove_all()
+        h2 = self.st.snapshot()["heap"]
+        self.assertEqual(h2["assemblyEstimate"], h0["assemblyEstimate"])
 
     def test_an_entry_removed_under_the_readers_lock_leaves_both_the_count_and_the_bytes(self):
         """The gauge reads the reader's own counter and dict, so a removal done the way the reader's cap path does it (pop the
@@ -358,12 +390,13 @@ class AbsentSupport(_Caches):
         self.assertEqual(err2.getvalue(), "", "nothing more to say once the reads succeed")
 
     def test_an_event_model_lacking_the_estimates_yields_none_for_each_said_once(self):
-        """The four estimates in memory units (2026-10-01) beside an older event model that has not got them: each key is None,
+        """The five estimates in memory units (2026-10-01, the fifth 2026-11-14) beside an older event model that has not got them: each key is None,
         said once over three snapshots, and the snapshot still serves. Each read sits inside its lambda, so the lookup of the
         missing function happens under the guard; one evaluated outside it would fail the whole snapshot."""
-        new = ("recordCacheResident", "pinnedByAssembly", "builtAtoms", "restoredIndexes")
+        new = ("recordCacheResident", "pinnedByAssembly", "builtAtoms", "restoredIndexes", "assemblyEstimate")
         err = io.StringIO()
-        with _em_lacking("record_cache_resident", "asm_pinned_records", "built_atoms_estimate", "restored_index_estimate"), \
+        with _em_lacking("record_cache_resident", "asm_pinned_records", "built_atoms_estimate", "restored_index_estimate",
+                         "asm_entries_estimate"), \
              redirect_stderr(err):
             snaps = [self.st.snapshot() for _ in range(3)]
         for snap in snaps:

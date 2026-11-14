@@ -827,7 +827,12 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # leaves and their lineage) stay under the binding point; past it the thrash returns, and budgetRereads (an evicted path
 # read back) shows it on /perf. What is not needed until looked at (subagent transcripts) leaves through
 # drop_after="quiescent" folds instead; the budget is the backstop, not the mechanism. ROMP_RECORD_CACHE_BUDGET_MB still
-# sets it outright, in megabytes of memory, floor or not.
+# sets it outright, in megabytes of memory, floor or not. "Half of memory" is half of what the PROCESS has: MemTotal, or
+# the cgroup memory limit of the process (a service unit's MemoryMax= or MemoryHigh=, a container's limit) where one sits
+# below it (_cgroup_memory_limit_bytes, 2026-11-14), the floor still under either. On a 64 GB box the default read 33.7 GB
+# and bound nothing: the kernel's 54 held entries were 3.2 GB decoded, all of them the files its jobs read every cycle (the
+# live leaves, the postal and states logs), so no default above the working set and under the resident size exists for
+# it to evict toward; what a limit buys is a default that follows the memory the process may actually use.
 RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3   # FILE bytes: the default budget is never under this times the multiple
 RECORD_CACHE_BUDGET_FRACTION = 0.5
 RECORD_CACHE_DECODED_MULTIPLE = 2.85   # bytes of memory per file byte a held entry takes decoded: a 37.7 MB transcript in
@@ -867,20 +872,85 @@ def _real_bytes(file_bytes) -> int:
     return int(file_bytes * _RECORD_CACHE_MULTIPLE)
 
 
-def _record_cache_default_budget_bytes(meminfo_text=None):
+_CGROUP_V1_NO_LIMIT = 1 << 62          # cgroup v1 writes PAGE_COUNTER_MAX times the page size for "no limit": anything this
+#                                        large or larger reads as none
+
+
+def _cgroup_memory_limit_bytes(cgroup_text=None, root="/sys/fs/cgroup"):
+    """The memory limit the process's cgroup sets, in bytes: the smallest of memory.max and memory.high over its cgroup and
+    every ancestor under `root` (cgroup v2, the "0::" line of /proc/self/cgroup or `cgroup_text`; v1's memory controller
+    reads memory.limit_in_bytes the same way), 0 when none sets one ("max" at every level, the root cgroup, a host without
+    a cgroup filesystem, an unreadable file). A service unit's MemoryMax= or MemoryHigh=, a container's memory limit, is
+    the memory the kernel process actually has, however much the machine reports in MemTotal (the 2026-11-14 diagnosis: a
+    64 GB box with a 32 GB virtio balloon, where half of MemTotal was all of the memory that was really there); the bounds
+    that scale with the machine take the lesser of the two (_record_cache_default_budget_bytes, _machine_memory_bytes,
+    the kernel's _mem_total_bytes). Pure in its arguments: a test passes the text and a root of its own. Reported under
+    /perf recordCache.cgroupLimitBytes so a limit read, or none, is visible rather than inferred."""
+    try:
+        text = cgroup_text if cgroup_text is not None else open("/proc/self/cgroup", encoding="utf-8").read()
+    except Exception:
+        return 0
+    paths = []                                  # (subtree root, filenames) to walk
+    for line in text.splitlines():
+        parts = line.strip().split(":", 2)
+        if len(parts) != 3:
+            continue
+        hier, ctrls, path = parts
+        if hier == "0" and ctrls == "":
+            paths.append((root, path, ("memory.max", "memory.high")))
+        elif "memory" in ctrls.split(","):
+            paths.append((os.path.join(root, "memory"), path, ("memory.limit_in_bytes",)))
+    limit = 0
+    for base, path, names in paths:
+        rel = [seg for seg in path.strip("/").split("/") if seg]
+        while True:
+            d = os.path.join(base, *rel) if rel else base
+            for name in names:
+                try:
+                    with open(os.path.join(d, name), encoding="utf-8") as f:
+                        raw = f.read().strip()
+                except Exception:
+                    continue
+                if not raw or raw == "max":
+                    continue
+                try:
+                    v = int(raw)
+                except ValueError:
+                    continue
+                if 0 < v < _CGROUP_V1_NO_LIMIT and (limit == 0 or v < limit):
+                    limit = v
+            if not rel:
+                break
+            rel.pop()
+    return limit
+
+
+_CGROUP_MEMORY_LIMIT = _cgroup_memory_limit_bytes()   # this process's, read once at load; 0 when none
+
+
+def _record_cache_default_budget_bytes(meminfo_text=None, cgroup_limit=None):
     """The default budget in memory units (the budget weighs held entries decoded): half of MemTotal (from /proc/meminfo,
-    or the text given), never under the floor's 4 GiB of FILE bytes (RECORD_CACHE_BUDGET_FLOOR_BYTES times the multiple
-    in force); the floor alone when the file is unreadable (macOS, a container without procfs), so such a machine holds
-    the 4 GiB of file bytes it held before 2026-10-01."""
+    or the text given), or of the process's cgroup memory limit where one sits below MemTotal (`cgroup_limit` in bytes;
+    None reads this process's own for a live read and is none under a given text, so a test's text is the whole input;
+    0 is none), never under the floor's 4 GiB of FILE bytes (RECORD_CACHE_BUDGET_FLOOR_BYTES times the multiple in force);
+    the floor alone when neither is readable (macOS, a container without procfs), so such a machine holds the 4 GiB of
+    file bytes it held before 2026-10-01."""
     floor = int(RECORD_CACHE_BUDGET_FLOOR_BYTES * _RECORD_CACHE_MULTIPLE)
+    if cgroup_limit is None:
+        cgroup_limit = _cgroup_memory_limit_bytes() if meminfo_text is None else 0
+    total = 0
     try:
         text = meminfo_text if meminfo_text is not None else open("/proc/meminfo", encoding="utf-8").read()
         for line in text.splitlines():
             if line.startswith("MemTotal:"):
-                kb = int(line.split()[1])
-                return max(floor, int(kb * 1024 * RECORD_CACHE_BUDGET_FRACTION))
+                total = int(line.split()[1]) * 1024
+                break
     except Exception:
-        pass
+        total = 0
+    if cgroup_limit and cgroup_limit > 0:
+        total = min(total, cgroup_limit) if total > 0 else cgroup_limit
+    if total > 0:
+        return max(floor, int(total * RECORD_CACHE_BUDGET_FRACTION))
     return floor
 
 
@@ -1026,6 +1096,7 @@ def record_cache_stats() -> dict:
     with _JSONL_CACHE_LOCK:
         out = {"entries": len(_JSONL_CACHE), "bytes": _JSONL_CACHE_BYTES[0], "realBytes": _real_bytes(_JSONL_CACHE_BYTES[0]),
                "decodedMultiple": _RECORD_CACHE_MULTIPLE, "budgetBytes": _JSONL_CACHE_BUDGET_BYTES,
+               "cgroupLimitBytes": _CGROUP_MEMORY_LIMIT,   # the process's cgroup memory limit the default was held under; 0: none
                "countCap": _JSONL_CACHE_MAX, **_RECORD_CACHE_STATS}
         table = _RECORD_CACHE_STATS.get("wholeReads")
         out["wholeReads"] = {k: dict(v) for k, v in table.items()} if isinstance(table, dict) else {}
@@ -1202,18 +1273,27 @@ def _say_once(line):
         pass
 
 
-def _machine_memory_bytes(meminfo_text=None):
-    """MemTotal from /proc/meminfo (or the text given) in bytes; 0 when unreadable (macOS, a container without procfs).
-    The ceilings below are fractions of it (the user's direction, 2026-09-11: romp uses the machine's memory; every cache
-    is one shared pool sized to the machine, never a small literal that sits below the working set and thrashes)."""
+def _machine_memory_bytes(meminfo_text=None, cgroup_limit=None):
+    """MemTotal from /proc/meminfo (or the text given) in bytes, held under the process's cgroup memory limit where one
+    sits below it (`cgroup_limit` in bytes, _cgroup_memory_limit_bytes: None reads this process's own for a live read and
+    is none under a given text, so a test's text is the whole input; 0 is none); 0 when neither is readable (macOS, a
+    container without procfs). The ceilings below are fractions of it (the user's direction, 2026-09-11: romp uses the
+    machine's memory; every cache is one shared pool sized to the machine, never a small literal that sits below the
+    working set and thrashes), and the memory a limited process has is its limit, not the machine's total."""
+    if cgroup_limit is None:
+        cgroup_limit = _cgroup_memory_limit_bytes() if meminfo_text is None else 0
+    total = 0
     try:
         text = meminfo_text if meminfo_text is not None else open("/proc/meminfo", encoding="utf-8").read()
         for line in text.splitlines():
             if line.startswith("MemTotal:"):
-                return int(line.split()[1]) * 1024
+                total = int(line.split()[1]) * 1024
+                break
     except Exception:
-        pass
-    return 0
+        total = 0
+    if cgroup_limit and cgroup_limit > 0:
+        return min(total, cgroup_limit) if total > 0 else cgroup_limit
+    return total
 
 
 def _env_or(name, default, scale=1):
@@ -6990,7 +7070,8 @@ def asm_pinned_records() -> dict:
     in force, _RECORD_CACHE_MULTIPLE, read at the call). A list two entries share counts once. It weighs records alone: an
     entry's own atoms and lookup maps (by_uuid, the graph), about 0.9 to 1.1 KB per record of the leaf a whole entry parsed
     (tracemalloc on two synthetic leaves, 2026-10-01: 0.31 bytes per file byte where records carry long tool results, 4.0
-    where they are short), stay a count (assemblyEntries), so a 0 here never says the entries are free. O(entries x their files):
+    where they are short), are asm_entries_estimate's (the heap block's assemblyEstimate, 2026-11-14; a count, assemblyEntries,
+    before it), so a 0 here never says the entries are free. O(entries x their files):
     one record-cache lookup per file, taken under the cache's lock with nothing else, then two identities each after it, so a
     reader's hit never waits on the checks; no list is iterated; the two locks are taken one after the other."""
     with _ASM_LOCK:
@@ -7022,6 +7103,39 @@ def asm_pinned_records() -> dict:
     fb_total = sum(fb for _, fb in pinned.values())
     return {"lists": len(pinned), "records": sum(n for n, _ in pinned.values()), "fileBytes": fb_total,
             "bytes": int(round(fb_total * _RECORD_CACHE_MULTIPLE))}
+
+
+ASM_ENTRY_RECORD_BYTES = 1100         # what one record of a leaf costs its assembly entry beyond the records themselves: the adapter's
+#                                       per-uuid maps (by_uuid, seq_of, parent_of, ts_of, fsid_of, _seq_ts) and the entry's atoms; 1,053 to
+#                                       1,180 by tracemalloc over three synthetic whole-parse leaves of 10,000 to 40,000 records, short rows
+#                                       and rows with 2 KB tool results alike (Python 3.12, 2026-11-14), the 0.9 to 1.1 KB of 2026-10-01 again
+
+
+def asm_entries_estimate() -> dict:
+    """The assembly entries' OWN weight for /perf's heap block (the 2026-11-14 diagnosis: a kernel at 8 GB resident with 3.7 GB
+    attributed to no holder; the record cache weighs the records, pinnedByAssembly the records an entry keeps after the cache
+    let them go, and the entries' adapters and atoms, about a kilobyte a record, stood as the count assemblyEntries alone):
+    `entries`, `records` (each entry's adapter's uuid map, by_uuid, summed: every record the entry ingested, the whole leaf on
+    the whole-parse road and the tail past the document's cut on the restore road), `atoms` (the entries' emitted atoms,
+    summed), `recordBytes` (ASM_ENTRY_RECORD_BYTES) and `bytes`, records x recordBytes, an estimate. Not in it: a restored
+    entry's seed (the pre-cut graph's uuid sets) and the served copies the parse store holds, about 0.6 KB an atom in the same
+    lab, which stay the count parseSlots. An entry without an adapter counts its atoms and no records. O(entries): two lengths
+    each over a copied value list, never a walk over a map or an atoms list."""
+    with _ASM_LOCK:
+        entries = list(_ASM_CACHE.values())
+    records = atoms = 0
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        ad = e.get("ad")
+        m = getattr(ad, "by_uuid", None) if ad is not None else None
+        if isinstance(m, dict):
+            records += len(m)
+        a = e.get("atoms")
+        if isinstance(a, (list, tuple)):
+            atoms += len(a)
+    return {"entries": len(entries), "records": records, "atoms": atoms, "recordBytes": ASM_ENTRY_RECORD_BYTES,
+            "bytes": records * ASM_ENTRY_RECORD_BYTES}
 
 
 def _asm_lazy_uuids(e):

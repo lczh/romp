@@ -181,10 +181,55 @@ def _set_perf_log(on):
     return _PERF
 
 
+_PROCESS_SAID = set()   # the process block's gauges whose read failed and said so once (the heap block's _HEAP_SAID, for this block)
+_MALLINFO2_FN = []      # glibc's mallinfo2 through ctypes, resolved on the first read (_malloc_stats) with its struct class set as the
+#                         return type, and kept: a CDLL per read defines a _FuncPtr class per instance, and the struct class per read did
+#                         the same, cyclic garbage per poll that a fold-in on the pusher thread can freeze live (review 2026-11-14)
+
+
+def _malloc_stats(rss_kb):
+    """glibc's books for the /perf snapshot's process.malloc (2026-11-14): the snapshot carried the resident size and the
+    heap block's gauges and no allocator gauge at all, so a resident size gigabytes past everything the heap block weighed
+    could not be split between glibc's retained free chunks, the interpreter's own arenas and a holder no gauge weighs.
+    mallinfo2 (glibc 2.33 and later; a struct of ten size_t, read through ctypes) gives `arena` (the main heap and every
+    mmapped arena, in use and free), `mmapped` (hblkhd: chunks served by mmap outright, the record lists and decoded
+    documents over the mmap threshold), `inUse` (uordblks plus hblkhd: what the process holds through malloc), `free`
+    (fordblks: chunks glibc keeps for reuse, the slack MALLOC_ARENA_MAX=2 bounds), `keepcost` (what malloc_trim would return
+    from the main arena's top) and `other`, the resident size less arena and mmapped: the interpreter's small-object
+    arenas, code, stacks and libraries (the lab identity held within 10 MB). It is a DIFFERENCE of a resident figure and
+    two virtual ones, not a share of the resident size: arena and mmapped count pages the process has not touched (an
+    sbrk'd top, a calloc'd mmapped chunk, a 32 MiB bytes object just made), which the resident size does not, so it can read
+    under 0 while such pages stand, and nothing clamps it (review 2026-11-14). rss - inUse - other is then glibc's retained
+    slack, exactly, on every plain read. `readMs` is the call's own wall time: mallinfo2 walks every arena's free bins under
+    the arena locks (18 ms at 200k free chunks measured), so it is read on the plain GET alone, never on the pusher's cycle
+    or the restart ledger's samplers (_process_stats_perf, the snapshot's, takes it). Raises where there is no glibc mallinfo2 (off
+    Linux, musl, an older glibc); the caller reads it through _heap_read, which answers None and says so once."""
+    if not sys.platform.startswith("linux"):
+        raise OSError("glibc mallinfo2 is read on Linux only")
+    if not _MALLINFO2_FN:                         # the handle, the function and its struct class once per process, never per read
+        import ctypes
+
+        class MallInfo2(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_size_t) for name in ("arena", "ordblks", "smblks", "hblks", "hblkhd", "usmblks",
+                                                              "fsmblks", "uordblks", "fordblks", "keepcost")]
+        fn = ctypes.CDLL("libc.so.6").mallinfo2   # AttributeError on a libc without the symbol: said once by the caller, nothing kept
+        fn.restype = MallInfo2
+        fn.argtypes = ()
+        _MALLINFO2_FN.append(fn)
+    fn = _MALLINFO2_FN[0]
+    t0 = time.perf_counter()
+    mi = fn()
+    read_ms = (time.perf_counter() - t0) * 1000.0
+    arena, mmapped = int(mi.arena), int(mi.hblkhd)
+    return {"arena": arena, "mmapped": mmapped, "inUse": int(mi.uordblks) + mmapped, "free": int(mi.fordblks),
+            "keepcost": int(mi.keepcost), "other": int(rss_kb) * 1024 - arena - mmapped, "readMs": round(read_ms, 3)}
+
+
 def _process_stats():
     """rss_kb, thread count, CPU seconds and pid for the /perf snapshot. VmRSS from /proc is the CURRENT
     resident size; where /proc is absent (macOS) ru_maxrss is the PEAK, in bytes there, so it is scaled
-    to KB and the field is still called rss_kb."""
+    to KB and the field is still called rss_kb. The restart ledger's samplers read this too, some under a
+    session lock, so it reaches nothing but /proc: glibc's books are _process_stats_perf's, the snapshot's."""
     rss = 0
     try:
         with open("/proc/self/status") as fh:
@@ -201,6 +246,15 @@ def _process_stats():
             rss = 0
     return {"rss_kb": rss, "threads": threading.active_count(), "cpu_s": time.process_time(),
             "pid": os.getpid()}
+
+
+def _process_stats_perf():
+    """The /perf snapshot's process block: _process_stats plus glibc's books under `malloc` (_malloc_stats; None where
+    the runtime has none, said once through _heap_read under the block's own said-set). Only the snapshot reads this,
+    so the arena walk is paid on the plain GET alone, never by the pusher or the restart ledger's samplers."""
+    out = _process_stats()
+    out["malloc"] = _heap_read("malloc", lambda: _malloc_stats(out["rss_kb"]), block="process", said=_PROCESS_SAID)
+    return out
 
 
 _HEAP_SAID = set()   # the heap gauges whose read failed and said so on stderr, once each: a source without that container (an
@@ -257,16 +311,18 @@ def _heap_stats():
     JSON strings, which only the index wire (a proto-1 client) stores, so under the shipped wire it reads 0. These gauges
     attribute a resident size to its holders; they do not sum to it.
 
-    Four of them are ESTIMATES in memory units (the memory diagnosis, 2026-10-01: the kernel's resident size grew with about
+    Five of them are ESTIMATES in memory units (the memory diagnosis, 2026-10-01: the kernel's resident size grew with about
     2.85 times the record cache's file bytes, and the counts above, their three byte gauges aside (hydrated.bytes,
     builtChat.serializedBytes and imgCache.bytes), sized nothing): recordCacheResident (the record cache's entries by class, whole leaf, tail, subagent and logs under the state root except the Codex and Claude
     transcripts, their file bytes and those times the decoded multiple), pinnedByAssembly (records an assembly entry's adapter
     holds that the record cache no longer does), builtAtoms (the live materialized atoms times an atom's measured size, the dead
-    slots times an LRU entry's) and restoredIndexes (the live lazy indexes' rows, record rows and light facts). Each is O(entries)
+    slots times an LRU entry's), restoredIndexes (the live lazy indexes' rows, record rows and light facts) and assemblyEstimate (the
+    assembly entries' own adapters and atoms, about a kilobyte a record; the 2026-11-14 diagnosis, where those stood as a count while
+    3.7 GB of an 8 GB resident size had no holder). Each is O(entries)
     over its own container (the record cache's entries, the assembly entries' files, the live indexes), reads lengths, identities
     and numbers the holders keep, and never iterates a records list or an index's rows. They overlap where the holders share
-    objects, so they are not meant to be summed. The assembly entries' own atoms and lookup maps are still the count
-    assemblyEntries alone: pinnedByAssembly weighs only the records an entry holds after the record cache let them go, so it reads
+    objects, so they are not meant to be summed. The assembly entries' own atoms and lookup maps are assemblyEstimate's
+    (2026-11-14): pinnedByAssembly weighs only the records an entry holds after the record cache let them go, so it reads
     0 while the cache holds them, and that 0 never says the entries are free.
 
     What it never does: walk an object graph or the allocator's pools, collect, evict, fill a cache, read a file, build
@@ -344,7 +400,8 @@ def _heap_stats():
                                               lambda: em.record_cache_resident(jd.STATE, (jd.CODEXDIR / "projects", jd.PROJECTS))),
             "pinnedByAssembly": _heap_read("pinnedByAssembly", lambda: em.asm_pinned_records()),
             "builtAtoms": _heap_read("builtAtoms", lambda: em.built_atoms_estimate()),
-            "restoredIndexes": _heap_read("restoredIndexes", lambda: em.restored_index_estimate())}
+            "restoredIndexes": _heap_read("restoredIndexes", lambda: em.restored_index_estimate()),
+            "assemblyEstimate": _heap_read("assemblyEstimate", lambda: em.asm_entries_estimate())}
 
 
 def _perf_walks(snap):
@@ -1401,7 +1458,7 @@ class _PerfStats:
         #                                                                              on a runner nobody can log into), on demand
         #                                                                              through GET /perf?stacks=1 (T401)
         return {"now": now, "since": since, "uptime_s": now - _STARTED, "log": _PERF, "stacks": stacks,
-                "process": _process_stats(), "heap": _heap_stats(),   # heap: where the resident size sits, now (2026-09-15)
+                "process": _process_stats_perf(), "heap": _heap_stats(),   # heap: where the resident size sits, now (2026-09-15); malloc: glibc's books (2026-11-14)
                 "gc": gc_block,                                       # gc: the collector's collections and pauses (2026-09-16)
                 "pusher": pusher, "jobs": jobs, "writer": writer, "stages_ms": stages,
                 "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "skillLoadIndex": skill_idx, "http": http,
@@ -1443,12 +1500,21 @@ _PERF_STATS = _PerfStats()
 _GC_FREEZE_ERRORS = [0]
 _GC_FREEZE_SAID = [False]
 _GC_FREEZE_LOAD_TREES, _gc_freeze_bad_knob = gcf.load_trees_from_env()   # parsed with a fallback, never a bare int() at import (#1735 high)
-_GC_FREEZE = gcf.GcFreeze(enabled=gcf.enabled_from_env(), load_trees=_GC_FREEZE_LOAD_TREES)   # the ended note (note_ended) is wired when the SDK backend loads (below)
+_GC_FREEZE_BACKSTOP_GROWTH, _gc_freeze_bad_growth = gcf.backstop_growth_from_env()   # the growth-owed backstop's fraction; 0 is its off switch (2026-11-14)
+_GC_FREEZE = gcf.GcFreeze(enabled=gcf.enabled_from_env(), load_trees=_GC_FREEZE_LOAD_TREES,
+                          backstop_growth=_GC_FREEZE_BACKSTOP_GROWTH)   # the ended note (note_ended) is wired when the SDK backend loads (below)
 if _gc_freeze_bad_knob is not None:     # a bad ROMP_GC_FREEZE_LOAD_TREES fell back to the default: said once, counted, never fatal
     _GC_FREEZE_ERRORS[0] += 1
     try:
         sys.stderr.write("gc-freeze: ROMP_GC_FREEZE_LOAD_TREES=%r is not a positive integer; using the default %d\n"
                          % (_gc_freeze_bad_knob[:80], gcf.DEFAULT_LOAD_TREES))
+    except Exception:
+        pass
+if _gc_freeze_bad_growth is not None:   # a bad ROMP_GC_FREEZE_BACKSTOP_GROWTH fell back to the default: the same, said once, counted
+    _GC_FREEZE_ERRORS[0] += 1
+    try:
+        sys.stderr.write("gc-freeze: ROMP_GC_FREEZE_BACKSTOP_GROWTH=%r is not a fraction from 0 (off) to 1; using the default %s\n"
+                         % (_gc_freeze_bad_growth[:80], gcf.DEFAULT_BACKSTOP_GROWTH))
     except Exception:
         pass
 _GC_GEN2_THRESHOLD, _gc_gen2_bad_knob = gcf.gen2_threshold_from_env()   # the full-collection trigger while the freeze is on;
@@ -1512,6 +1578,16 @@ def _gc_freeze_tick(idle, first):
             else:            # the reclaim freed the released cycle
                 sys.stderr.write("gc-freeze: a release reclaimed a surviving cycle for ended session(s) %s in %.1f ms\n"
                                  % (",".join(_GC_FREEZE.last_release_sids) or "?", _GC_FREEZE.last_ms))
+        except Exception:
+            pass
+    elif kind == "backstop":   # 2026-11-14: a frozen-heap walk the fold-in count or the heap's growth brought: one line naming what it found
+        try:
+            sys.stderr.write("gc-freeze: a backstop walked the frozen heap in %.1f ms and collected %d unreachable objects the freeze had "
+                             "held out of the collector's reach, the young garbage taken before the walk (%s frozen after the re-freeze, "
+                             "%s small-object blocks live; the whole run %.1f ms with its re-freeze and frozen count read)\n"
+                             % (getattr(_GC_FREEZE, "last_ms", 0.0), int(getattr(_GC_FREEZE, "last_reclaim_collected", 0) or 0),
+                                getattr(_GC_FREEZE, "frozen_at_reclaim", None), getattr(_GC_FREEZE, "heap_blocks", None),
+                                getattr(_GC_FREEZE, "last_reclaim_ms", 0.0)))
         except Exception:
             pass
 
@@ -57850,12 +57926,17 @@ _SPEND_TREE_CACHE = {}              # leaf -> {"dirs": {dir: mtime}, "files": {p
 #                                     stat pass, "seen": epoch}: the session's subagents tree, watched by directory mtimes
 
 
-def _mem_total_bytes(meminfo="/proc/meminfo"):
-    """The machine's memory (MemTotal from /proc/meminfo; sysconf where there is no procfs), for the bounds that scale
-    with the box (the user's caches direction 2026-09-11: a memo's bound is a fraction of memory, never a small literal).
-    A masked /proc or a hardened container answers sysconf with 0 or -1 (its documented indeterminate answer), and a
-    bound of zero would drop every live memo each tick, the opposite of a memo, so anything not positive falls to an
-    8 GB default (the follow-up review's second round)."""
+def _mem_total_bytes(meminfo="/proc/meminfo", cgroup_limit=None):
+    """The memory this process has (MemTotal from /proc/meminfo; sysconf where there is no procfs; held under the
+    process's cgroup memory limit where one sits below it: `cgroup_limit` in bytes, em._cgroup_memory_limit_bytes, which
+    None reads for the default meminfo path and is none for a path a test names, so the file named is the whole input;
+    0 is none), for the bounds that scale with the box (the user's caches direction 2026-09-11: a memo's bound is a
+    fraction of memory, never a small literal; a service unit's MemoryMax= or MemoryHigh= is the memory the process may
+    use, 2026-11-14). A masked /proc or a hardened container answers sysconf with 0 or -1 (its documented indeterminate
+    answer), and a bound of zero would drop every live memo each tick, the opposite of a memo, so anything not positive
+    falls to an 8 GB default (the follow-up review's second round)."""
+    if cgroup_limit is None:
+        cgroup_limit = em._cgroup_memory_limit_bytes() if meminfo == "/proc/meminfo" else 0
     total = 0
     try:
         with open(meminfo) as f:
@@ -57871,6 +57952,8 @@ def _mem_total_bytes(meminfo="/proc/meminfo"):
             total = pages * page if pages > 0 and page > 0 else 0   # each factor on its own: two -1s multiply to 1
         except (OSError, ValueError, AttributeError, TypeError):
             total = 0
+    if cgroup_limit and cgroup_limit > 0:
+        total = min(total, cgroup_limit) if total > 0 else cgroup_limit
     return total if total > 0 else 8 * 1024 ** 3
 
 

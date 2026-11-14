@@ -33,15 +33,44 @@ Two operations, both at the end of a pusher cycle and keyed on events (never a t
 WHEN to reclaim is MEASURED, not guessed. Three review rounds each guessed cyclicity from a state flag
 (a session's `client`, its thread) and each found a new path the guess missed (a teardown exception
 after the client was cleared leaves a cyclic session with client None). So instead of deciding at the
-pop, every session-end pop REGISTERS a `weakref.ref(session)` (with its worker thread) via `note_ended`,
-and the idle tick judges each by observation: a dead ref died by reference counting (acyclic, no
-reclaim); a live ref whose worker thread still runs is not garbage yet (kept for the next tick, a kill
-mid-turn); a live ref whose thread has finished is a cycle the collector must take (reclaim once for all
+pop, every session-end pop REGISTERS a `weakref.ref(session)` (with its worker thread) via `note_ended`, and the idle tick judges each by observation: a dead
+ref died by reference counting (acyclic, no reclaim); a live ref whose worker thread still runs is not garbage yet (kept for the
+next tick, a kill mid-turn); a live ref whose thread has finished is a cycle the collector must take (reclaim once for all
 such, then drop them). Exact on every path, no per-path reasoning. A BOUNDED BACKSTOP (after
 `backstop_foldins` load fold-ins) covers any ended owner nobody registered. It is a frozen-heap walk
 too, so an idle cycle runs it; a busy cycle runs it only once the fold-ins reach TWICE
 `backstop_foldins`, a full window with no idle cycle to take it (2026-09-28: a busy fold-in can freeze a
-live cycle that dies later, and on a pusher that never idles nothing else would ever reclaim it). A busy
+live cycle that dies later, and on a pusher that never idles nothing else would ever reclaim it).
+
+THE BACKSTOP IS BOUNDED BY THE HEAP'S GROWTH TOO (2026-11-14). A fold-in freezes every live tracked object, not the loaded trees
+alone: the cycles of every other thread's work in flight (a judge's parse, a handler's build, a session's task, a caught
+exception's frame) are frozen live and die later, and from then on no collection reaches them until a frozen-heap walk. The
+fold-in count was the only bound, and on a loaded kernel making about 40 fold-ins an hour the thousand is more than a day
+(the two thousand of a pusher that never idles, two), while a kernel restarted for its memory before then never walked at
+all; the frozen garbage of every fold-in in between is resident and invisible to every gauge. So each run reads the heap
+after its freeze (`sys.getallocatedblocks()`, the small-object allocator's live blocks: about a millisecond per nine million,
+where `gc.get_freeze_count()` is a 14 ms per million walk of the frozen list that would double a fold-in's pause), and once
+the reading has grown past `backstop_growth` of the reading at the last walk (a quarter, CPython's own trigger for a full
+collection applied to the generation the freeze hides from it) and past the floor (two million blocks, so a small kernel's
+warm-up never walks), the next idle tick runs the backstop; a busy cycle takes it at a half, as it takes the count at twice.
+The floor protects a small kernel's warm-up only: the baseline is the initial freeze's reading, the first loaded cycle, so a
+loaded kernel's warm-up walks at every quarter of its fill, from a few million blocks to tens of millions, several walks in a
+restart's first minutes, when it is already slowest catching up (a tenfold fill walks eight times). What bounds that is the
+series, not the floor: each walk costs its heap's size and the sizes grow by a quarter, so their sum is under five times the
+final heap's, under three on busy cycles at a half.
+The walk's cost is linear in the frozen heap and it comes once per quarter of growth, so, like CPython's rule, it costs a
+constant per allocated block whether the growth was garbage or a cache filling; a cache filling buys one wasted walk per
+quarter, never more. Every reclaim records what its unfrozen collection found (`last_reclaim_collected`: the garbage the freeze
+had locked away; a backstop, like a release, runs a cheap collect with the freeze in place first, so the young garbage since the
+last collection is taken before the walk and not counted in it) and the frozen count after its re-freeze (`frozen_at_reclaim`, a
+walk read only where a walk was just paid for), so /perf's plain read says how much the freeze held and holds without `?walk=1`.
+THE WALK'S COST AT A LOADED KERNEL'S SIZE IS NOT MEASURED. The lab figure is 0.5 s per million tracked objects (the 2.83 s over 5.6
+million above); a kernel at 8 GB holds tens of millions, so a walk there is plausibly several seconds, with every handler and
+driver thread waiting on the GIL for it, four or five times in twelve hours at the live growth, and that is a projection until the
+first walk is read: `last_reclaim_ms` is that reclaim's WHOLE run (both collections, the re-freeze and the frozen count read,
+which is itself 14 ms per million frozen), held until the next reclaim where `last_ms` is the next fold-in's within minutes, and
+`reclaim_ms_max` the largest since boot; the backstop's stderr line carries the same figure. `ROMP_GC_FREEZE_BACKSTOP_GROWTH=0`
+turns the growth bound off while that reading is weighed. A busy
 cycle judges the ended sessions only before the first freeze, as the idle tick does: the initial freeze's
 collect takes their pre-freeze garbage, so the owed refs are dropped at no cost. Once a freeze is held, a
 busy cycle never judges them: their release waits for the idle tick. The record cache's
@@ -85,6 +114,7 @@ that call after boot today.
 """
 import gc as _gc_mod
 import os
+import sys
 import sysconfig
 import threading
 import time
@@ -95,10 +125,21 @@ MIN_LOAD_TREES = 1               # floored here: a threshold of 0 or below would
 DEFAULT_BACKSTOP_FOLDINS = 1000  # a reclaim after this many load fold-ins since the last reclaim, bounding a cyclic release
 #                                  no ended ref caught; at the ~97 fold-ins an hour measured when fold-ins ran only on idle
 #                                  cycles it fired about once in ten hours; busy-cycle fold-ins (2026-09-28) come more often,
-#                                  and the bound stays on fold-ins because a fold-in is what can freeze a live cycle
+#                                  and the bound stays on fold-ins because a fold-in is what can freeze a live cycle. A loaded
+#                                  kernel read at ~40 fold-ins an hour (2026-11-14), so this alone is more than a day: the heap's
+#                                  growth (DEFAULT_BACKSTOP_GROWTH) bounds the walk in between
 DEFAULT_GEN2_THRESHOLD = 100    # CPython's threshold2 while the freeze is on (stock 10): an automatic full collection at most
 #                                  every 101 generation-one collections since the last full one, controller runs included
 MIN_GEN2_THRESHOLD = 10          # the stock value: the knob can only raise the trigger, never make full collections more frequent
+DEFAULT_BACKSTOP_GROWTH = 0.25   # the heap's growth since the last frozen-heap walk, as a fraction of the reading at that walk, that owes
+#                                  the next walk (2026-11-14): CPython's own quarter (a full collection once the objects promoted since
+#                                  the last one reach a quarter of what survived it), applied to the generation the freeze hides from
+#                                  that rule. Read as sys.getallocatedblocks() after a run's freeze: the small-object allocator's live
+#                                  blocks, about a millisecond per nine million, never gc.get_freeze_count (14 ms per million frozen)
+DEFAULT_BACKSTOP_GROWTH_FLOOR_BLOCKS = 1 << 21   # and by at least this many blocks (a few hundred MB of small objects): a small kernel
+#                                                  grows by a quarter in its first minutes of warm-up and owes no frozen-heap walk for it.
+#                                                  A loaded kernel's warm-up is not protected by it: that one walks at every quarter of
+#                                                  its fill, a geometric series summing to under five times the final heap (docstring)
 MAX_GEN2_THRESHOLD = 2147483647  # the largest C int, the most gc.set_threshold takes: a knob past it falls back to the default
 _OFF = ("off", "0", "false")
 
@@ -122,6 +163,25 @@ def load_trees_from_env(env=None):
     except (TypeError, ValueError):
         return DEFAULT_LOAD_TREES, raw
     return max(MIN_LOAD_TREES, n), None
+
+
+def backstop_growth_from_env(env=None):
+    """(fraction, bad_raw): the ROMP_GC_FREEZE_BACKSTOP_GROWTH knob, parsed like `load_trees_from_env`: the heap growth,
+    as a fraction of the reading at the last frozen-heap walk, that owes the next walk (DEFAULT_BACKSTOP_GROWTH). 0 turns
+    the growth bound OFF, leaving the fold-in count as the only backstop (the switch a new multi-second full-collection
+    trigger on a production kernel owes, 2026-11-14); a value above 1 is clamped to 1, a heap that doubled being bound
+    enough; a value that is not a finite number, or is negative, falls back to the default and comes back as `bad_raw`
+    (the caller says it once and counts it), else None. Never a bare float() at the kernel's import."""
+    raw = (env if env is not None else os.environ).get("ROMP_GC_FREEZE_BACKSTOP_GROWTH")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_BACKSTOP_GROWTH, None
+    try:
+        f = float(raw.strip())
+    except (TypeError, ValueError):
+        return DEFAULT_BACKSTOP_GROWTH, raw
+    if f != f or f in (float("inf"), float("-inf")) or f < 0:
+        return DEFAULT_BACKSTOP_GROWTH, raw
+    return min(1.0, f), None
 
 
 def gen2_threshold_from_env(env=None):
@@ -187,12 +247,22 @@ class GcFreeze:
     thread that ends a session (the HTTP handler, housekeeping, a worker), so a small lock guards the ended list."""
 
     def __init__(self, enabled=True, load_trees=DEFAULT_LOAD_TREES, backstop_foldins=DEFAULT_BACKSTOP_FOLDINS,
-                 gc=_gc_mod, clock=time.perf_counter):
+                 gc=_gc_mod, clock=time.perf_counter, heap_blocks=sys.getallocatedblocks,
+                 backstop_growth=DEFAULT_BACKSTOP_GROWTH, backstop_growth_floor=DEFAULT_BACKSTOP_GROWTH_FLOOR_BLOCKS):
         self.enabled = bool(enabled)
         self.load_trees = max(MIN_LOAD_TREES, int(load_trees))
         self.backstop_foldins = max(1, int(backstop_foldins))
+        self.backstop_growth = max(0.0, float(backstop_growth))   # 0 turns the growth bound off; the fold-in count still bounds the walk
+        self.backstop_growth_floor = max(0, int(backstop_growth_floor))
         self._gc = gc
         self._clock = clock
+        self._heap_blocks = heap_blocks   # the heap reading the growth bound compares (sys.getallocatedblocks; a test injects a counter)
+        self.heap_blocks = None           # the reading after the last run's freeze (None until a run, or when the reader raised)
+        self.heap_blocks_at_walk = None   # the reading after the last frozen-heap walk (the initial freeze, a full release, a backstop)
+        self.last_reclaim_collected = 0   # what the last reclaim's unfrozen collection found: the garbage the freeze had locked away (the
+        #                                   young garbage since the last collection taken by the staged cheap collect first, not counted here)
+        self.reclaim_collected = 0        # the same, summed over every reclaim
+        self.frozen_at_reclaim = None     # gc.get_freeze_count() after the last reclaim's re-freeze (the walk was paid for anyway)
         self.frozen = False
         self._ins_mark = 0           # cache inserts at the last freeze
         self._foldins = 0            # load fold-ins since the last reclaim (the backstop counts these)
@@ -209,6 +279,10 @@ class GcFreeze:
         self.collections = 0         # gc.collect() calls the RUN STEP issued (a full release issues two): /perf, so organic = gen2 collections less this, exactly
         self.last_ms = 0.0           # the last reconcile's collection pause
         self.total_ms = 0.0          # every reconcile's collection pause, summed
+        self.last_reclaim_ms = 0.0   # the last RECLAIM's whole run, its collections, re-freeze and frozen count read (2026-11-14): held
+        #                              until the next reclaim, where last_ms is the next fold-in's within minutes; the stall a thread
+        #                              waiting on the GIL saw, and the only measurement of a frozen-heap walk at a loaded kernel's size
+        self.reclaim_ms_max = 0.0    # the largest such run since the process started
         self.last_kind = None        # "initial" | "load" | "release" | "backstop", for /perf
         self.gen2_threshold = None   # the full-collection trigger apply_gen2_threshold set, None while the stock one stands (/perf)
         self.gen2_replaced = None    # the trigger it replaced, put back when the controller is turned off
@@ -250,6 +324,16 @@ class GcFreeze:
             self.last_release_sids = [(getattr(sref(), "sid", "") or "")[:8] for sref, _ in owed if sref() is not None]
         return owed                                  # `keep` is already self._ended (set under the lock); no racy rebind here
 
+    def growth_due(self, times=1):
+        """Whether the heap has grown, since the last frozen-heap walk, by `times` the backstop_growth fraction of the reading
+        at that walk (a quarter for an idle cycle, a half for a busy one) and by at least the floor. False with no reading on
+        either side (no run yet, or a reader that raised) or with the fraction at 0: then the fold-in count alone bounds the walk."""
+        base, now = self.heap_blocks_at_walk, self.heap_blocks
+        if base is None or now is None or self.backstop_growth <= 0:
+            return False
+        grown = now - base
+        return grown >= self.backstop_growth_floor and grown >= times * self.backstop_growth * base
+
     def tick(self, inserts):
         """One idle-boundary pass: judge the ended sessions, then run the owed operation. Returns the kind run, or
         None. The reclaim is owed by an observed cyclic ended session or the backstop; the fold-in by a material
@@ -261,7 +345,7 @@ class GcFreeze:
             return self._run("initial", inserts, []) if inserts > 0 else None
         if owed:
             return self._run("release", inserts, owed)
-        if self._foldins >= self.backstop_foldins:
+        if self._foldins >= self.backstop_foldins or self.growth_due(1):
             return self._run("backstop", inserts, [])
         if (inserts - self._ins_mark) >= self.load_trees:
             return self._run("load", inserts, [])
@@ -283,7 +367,7 @@ class GcFreeze:
             self.resolve_ended()                     # no frozen heap yet: judge the pre-freeze refs and drop the owed, as the idle tick does
             kind = self._run("initial", inserts, []) if inserts > 0 else None
         else:
-            if self._foldins >= 2 * self.backstop_foldins:
+            if self._foldins >= 2 * self.backstop_foldins or self.growth_due(2):
                 kind = self._run("backstop", inserts, [])
             elif (inserts - self._ins_mark) >= self.load_trees:
                 kind = self._run("load", inserts, [])
@@ -301,22 +385,26 @@ class GcFreeze:
         review): a plain collect with the freeze IN PLACE first (cheap, it takes a cycle allocated since the last freeze),
         then the owed refs are re-read; only when one survived does it unfreeze and walk the frozen heap (the up-to-full
         pause). A release the cheap walk took whole counts as a LOAD pass, so the backstop's bound does not stretch. A
-        BACKSTOP is blind (no owed refs) and unfreezes straight away. After the collect and the re-freeze, an owed ref still
+        BACKSTOP is blind (no owed refs) and always unfreezes, after the same cheap collect with the freeze in place (2026-11-14:
+        the fold-in this tick would otherwise have run; without it the walk's count was the frozen garbage plus the young garbage
+        since the last collection, an upper bound where `last_reclaim_collected` is documented as what the freeze held). A
+        backstop therefore runs two collections, as a full release does. After the collect and the re-freeze, an owed ref still
         alive is kept by a LIVE ROOT, not a cycle: a wasted pause, counted as a survivor and dropped (never re-registered).
         The re-read runs after the re-freeze, which is harmless: a freeze collects nothing, so a ref alive after the collect
         is alive after the freeze too."""
         t0 = self._clock()
-        reclaimed = False
+        reclaimed, found = False, 0
         if kind == "release":
             self._gc.collect(); self.collections += 1    # cheap: the freeze stays in place, so this walks only the unfrozen
             if any(sref() is not None for sref, _ in owed):
                 self._gc.unfreeze()                  # a survivor: the released cycle is in the frozen set, lift it and walk
-                self._gc.collect(); self.collections += 1
+                found = self._gc.collect(); self.collections += 1
                 reclaimed = True
             # else the cheap collect took the released cycle whole: no full pause, counted as a load pass below
         elif kind == "backstop":
-            self._gc.unfreeze()                      # blind periodic reclaim: nothing owed to re-read, walk everything
-            self._gc.collect(); self.collections += 1
+            self._gc.collect(); self.collections += 1    # staged too (2026-11-14): the fold-in this tick would have run takes the young garbage first,
+            self._gc.unfreeze()                      # blind reclaim (the fold-in count or the heap's growth): nothing owed to re-read, walk everything
+            found = self._gc.collect(); self.collections += 1   # so this count is the garbage the freeze held, not that plus the young
             reclaimed = True
         else:
             self._gc.collect(); self.collections += 1    # initial / load fold-in: walk only the unfrozen
@@ -332,16 +420,45 @@ class GcFreeze:
         self.last_release_survivors = len(kept)
         self.last_kept_sids = kept
         self.survivors += len(kept)
+        self._read_heap()                            # after the freeze: what the heap holds now, the garbage this run took gone
         if reclaimed:
             self.last_kind = kind
             self.reclaims += 1
             self._foldins = 0
+            self.last_reclaim_collected = int(found or 0)   # the unfrozen collection's count: the garbage the freeze had locked away, the
+            #                                                  young garbage gone to the staged cheap collect before it
+            self.reclaim_collected += self.last_reclaim_collected
+            self.frozen_at_reclaim = self._read_frozen()
+            self.heap_blocks_at_walk = self.heap_blocks     # the growth bound measures from this walk
+            self.last_reclaim_ms = (self._clock() - t0) * 1000.0   # the whole run, the frozen count read included: what the GIL's waiters saw
+            self.reclaim_ms_max = max(self.reclaim_ms_max, self.last_reclaim_ms)
         else:
             self.last_kind = "initial" if not was_frozen else "load"   # a cheap-collect release folds in like a load
             self.freezes += 1
             if was_frozen:
                 self._foldins += 1                   # a load fold-in; the initial freeze is not one
+            else:
+                self.heap_blocks_at_walk = self.heap_blocks   # the initial freeze's collect walked everything: the first baseline
         return self.last_kind
+
+    def _read_heap(self):
+        """The heap reading after a run (sys.getallocatedblocks by default), or None when the reader raised: a reconcile never
+        fails on its gauge, and growth_due reads None as not due."""
+        try:
+            self.heap_blocks = int(self._heap_blocks())
+        except Exception:
+            self.heap_blocks = None
+
+    def _read_frozen(self):
+        """gc.get_freeze_count() after a reclaim's re-freeze, or None where the collector lacks it or the read raised. A walk of the
+        frozen generation (14 ms per million in the lab), read only here, where the reclaim just walked that heap anyway."""
+        read = getattr(self._gc, "get_freeze_count", None)
+        if read is None:
+            return None
+        try:
+            return int(read())
+        except Exception:
+            return None
 
     def perf(self):
         """The /perf gc block's freeze sub-block: the state and the reconcile trade, so a reconcile collection is
@@ -350,12 +467,17 @@ class GcFreeze:
         controller set (None while the stock one stands; the gc block's `thresholds` reads the collector itself)."""
         return {"enabled": self.enabled, "active": self.frozen, "loadTrees": self.load_trees,
                 "gen2Threshold": self.gen2_threshold,
-                "backstopFoldins": self.backstop_foldins, "freezes": self.freezes, "reclaims": self.reclaims,
+                "backstopFoldins": self.backstop_foldins, "backstopGrowth": self.backstop_growth,
+                "heapBlocks": self.heap_blocks, "heapBlocksAtWalk": self.heap_blocks_at_walk,
+                "lastReclaimCollected": self.last_reclaim_collected, "reclaimCollected": self.reclaim_collected,
+                "frozenAtReclaim": self.frozen_at_reclaim,
+                "freezes": self.freezes, "reclaims": self.reclaims,
                 "busyRuns": self.busy_runs,
                 "collections": self.collections, "survivors": self.survivors, "lastReleaseSurvivors": self.last_release_survivors,
                 "lastReleaseSids": list(self.last_release_sids),
                 "endedPending": len(self._ended), "lastReconcileMs": round(self.last_ms, 1),
-                "lastReconcileKind": self.last_kind, "totalReconcileMs": round(self.total_ms, 1)}
+                "lastReconcileKind": self.last_kind, "totalReconcileMs": round(self.total_ms, 1),
+                "lastReclaimMs": round(self.last_reclaim_ms, 1), "reclaimMsMax": round(self.reclaim_ms_max, 1)}
 
 
 def pusher_tick(controller, idle, first, stats_fn, on_error):

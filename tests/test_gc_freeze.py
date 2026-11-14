@@ -67,6 +67,27 @@ class TakingGc(FakeGc):
             self.take = None
 
 
+class GarbageGc(FakeGc):
+    """A FakeGc with two bins of garbage, the way the collector sees a frozen heap: `young` (allocated since the last freeze,
+    what a collect with the freeze in place takes) and `held` (dead objects the freeze holds, reachable to a collect only once
+    unfrozen). collect() returns what it took, as gc.collect does, and empties what it took."""
+    def __init__(self, young=0, held=0):
+        super().__init__()
+        self.young, self.held, self.is_frozen = young, held, False
+    def collect(self, *a):
+        super().collect(*a)
+        took, self.young = self.young, 0
+        if not self.is_frozen:
+            took, self.held = took + self.held, 0
+        return took
+    def freeze(self):
+        super().freeze()
+        self.is_frozen = True
+    def unfreeze(self):
+        super().unfreeze()
+        self.is_frozen = False
+
+
 class ThresholdGc(FakeGc):
     """A FakeGc that carries the collector's thresholds and records every read and write, so the full-collection trigger's
     gates are pinned without touching the interpreter's own collector."""
@@ -261,8 +282,8 @@ class TriggerLogic(unittest.TestCase):
         # the backstop: after backstop_foldins load fold-ins since the last reclaim, a reclaim runs anyway
         self.assertEqual(c.tick(inserts=3 + 16), "load")   # fold-in 2 -> _foldins at the backstop
         fake.calls.clear()
-        self.assertEqual(c.tick(inserts=3 + 16), "backstop", "the backstop reclaims: unfreeze, collect, re-freeze")
-        self.assertEqual(fake.calls, ["unfreeze", "collect", "freeze"])
+        self.assertEqual(c.tick(inserts=3 + 16), "backstop", "the backstop reclaims: a cheap collect, unfreeze, collect, re-freeze")
+        self.assertEqual(fake.calls, ["collect", "unfreeze", "collect", "freeze"], "staged like a release (2026-11-14): the young garbage first, then the walk")
         self.assertIsNone(c.tick(inserts=3 + 16), "the backstop reset _foldins: not due again until the next load or ended cycle")
         # PR 1999 review: a RELEASE resets the fold-in counter too (not only a backstop). After a release, the next backstop
         # needs a FULL backstop_foldins loads; guarding the reset on kind=="backstop" alone would fire the backstop a load early.
@@ -601,7 +622,7 @@ class PusherTick(unittest.TestCase):
         self.assertEqual([t(False, False, 65), t(False, False, 73)], ["load", "load"], "fold-ins 3 and 4: still loads on busy cycles")
         fake.calls.clear()
         self.assertEqual(t(False, False, 81), "backstop", "a full window passed with no idle cycle: the busy cycle runs the backstop, even with a load also due")
-        self.assertEqual(fake.calls, ["unfreeze", "collect", "freeze"], "the backstop walks the frozen heap")
+        self.assertEqual(fake.calls, ["collect", "unfreeze", "collect", "freeze"], "the backstop walks the frozen heap, after the cheap collect")
         self.assertEqual((c.reclaims, c._foldins), (1, 0), "a reclaim, and the fold-in count restarts")
         self.assertIsNone(t(False, False, 81), "nothing due right after the backstop: its re-freeze folded the load in")
         self.assertEqual(errs, [])
@@ -854,8 +875,9 @@ class RealCollector(unittest.TestCase):
 
     def test_collections_counts_each_run_steps_collect_calls_by_kind(self):
         """PR 2042 review (item 1): the /perf `collections` count bumps by exactly the collect calls each run step issues, on
-        the REAL collector: initial one, a load one, a cheap release one, a full release TWO, a backstop one. A mutant
-        dropping the second collect's count in the unfreeze branch reds the full-release case."""
+        the REAL collector: initial one, a load one, a cheap release one, a full release TWO, a backstop TWO (staged since
+        2026-11-14, so its count is the frozen garbage alone). A mutant dropping the second collect's count in the unfreeze
+        branch reds the full-release case."""
         gc.disable(); self.addCleanup(gc.enable)
         c = gf.GcFreeze(enabled=True, load_trees=1, backstop_foldins=1, gc=gc)
         b0 = c.collections; self.assertEqual(c.tick(inserts=1), "initial"); self.assertEqual(c.collections - b0, 1, "initial: one collect")
@@ -869,9 +891,9 @@ class RealCollector(unittest.TestCase):
         yg = _Owner(); yg.other = old; old.other = yg; fy = _FakeThread(alive=False)
         c.note_ended(yg, thread=fy); del yg, old
         b0 = c.collections; self.assertEqual(c.tick(inserts=3), "release"); self.assertEqual(c.collections - b0, 2, "a full release: two collects (collect, then unfreeze-collect)")
-        # a backstop (backstop_foldins=1): one collect
+        # a backstop (backstop_foldins=1): two collects (the cheap collect with the freeze in place, then the unfrozen walk)
         b0 = c.collections; self.assertEqual(c.tick(inserts=4), "load")   # one fold-in to reach the backstop
-        b0 = c.collections; self.assertEqual(c.tick(inserts=4), "backstop"); self.assertEqual(c.collections - b0, 1, "a backstop: one collect")
+        b0 = c.collections; self.assertEqual(c.tick(inserts=4), "backstop"); self.assertEqual(c.collections - b0, 2, "a backstop: two collects, like a full release")
 
     def test_the_organic_arithmetic_is_exact_via_the_collections_count(self):
         """PR 2042 review (item 1): the exact equality the reference states. A gc.callbacks hook counts generation-2
@@ -1088,7 +1110,7 @@ class KernelKnob(unittest.TestCase):
         """Load the kernel with `var` set to `value` and `extra` beside it. The two knobs this class tests are cleared
         unless passed (review 2026-10-03): a value exported in the shell for one must never reach the other's case."""
         import contextlib, io
-        env = {"ROMP_GC_FREEZE_LOAD_TREES": None, "ROMP_GC_GEN2_THRESHOLD": None}
+        env = {"ROMP_GC_FREEZE_LOAD_TREES": None, "ROMP_GC_GEN2_THRESHOLD": None, "ROMP_GC_FREEZE_BACKSTOP_GROWTH": None}
         env.update(extra or {})
         env[var] = value
         saved = {k: os.environ.get(k) for k in env}
@@ -1200,6 +1222,29 @@ class KernelKnob(unittest.TestCase):
         self.assertEqual(km0._GC_FREEZE_LOAD_TREES, 1, "0 is floored to 1")
         self.assertEqual(km0._GC_FREEZE_ERRORS[0], 0, "a floored 0 is a valid int, no error")
         self.assertEqual(err0, "", "and nothing said for a valid, floored value")
+
+    def test_a_bad_growth_knob_falls_back_and_is_said_a_zero_turns_the_bound_off(self):
+        """2026-11-14: ROMP_GC_FREEZE_BACKSTOP_GROWTH reaches the controller the kernel builds at import. A bad value falls
+        back to the default, is counted under errors and said once on stderr, as the load-trees knob is; 0 is the off switch,
+        no error; a fraction is passed as given."""
+        km, err = self._load_with("abc", "romp_kernel_knob_growth_abc", var="ROMP_GC_FREEZE_BACKSTOP_GROWTH")
+        self.assertEqual(km._GC_FREEZE_BACKSTOP_GROWTH, km.gcf.DEFAULT_BACKSTOP_GROWTH, "abc falls back to the default")
+        self.assertEqual(km._GC_FREEZE.backstop_growth, km.gcf.DEFAULT_BACKSTOP_GROWTH, "and the controller runs the default")
+        self.assertEqual(km._GC_FREEZE_ERRORS[0], 1, "the bad knob is counted under errors, once")
+        lines = [ln for ln in err.splitlines() if "ROMP_GC_FREEZE_BACKSTOP_GROWTH" in ln]
+        self.assertEqual(len(lines), 1, "and said once on stderr: %r" % err)
+        self.assertIn("'abc'", lines[0])
+        self.assertIn("using the default 0.25", lines[0])
+        self.assertNotIn("ROMP_GC_FREEZE_LOAD_TREES", err, "the other knob, unset, says nothing")
+        km0, err0 = self._load_with("0", "romp_kernel_knob_growth_zero", var="ROMP_GC_FREEZE_BACKSTOP_GROWTH")
+        self.assertEqual(km0._GC_FREEZE_BACKSTOP_GROWTH, 0.0, "0 is the off switch")
+        self.assertEqual(km0._GC_FREEZE.backstop_growth, 0.0, "and the controller holds it: growth_due is False at any reading")
+        self.assertEqual(km0._GC_FREEZE_ERRORS[0], 0, "no error for the switch")
+        self.assertNotIn("ROMP_GC_FREEZE_BACKSTOP_GROWTH", err0, "and nothing said: %r" % err0)
+        km5, err5 = self._load_with("0.5", "romp_kernel_knob_growth_half", var="ROMP_GC_FREEZE_BACKSTOP_GROWTH")
+        self.assertEqual(km5._GC_FREEZE.backstop_growth, 0.5, "a fraction is passed to the controller as given")
+        self.assertEqual(km5._GC_FREEZE_ERRORS[0], 0)
+        self.assertNotIn("ROMP_GC_FREEZE_BACKSTOP_GROWTH", err5)
 
 
 def _install_fake_sdk():
@@ -1464,3 +1509,343 @@ class KernelGlue(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeapGrowthBackstop(unittest.TestCase):
+    """2026-11-14: a fold-in freezes EVERY live tracked object, the soon-to-die cycles of every other thread's work in flight
+    included (a judge's parse, a handler's build, a session's task), and a cycle frozen live that dies later is out of the
+    collector's reach until the next frozen-heap walk. The only bound on that walk was the fold-in count (1000 on an idle cycle,
+    2000 on a busy one): at the ~40 fold-ins an hour a loaded kernel makes, more than a day, and a kernel restarted for its
+    memory before then never walked at all. The bound is now also the heap's own growth, CPython's quarter rule (a full collection
+    once the objects promoted since the last one reach a quarter of what survived it) applied to the generation the freeze hides
+    from it: a fold-in reads sys.getallocatedblocks() after its freeze, and once the reading has grown past a quarter of the
+    reading at the last walk (and by the floor, so a small kernel's warm-up never walks; a loaded kernel's warm-up walks at every
+    quarter of its fill, a bounded geometric series, the cadence test below), the next idle tick runs the backstop;
+    a busy cycle takes it at a half, as it takes the fold-in count at twice its bound. The reading is a count of the small-object
+    allocator's live blocks, about a millisecond per 9 million (never gc.get_freeze_count, a 14 ms per million walk that would
+    double a fold-in's pause), so the trigger costs a fold-in nothing it can feel. A reclaim also reports what its unfrozen
+    collection found (the frozen garbage: a cheap collect with the freeze in place runs first and takes the young garbage) and
+    the frozen count after its re-freeze, so /perf says how much the freeze had locked away without a walk on the plain read."""
+
+    def tearDown(self):
+        gc.unfreeze()
+        gc.collect()
+
+    def _controller(self, fake, blocks, **kw):
+        kw.setdefault("backstop_growth_floor", 0)
+        return gf.GcFreeze(enabled=True, load_trees=8, backstop_foldins=1000, gc=fake, clock=lambda: 0.0,
+                           heap_blocks=lambda: blocks[0], backstop_growth=0.25, **kw)
+
+    def test_a_quarter_of_growth_since_the_last_walk_is_a_backstop_on_an_idle_cycle(self):
+        fake, blocks = FakeGc(), [1000]
+        c = self._controller(fake, blocks)
+        self.assertEqual(c.tick(inserts=1), "initial", "the initial freeze")
+        self.assertEqual((c.heap_blocks_at_walk, c.heap_blocks), (1000, 1000), "the initial freeze takes the first baseline")
+        blocks[0] = 1240
+        self.assertEqual(c.tick(inserts=9), "load", "a fold-in reads the heap after its freeze")
+        self.assertEqual(c.heap_blocks, 1240)
+        self.assertIsNone(c.tick(inserts=9), "growth under a quarter of the baseline: no backstop, as before")
+        blocks[0] = 1250
+        self.assertEqual(c.tick(inserts=17), "load")
+        fake.calls.clear()
+        self.assertEqual(c.tick(inserts=17), "backstop", "a quarter of growth since the last walk: the idle tick walks the frozen heap")
+        self.assertEqual(fake.calls, ["collect", "unfreeze", "collect", "freeze"], "the growth backstop is the blind reclaim, staged: collect, unfreeze, collect, re-freeze")
+        self.assertEqual((c.reclaims, c._foldins, c.last_kind), (1, 0, "backstop"))
+        self.assertEqual(c.heap_blocks_at_walk, 1250, "the walk re-baselines at the reading taken after it")
+        self.assertIsNone(c.tick(inserts=17), "nothing due right after: the growth is measured from the new baseline")
+        blocks[0] = 1500
+        self.assertEqual(c.tick(inserts=25), "load")
+        self.assertIsNone(c.tick(inserts=25), "1500 is under a quarter over 1250: the old baseline is gone")
+
+    def test_a_release_rebaselines_too_and_a_cheap_release_does_not(self):
+        fake, blocks = FakeGc(), [1000]
+        c = self._controller(fake, blocks)
+        c.tick(inserts=1)
+        owner, fin = _Owner(), _FakeThread(alive=False)
+        c.note_ended(owner, thread=fin)
+        blocks[0] = 1100
+        self.assertEqual(c.tick(inserts=1), "release", "a full release walked the frozen heap (the FakeGc collect is a no-op, so the ref survives the cheap stage)")
+        self.assertEqual(c.heap_blocks_at_walk, 1100, "a full release is a walk: the baseline moves")
+        taking, blocks2 = TakingGc(), [1000]
+        c2 = self._controller(taking, blocks2)
+        c2.tick(inserts=1)
+        holder = [_Owner()]
+        c2.note_ended(holder[0], thread=_FakeThread(alive=False))
+        taking.take = holder
+        blocks2[0] = 1100
+        self.assertEqual(c2.tick(inserts=1), "load", "the cheap stage took the released cycle: a load pass")
+        self.assertEqual(c2.heap_blocks_at_walk, 1000, "no frozen-heap walk ran, so the baseline stands")
+
+    def test_a_busy_cycle_leaves_a_quarter_to_an_idle_cycle_and_takes_a_half_itself(self):
+        fake, errs, blocks = FakeGc(), [], [1000]
+        c = self._controller(fake, blocks)
+        t = lambda idle, first, ins: gf.pusher_tick(c, idle=idle, first=first, stats_fn=lambda: {"inserts": ins}, on_error=errs.append)
+        self.assertEqual(t(False, False, 1), "initial")
+        blocks[0] = 1300
+        self.assertEqual(t(False, False, 9), "load")
+        self.assertIsNone(t(False, False, 9), "a busy cycle leaves a quarter's growth to an idle cycle (the walk is the pause the idle boundary is for)")
+        blocks[0] = 1499
+        self.assertEqual(t(False, False, 17), "load")
+        self.assertIsNone(t(False, False, 17), "still under a half")
+        blocks[0] = 1500
+        self.assertEqual(t(False, False, 25), "load")
+        fake.calls.clear()
+        self.assertEqual(t(False, False, 25), "backstop", "half the baseline of growth with no idle cycle: the busy cycle walks")
+        self.assertEqual(fake.calls, ["collect", "unfreeze", "collect", "freeze"])
+        self.assertEqual((c.reclaims, c.busy_runs), (1, 5))
+        self.assertEqual(errs, [])
+
+    def test_the_floor_keeps_a_small_heap_from_walking_on_warm_up(self):
+        fake, blocks = FakeGc(), [1000]
+        c = self._controller(fake, blocks, backstop_growth_floor=600)
+        c.tick(inserts=1)
+        blocks[0] = 1500
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertIsNone(c.tick(inserts=9), "half again as large, yet under the floor's 600 blocks of growth: a small kernel warming up never walks")
+        blocks[0] = 1600
+        self.assertEqual(c.tick(inserts=17), "load")
+        self.assertEqual(c.tick(inserts=17), "backstop", "past the floor and past a quarter: the walk")
+
+    def test_a_loaded_kernels_warm_up_walks_at_every_quarter_a_bounded_geometric_series(self):
+        """Review 2026-11-14 (low): the floor in blocks protects a SMALL kernel's warm-up only. The baseline is the reading at the
+        initial freeze, the first loaded cycle, so a restarted kernel that fills from a few million blocks to tens of millions
+        walks at every quarter of growth on the way, several walks in its first minutes, when it is already slowest catching
+        up; what bounds that is the series, not the floor: each walk costs its heap's size, the sizes grow by a quarter, so the
+        sum is under five times the final heap's (one over one minus four fifths), and under three on busy cycles at a half.
+        Pinned here with a 2M floor and 100k-block steps: a tenfold fill, 4M to 40M, walks eight times at the listed sizes (the
+        reading is taken after a run, so each walk comes at the tick after the reading crossed the threshold, and re-baselines
+        at that tick's reading), and the docstring and the reference say so rather than leaving the floor to imply one early walk."""
+        fake, blocks = FakeGc(), [4_000_000]
+        c = self._controller(fake, blocks, backstop_growth_floor=2_000_000)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        walks, ins = [], 1
+        while blocks[0] < 40_000_000:
+            blocks[0] += 100_000
+            ins += 8
+            if c.tick(inserts=ins) == "backstop":
+                walks.append(blocks[0])
+        self.assertEqual(walks, [6_100_000, 8_200_000, 10_400_000, 13_100_000, 16_500_000, 20_800_000, 26_100_000, 32_800_000],
+                         "the floor holds the first two walks to +2M, then each comes at +25% of the last walk's reading, one tick after")
+        self.assertEqual(len(walks), 8, "eight walks over a tenfold warm-up")
+        self.assertLess(sum(walks), 5 * blocks[0], "their summed size, the cost, is under five times the final heap's: %d" % sum(walks))
+        self.assertGreater(sum(walks), 3 * blocks[0], "and not small: over three times it (%d), the restart's price for the bound" % sum(walks))
+        flat = lambda text: " ".join(text.split())        # the reference wraps its lines: compare the words
+        self.assertIn("warm-up walks at every quarter", flat(gf.__doc__), "the module docstring states the loaded kernel's cadence")
+        with open(os.path.join(ROOT, "docs", "reference.md")) as fh:
+            self.assertIn("warm-up walks at every quarter", flat(fh.read()), "and so does the reference")
+
+    def test_the_defaults_and_a_heap_reader_that_raises(self):
+        self.assertEqual(gf.DEFAULT_BACKSTOP_GROWTH, 0.25, "CPython's own quarter")
+        self.assertEqual(gf.DEFAULT_BACKSTOP_GROWTH_FLOOR_BLOCKS, 1 << 21, "about two million small-object blocks (a few hundred MB) before the growth rule can fire")
+        c = gf.GcFreeze(enabled=True, gc=FakeGc())
+        self.assertIs(c._heap_blocks, sys.getallocatedblocks, "the default reader is the allocator's block count")
+        self.assertEqual((c.backstop_growth, c.backstop_growth_floor), (0.25, 1 << 21))
+        def boom():
+            raise RuntimeError("no allocator stats here")
+        c = gf.GcFreeze(enabled=True, load_trees=8, gc=FakeGc(), clock=lambda: 0.0, heap_blocks=boom)
+        self.assertEqual(c.tick(inserts=1), "initial", "a reader that raises never fails the reconcile")
+        self.assertIsNone(c.heap_blocks, "and leaves the reading unknown")
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertIsNone(c.tick(inserts=9), "with no reading the growth rule never fires; the fold-in count still bounds the walk")
+
+    def test_frozen_garbage_is_reclaimed_by_the_growth_backstop_and_reported(self):
+        """The leak itself, on the real collector: cycles alive at a fold-in are frozen; they die; no fold-in count reaches the
+        old backstop; before this change they stayed until one did. Now the heap's growth brings the walk, which takes them,
+        and /perf reads what the walk found."""
+        blocks = [1000]
+        c = gf.GcFreeze(enabled=True, load_trees=1, backstop_foldins=1000, gc=gc, heap_blocks=lambda: blocks[0],
+                        backstop_growth=0.25, backstop_growth_floor=0)
+        heap = []
+        for _ in range(3000):
+            a, b = Cyclic(), Cyclic(); a.other = b; b.other = a; heap.append(a)
+        watched = [weakref.ref(x) for x in heap[:100]]
+        self.assertEqual(c.tick(inserts=1), "initial", "the cycles are alive at the freeze: frozen")
+        del heap, a, b
+        gc.collect()
+        self.assertTrue(all(w() is not None for w in watched), "frozen cycles that died are out of the collector's reach: the leak")
+        self.assertEqual((c.last_reclaim_collected, c.reclaim_collected), (0, 0), "no reclaim yet")
+        blocks[0] = 1300
+        self.assertEqual(c.tick(inserts=2), "load", "a fold-in reads the heap: grown past a quarter")
+        self.assertEqual(c.tick(inserts=2), "backstop", "the growth backstop, at 1 fold-in of a 1000 bound")
+        self.assertTrue(all(w() is None for w in watched), "the walk took the frozen garbage")
+        self.assertGreaterEqual(c.last_reclaim_collected, 6000, "the unfrozen collection's count is the frozen garbage, reported")
+        self.assertEqual(c.reclaim_collected, c.last_reclaim_collected, "and summed over reclaims")
+        self.assertIsNotNone(c.frozen_at_reclaim, "the frozen count after the walk's re-freeze, read while the walk was paid for anyway")
+        self.assertAlmostEqual(c.frozen_at_reclaim, gc.get_freeze_count(), delta=500,
+                               msg="and it is the collector's own count (a few frozen objects die by refcount between the two reads)")
+        p = c.perf()
+        for k in ("backstopGrowth", "heapBlocks", "heapBlocksAtWalk", "lastReclaimCollected", "reclaimCollected", "frozenAtReclaim"):
+            self.assertIn(k, p, "the perf block names the growth rule's state and the reclaim's finds: %s" % k)
+        self.assertEqual((p["heapBlocks"], p["heapBlocksAtWalk"], p["backstopGrowth"]), (1300, 1300, 0.25))
+        self.assertEqual((p["lastReclaimCollected"], p["frozenAtReclaim"]), (c.last_reclaim_collected, c.frozen_at_reclaim))
+
+    def test_a_backstop_is_staged_so_its_count_is_the_frozen_garbage_alone(self):
+        """Review 2026-11-14 (low): lastReclaimCollected was documented as the garbage the freeze had held, exactly, but a
+        backstop ran one unfrozen collect, which also counted the ordinary young garbage allocated since the last collection,
+        so the figure was an upper bound. A backstop now stages like a release: a cheap collect with the freeze in place takes
+        the young garbage (the fold-in this tick would otherwise have run), then the unfreeze and the walk; the walk's count is
+        what the freeze held. The whole-run cost grows by the fold-in's milliseconds, against the walk's seconds."""
+        fake, blocks = GarbageGc(), [1000]
+        c = self._controller(fake, blocks)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        fake.young, fake.held = 700, 5000                 # since the freeze: 700 young dead objects, 5000 dead ones the freeze holds
+        blocks[0] = 1300
+        fake.calls.clear()
+        self.assertEqual(c.tick(inserts=9), "load", "a fold-in reads the heap: a quarter grown")
+        self.assertEqual(fake.calls, ["collect", "freeze"])
+        self.assertEqual(fake.young, 0, "the fold-in's collect took the young garbage")
+        fake.young = 300                                  # more young garbage before the backstop tick
+        fake.calls.clear()
+        before = c.collections
+        self.assertEqual(c.tick(inserts=9), "backstop")
+        self.assertEqual(fake.calls, ["collect", "unfreeze", "collect", "freeze"],
+                         "staged: the cheap collect with the freeze in place, then the unfreeze, the walk and the re-freeze")
+        self.assertEqual(c.last_reclaim_collected, 5000, "the walk's count is the frozen garbage alone, not 5300")
+        self.assertEqual(c.reclaim_collected, 5000)
+        self.assertEqual(c.collections - before, 2, "two collects, like a full release: the organic arithmetic counts both")
+        self.assertEqual((fake.young, fake.held), (0, 0))
+
+    def test_a_reclaims_whole_run_is_held_on_perf_until_the_next_reclaim(self):
+        """Review 2026-11-14 (medium): the growth-owed backstop is a full-heap walk with the GIL held, on by default, and its
+        pause at a loaded kernel's size (tens of millions of tracked objects) has never been measured: the only reading was
+        the backstop's stderr line and `lastReconcileMs`, which the next fold-in, minutes later, overwrites, and which times
+        the collections alone, not the re-freeze or the frozen count read that follow them. `lastReclaimMs` is the last
+        reclaim's WHOLE run, from its first collect to the frozen count read, held until the next reclaim, and `reclaimMsMax`
+        the largest since the process started, so the measurement can be read from /perf at any time after the first walk."""
+        clock = [0.0]
+        def now():
+            return clock[0]
+
+        class TimedGc(GarbageGc):
+            """A collector whose calls each take time: a collect 100 ms (the unfrozen walk 2 s), the frozen count read 400 ms."""
+            def collect(self, *a):
+                clock[0] += 2.0 if not self.is_frozen else 0.1
+                return super().collect(*a)
+            def get_freeze_count(self):
+                clock[0] += 0.4
+                return 30_000_000
+
+        fake, blocks = TimedGc(), [1000]
+        c = gf.GcFreeze(enabled=True, load_trees=8, backstop_foldins=1000, gc=fake, clock=now, heap_blocks=lambda: blocks[0],
+                        backstop_growth=0.25, backstop_growth_floor=0)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        self.assertEqual((c.last_reclaim_ms, c.reclaim_ms_max), (0.0, 0.0), "no reclaim yet: nothing measured")
+        blocks[0] = 1300
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertEqual(c.tick(inserts=9), "backstop")
+        self.assertAlmostEqual(c.last_ms, 2100.0, places=3, msg="lastReconcileMs times the collections alone (the cheap collect and the walk)")
+        self.assertAlmostEqual(c.last_reclaim_ms, 2500.0, places=3,
+                               msg="the whole run: the collections, the re-freeze and the 400 ms frozen count read, the stall a thread waiting on the GIL sees")
+        self.assertEqual(c.reclaim_ms_max, c.last_reclaim_ms)
+        blocks[0] = 1310
+        self.assertEqual(c.tick(inserts=17), "load")
+        self.assertAlmostEqual(c.last_ms, 100.0, places=3, msg="the fold-in overwrote lastReconcileMs, as before")
+        self.assertAlmostEqual(c.last_reclaim_ms, 2500.0, places=3, msg="and left the reclaim's figure standing")
+        fake.held = 10                                    # a second, cheaper walk: the max holds the first
+        def quick_collect(*a, _orig=TimedGc.collect):
+            clock[0] += 0.5 if not fake.is_frozen else 0.1
+            return GarbageGc.collect(fake, *a)
+        fake.collect = quick_collect
+        blocks[0] = 1700
+        self.assertEqual(c.tick(inserts=25), "load")
+        self.assertEqual(c.tick(inserts=25), "backstop")
+        self.assertAlmostEqual(c.last_reclaim_ms, 1000.0, places=3, msg="the last reclaim's own run")
+        self.assertAlmostEqual(c.reclaim_ms_max, 2500.0, places=3, msg="the largest stands")
+        p = c.perf()
+        self.assertEqual((p["lastReclaimMs"], p["reclaimMsMax"]), (1000.0, 2500.0), "both on /perf, beside lastReconcileMs")
+        self.assertEqual(p["lastReconcileMs"], 600.0)
+
+    def test_the_kernel_wrapper_writes_one_line_per_backstop_naming_what_it_found(self):
+        """The kernel's wrapper writes one stderr line per backstop (a rare frozen-heap walk) with what the unfrozen collection
+        found and the frozen count after it, and none on a load tick, as it does for a release."""
+        import contextlib, io
+        km = load_source("romp_kernel_gcf_bs", os.path.join(BIN, "romp-kernel"))
+        saved_gf, saved_stats = km._GC_FREEZE, km.em.record_cache_stats
+
+        class _Controller:
+            def __init__(self, kind):
+                self.enabled = True; self._kind = kind; self.last_ms = 2345.6; self.last_reclaim_ms = 2987.1
+                self.last_reclaim_collected = 123456; self.frozen_at_reclaim = 7890123; self.heap_blocks = 45678901
+                self.last_release_sids = []; self.last_release_survivors = 0; self.last_kept_sids = []
+            def tick(self, inserts):
+                return self._kind
+        def _line(controller):
+            km._GC_FREEZE = controller
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                km._gc_freeze_tick(True, False)
+            return err.getvalue()
+        try:
+            km.em.record_cache_stats = lambda: {"inserts": 3}
+            out = _line(_Controller("backstop"))
+            self.assertEqual(out.count("\n"), 1, "exactly one line per backstop: %r" % out)
+            for needle in ("backstop", "123456", "7890123", "45678901", "2345.6", "2987.1"):
+                self.assertIn(needle, out, "the backstop line names its finds and its whole run: %s in %r" % (needle, out))
+            self.assertEqual(_line(_Controller("load")), "", "a load tick writes no backstop line")
+        finally:
+            km._GC_FREEZE = saved_gf
+            km.em.record_cache_stats = saved_stats
+
+
+class BackstopGrowthKnob(unittest.TestCase):
+    """2026-11-14: the growth-owed backstop is a new multi-second full collection trigger on a production kernel, so like
+    every other freeze threshold it has a switch of its own: ROMP_GC_FREEZE_BACKSTOP_GROWTH, the fraction of the heap reading
+    at the last walk that owes the next one. Parsed like ROMP_GC_FREEZE_LOAD_TREES (never a bare float() at the kernel's
+    import): 0 turns the growth bound OFF and leaves the fold-in count as the only backstop, a value above 1 is clamped to 1
+    (a heap that doubled is bound enough), and a value that is not a finite number, or is negative, falls back to the default
+    and comes back as `bad_raw` for the kernel to say once and count."""
+
+    def test_the_knob_parses_like_the_load_trees_knob(self):
+        self.assertEqual(gf.backstop_growth_from_env({}), (gf.DEFAULT_BACKSTOP_GROWTH, None), "absent: the default, no complaint")
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "  "}), (gf.DEFAULT_BACKSTOP_GROWTH, None),
+                         "whitespace: the default")
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "0"}), (0.0, None), "0 is the off switch")
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "0.5"}), (0.5, None))
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": " 1 "}), (1.0, None), "the ceiling, stripped")
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "3"}), (1.0, None), "above the ceiling: clamped")
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "abc"}), (gf.DEFAULT_BACKSTOP_GROWTH, "abc"),
+                         "not a number: falls back and is named")
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "-1"}), (gf.DEFAULT_BACKSTOP_GROWTH, "-1"),
+                         "a negative fraction is no fraction: falls back and is named")
+        for raw in ("nan", "inf", "-inf"):
+            with self.subTest(raw=raw):
+                self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": raw}), (gf.DEFAULT_BACKSTOP_GROWTH, raw),
+                                 "a non-finite float is a bad value, never a bound of nan or a clamp of inf")
+        self.assertEqual(gf.DEFAULT_BACKSTOP_GROWTH, 0.25, "the default the fallbacks above return")
+
+    def test_zero_turns_the_growth_bound_off_and_leaves_the_fold_in_count(self):
+        """A controller built from the parsed 0 never owes a backstop to growth, at any reading: the heap can grow tenfold
+        between fold-ins and the idle tick folds in or does nothing, until the fold-in count alone (the old bound) is reached."""
+        fraction, bad = gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "0"})
+        self.assertEqual((fraction, bad), (0.0, None))
+        fake, blocks = FakeGc(), [1000]
+        c = gf.GcFreeze(enabled=True, load_trees=8, backstop_foldins=4, gc=fake, clock=lambda: 0.0,
+                        heap_blocks=lambda: blocks[0], backstop_growth=fraction, backstop_growth_floor=0)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        inserts = 1
+        for grown in (2000, 5000, 10000):            # three fold-ins, under the count bound of four, over a heap grown tenfold
+            blocks[0] = grown
+            inserts += 8
+            self.assertEqual(c.tick(inserts=inserts), "load", "a material load folds in; growth owes nothing at %d" % grown)
+            self.assertFalse(c.growth_due(1), "growth_due is False at any reading with the fraction at 0 (reading %d)" % grown)
+            self.assertFalse(c.growth_due(2))
+            self.assertIsNone(c.tick(inserts=inserts), "and an idle tick with nothing loaded runs nothing")
+            self.assertIsNone(c.tick_busy(inserts), "a busy one neither")
+        inserts += 8
+        self.assertEqual(c.tick(inserts=inserts), "load", "the fourth fold-in reaches the count bound")
+        self.assertEqual(c.tick(inserts=inserts), "backstop", "and the fold-in count (4) is the one bound left")
+        self.assertEqual(c.perf()["backstopGrowth"], 0.0, "/perf shows the bound off")
+
+    def test_the_default_controller_takes_the_parsed_fraction(self):
+        fraction, _ = gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "0.5"})
+        fake, blocks = FakeGc(), [1000]
+        c = gf.GcFreeze(enabled=True, gc=fake, clock=lambda: 0.0, heap_blocks=lambda: blocks[0],
+                        backstop_growth=fraction, backstop_growth_floor=0)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        blocks[0] = 1400
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertFalse(c.growth_due(1), "40% is under a half")
+        blocks[0] = 1500
+        self.assertEqual(c.tick(inserts=17), "load")
+        self.assertTrue(c.growth_due(1), "a half owes the walk")
+        self.assertEqual(c.tick(inserts=17), "backstop")

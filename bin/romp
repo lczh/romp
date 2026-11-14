@@ -847,6 +847,11 @@ print("romp perf: %.1f s window, kernel up %s, pid %d, romp-perf log %s"
 print("process   rss %d MB   threads %d   cpu %.1f%% of one core (pusher %.1f%%, judge %.1f%%, other %.1f%%)"
       % (g(b, "process", "rss_kb") // 1024, g(b, "process", "threads"), cpu_proc, cpu_pusher, cpu_judge,
          cpu_proc - cpu_pusher - cpu_judge))
+_malloc = (b.get("process") or {}).get("malloc") if isinstance(b.get("process"), dict) else None
+if isinstance(_malloc, dict):              # glibc's books (2026-11-14): a kernel from before them, or one off glibc, has no line
+    print("memory    rss %d MB   glibc in use %d MB   glibc free %d MB   other %d MB (interpreter arenas, code, stacks)"
+          % (g(b, "process", "rss_kb") // 1024, g(_malloc, "inUse") // 1048576, g(_malloc, "free") // 1048576,
+             int(g(_malloc, "other") / 1048576)))   # signed: a difference that reads under 0 while glibc counts untouched pages
 print("pusher    %.2f cycles/s   %.2f wakes/s (event %d, backstop %d)   busy %.0f%% of wall"
       % (cyc / dt, wakes / dt, ev, bs, 100.0 * cyc_ms / (dt * 1000.0)))
 print("cycle ms  p50 %.0f   p90 %.0f   max %.0f (over the last %d cycles)   last %.0f"

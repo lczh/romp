@@ -59,7 +59,8 @@ setup() {
 JSON
     cat > "$SNAP_B" <<'JSON'
 {"now": 1010.0, "since": 900.0, "uptime_s": 110.0, "log": false,
- "process": {"rss_kb": 419840, "threads": 41, "cpu_s": 60.5, "pid": 4242},
+ "process": {"rss_kb": 419840, "threads": 41, "cpu_s": 60.5, "pid": 4242,
+             "malloc": {"arena": 262144000, "mmapped": 104857600, "inUse": 314572800, "free": 41943040, "keepcost": 1048576, "other": 62914560, "readMs": 2.5}},
  "pusher": {"cycles": 120, "wakes": 360, "wakes_event": 300, "wakes_backstop": 60, "cycle_ms_sum": 36000.0,
             "cycle_ms_max": 900.0, "cycle_ms_last": 250.0, "cycle_cpu_ms_sum": 10300.0,
             "cycle_ms_p50": 190.0, "cycle_ms_p90": 420.0, "cycle_ms_ring_max": 700.0, "ring_n": 120},
@@ -131,6 +132,26 @@ teardown() { rm -rf "$TEST_DIR"; }
     [[ "$output" == *"busy 60% of wall"* ]]              # 6 s of cycle time in a 10 s window
     [[ "$output" == *"rss 410 MB"* ]]
     [[ "$output" == *"pid 4242"* ]]
+}
+
+@test "romp perf: the memory line splits the resident size into glibc in use, glibc free and the rest" {
+    # B's process.malloc (2026-11-14): 410 MB resident, 300 MB in use through malloc, 40 MB glibc keeps free,
+    # 60 MB outside glibc's two totals (the interpreter's arenas, code, stacks)
+    run "$ROMP_SCRIPT" perf --interval 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"memory    rss 410 MB   glibc in use 300 MB   glibc free 40 MB   other 60 MB"* ]]
+}
+
+@test "romp perf: a kernel without the allocator's books prints no memory line" {
+    # a kernel from before process.malloc, or one off glibc (the key null): the line is left out, nothing else changes
+    python3 - "$SNAP_B" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["process"]["malloc"] = None; json.dump(d, open(p, "w"))
+PY
+    run "$ROMP_SCRIPT" perf --interval 0
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"memory    "* ]]
+    [[ "$output" == *"rss 410 MB"* ]]
 }
 
 @test "romp perf: the process line splits the window's CPU between the pusher, the judge and the rest" {
