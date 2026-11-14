@@ -196,7 +196,10 @@ def _malloc_stats(rss_kb):
     documents over the mmap threshold), `inUse` (uordblks plus hblkhd: what the process holds through malloc), `free`
     (fordblks: chunks glibc keeps for reuse, the slack MALLOC_ARENA_MAX=2 bounds), `keepcost` (what malloc_trim would return
     from the main arena's top) and `other`, the resident size less arena and mmapped: the interpreter's small-object
-    arenas, code, stacks and libraries (the lab identity held within 10 MB). rss - inUse - other is then glibc's retained
+    arenas, code, stacks and libraries (the lab identity held within 10 MB). It is a DIFFERENCE of a resident figure and
+    two virtual ones, not a share of the resident size: arena and mmapped count pages the process has not touched (an
+    sbrk'd top, a calloc'd mmapped chunk, a 32 MiB bytes object just made), which the resident size does not, so it can read
+    under 0 while such pages stand, and nothing clamps it (review 2026-11-14). rss - inUse - other is then glibc's retained
     slack, exactly, on every plain read. `readMs` is the call's own wall time: mallinfo2 walks every arena's free bins under
     the arena locks (18 ms at 200k free chunks measured), so it is read on the plain GET alone, never on the pusher's cycle
     or the restart ledger's samplers (_process_stats_perf, the snapshot's, takes it). Raises where there is no glibc mallinfo2 (off

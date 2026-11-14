@@ -3092,7 +3092,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   (chunks glibc keeps for reuse: the slack `MALLOC_ARENA_MAX=2` bounds),
   `keepcost` (what `malloc_trim` would return from the main arena's top),
   `other` (the resident size less `arena` and `mmapped`: the interpreter's
-  small-object arenas, code, stacks and libraries) and `readMs`, the read's own
+  small-object arenas, code, stacks and libraries; a difference of a resident
+  figure and two virtual ones, so it reads under 0 while glibc counts pages the
+  process has not touched, an sbrk'd top or a fresh mmapped chunk, and nothing
+  clamps it) and `readMs`, the read's own
   cost. `rss_kb` less `inUse` less `other` is glibc's retained slack, exactly,
   on every plain read, so a resident size past everything `heap` weighs can be
   split between the allocator and a holder no gauge weighs. The read walks

@@ -604,8 +604,8 @@ class MallocBooks(unittest.TestCase):
         self.assertGreater(m["arena"], 0, "a running interpreter has a main arena")
         self.assertLessEqual(m["inUse"], m["arena"] + m["mmapped"], "what is in use sits inside what glibc holds")
         self.assertGreaterEqual(m["free"], 0)
-        self.assertGreaterEqual(m["other"], 0, "the resident size covers glibc's totals; the rest is the interpreter's and the binaries'")
-        self.assertEqual(m["other"], snap["process"]["rss_kb"] * 1024 - m["arena"] - m["mmapped"], "other is the identity, exactly")
+        self.assertEqual(m["other"], snap["process"]["rss_kb"] * 1024 - m["arena"] - m["mmapped"],
+                         "other is the identity, exactly (a difference, so it may read under 0: no sign is asserted)")
         held = bytes(32 << 20)                               # a 32 MiB block: over glibc's mmap threshold, so it lands in `mmapped`
         try:
             m2 = km._process_stats_perf()["malloc"]
@@ -679,6 +679,31 @@ class MallocBooks(unittest.TestCase):
         self.assertEqual(set(first), set(second), "and both reads answer the same books")
         with mock.patch.object(ctypes, "CDLL", side_effect=AssertionError("a third read loaded libc again")):
             km._malloc_stats(1000)
+
+    def test_other_is_a_difference_that_reads_under_zero_while_glibc_counts_untouched_pages(self):
+        """Review 2026-11-14 (low): `other` = rss - arena - mmapped subtracts two virtual figures from a resident one. glibc's
+        arena and mmapped count pages the process has not touched (an sbrk'd top, a calloc'd mmapped chunk), which the
+        resident size does not, so the difference goes under 0 while such pages stand; it is reported as it is, never
+        clamped, and the docstring, the reference and the printer say so rather than asserting a sign."""
+        import ctypes
+        self._clear_handle()
+
+        class Books:
+            arena, hblkhd, uordblks, fordblks, keepcost = 300 << 20, 200 << 20, 400 << 20, 100 << 20, 0
+
+        fn = mock.Mock(return_value=Books())
+        fn.restype = ctypes.Structure
+        km._MALLINFO2_FN.append(fn)
+        with mock.patch.object(sys, "platform", "linux"):
+            m = km._malloc_stats(rss_kb=(440 << 20) // 1024)        # 440 MiB resident against 500 MiB glibc counts
+        self.assertEqual(m["other"], -(60 << 20), "the identity stands under 0: the untouched pages glibc counts and the resident size does not")
+        self.assertEqual(m["inUse"], 600 << 20, "uordblks plus hblkhd")
+        self.assertEqual(m["free"], 100 << 20)
+        src = inspect.getsource(km._malloc_stats)
+        self.assertIn("under 0", src, "the docstring says the difference can read under 0")
+        with open(os.path.join(os.path.dirname(HERE), "docs", "reference.md")) as fh:
+            ref = fh.read()
+        self.assertIn("reads under 0", ref, "and the reference says so beside `other`")
 
     def test_off_linux_the_key_is_none_without_a_libc_load(self):
         import ctypes
