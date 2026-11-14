@@ -1583,7 +1583,8 @@ def _gc_freeze_tick(idle, first):
     elif kind == "backstop":   # 2026-11-14: a frozen-heap walk the fold-in count or the heap's growth brought: one line naming what it found
         try:
             sys.stderr.write("gc-freeze: a backstop walked the frozen heap in %.1f ms and collected %d unreachable objects the freeze had "
-                             "held out of the collector's reach (%s frozen after the re-freeze, %s small-object blocks live)\n"
+                             "held out of the collector's reach, the young garbage taken before the walk (%s frozen after the re-freeze, "
+                             "%s small-object blocks live)\n"
                              % (getattr(_GC_FREEZE, "last_ms", 0.0), int(getattr(_GC_FREEZE, "last_reclaim_collected", 0) or 0),
                                 getattr(_GC_FREEZE, "frozen_at_reclaim", None), getattr(_GC_FREEZE, "heap_blocks", None)))
         except Exception:

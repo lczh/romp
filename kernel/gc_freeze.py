@@ -56,8 +56,9 @@ warm-up never walks), the next idle tick runs the backstop; a busy cycle takes i
 The walk's cost is linear in the frozen heap and it comes once per quarter of growth, so, like CPython's rule, it costs a
 constant per allocated block whether the growth was garbage or a cache filling; a cache filling buys one wasted walk per
 quarter, never more. Every reclaim records what its unfrozen collection found (`last_reclaim_collected`: the garbage the freeze
-had locked away, exactly) and the frozen count after its re-freeze (`frozen_at_reclaim`, a walk read only where a walk was
-just paid for), so /perf's plain read says how much the freeze held and holds without `?walk=1`. A busy
+had locked away; a backstop, like a release, runs a cheap collect with the freeze in place first, so the young garbage since the
+last collection is taken before the walk and not counted in it) and the frozen count after its re-freeze (`frozen_at_reclaim`, a
+walk read only where a walk was just paid for), so /perf's plain read says how much the freeze held and holds without `?walk=1`. A busy
 cycle judges the ended sessions only before the first freeze, as the idle tick does: the initial freeze's
 collect takes their pre-freeze garbage, so the owed refs are dropped at no cost. Once a freeze is held, a
 busy cycle never judges them: their release waits for the idle tick. The record cache's
@@ -244,7 +245,8 @@ class GcFreeze:
         self._heap_blocks = heap_blocks   # the heap reading the growth bound compares (sys.getallocatedblocks; a test injects a counter)
         self.heap_blocks = None           # the reading after the last run's freeze (None until a run, or when the reader raised)
         self.heap_blocks_at_walk = None   # the reading after the last frozen-heap walk (the initial freeze, a full release, a backstop)
-        self.last_reclaim_collected = 0   # what the last reclaim's unfrozen collection found: the garbage the freeze had locked away
+        self.last_reclaim_collected = 0   # what the last reclaim's unfrozen collection found: the garbage the freeze had locked away (the
+        #                                   young garbage since the last collection taken by the staged cheap collect first, not counted here)
         self.reclaim_collected = 0        # the same, summed over every reclaim
         self.frozen_at_reclaim = None     # gc.get_freeze_count() after the last reclaim's re-freeze (the walk was paid for anyway)
         self.frozen = False
@@ -365,7 +367,10 @@ class GcFreeze:
         review): a plain collect with the freeze IN PLACE first (cheap, it takes a cycle allocated since the last freeze),
         then the owed refs are re-read; only when one survived does it unfreeze and walk the frozen heap (the up-to-full
         pause). A release the cheap walk took whole counts as a LOAD pass, so the backstop's bound does not stretch. A
-        BACKSTOP is blind (no owed refs) and unfreezes straight away. After the collect and the re-freeze, an owed ref still
+        BACKSTOP is blind (no owed refs) and always unfreezes, after the same cheap collect with the freeze in place (2026-11-14:
+        the fold-in this tick would otherwise have run; without it the walk's count was the frozen garbage plus the young garbage
+        since the last collection, an upper bound where `last_reclaim_collected` is documented as what the freeze held). A
+        backstop therefore runs two collections, as a full release does. After the collect and the re-freeze, an owed ref still
         alive is kept by a LIVE ROOT, not a cycle: a wasted pause, counted as a survivor and dropped (never re-registered).
         The re-read runs after the re-freeze, which is harmless: a freeze collects nothing, so a ref alive after the collect
         is alive after the freeze too."""
@@ -379,8 +384,9 @@ class GcFreeze:
                 reclaimed = True
             # else the cheap collect took the released cycle whole: no full pause, counted as a load pass below
         elif kind == "backstop":
+            self._gc.collect(); self.collections += 1    # staged too (2026-11-14): the fold-in this tick would have run takes the young garbage first,
             self._gc.unfreeze()                      # blind reclaim (the fold-in count or the heap's growth): nothing owed to re-read, walk everything
-            found = self._gc.collect(); self.collections += 1
+            found = self._gc.collect(); self.collections += 1   # so this count is the garbage the freeze held, not that plus the young
             reclaimed = True
         else:
             self._gc.collect(); self.collections += 1    # initial / load fold-in: walk only the unfrozen
@@ -401,7 +407,8 @@ class GcFreeze:
             self.last_kind = kind
             self.reclaims += 1
             self._foldins = 0
-            self.last_reclaim_collected = int(found or 0)   # the unfrozen collection's count: the garbage the freeze had locked away
+            self.last_reclaim_collected = int(found or 0)   # the unfrozen collection's count: the garbage the freeze had locked away, the
+            #                                                  young garbage gone to the staged cheap collect before it
             self.reclaim_collected += self.last_reclaim_collected
             self.frozen_at_reclaim = self._read_frozen()
             self.heap_blocks_at_walk = self.heap_blocks     # the growth bound measures from this walk

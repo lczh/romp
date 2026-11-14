@@ -3298,11 +3298,15 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   warm-up never walks), the next idle cycle runs the backstop; a busy cycle takes
   it at a half. The walk comes once per quarter of growth whether the growth was
   garbage or a cache filling, so it costs a constant per allocated block, as
-  CPython's rule does. A reclaim records what its unfrozen collection found,
-  `lastReclaimCollected` (the garbage the freeze had held, exactly) and
-  `reclaimCollected` (summed), and `frozenAtReclaim`, `gc.get_freeze_count()`
-  after its re-freeze, read only there, where the walk was just paid for; each
-  backstop also writes one stderr line with those figures. A busy cycle judges the ended sessions only
+  CPython's rule does. A backstop is staged as a release is: a cheap collect
+  with the freeze in place first (the fold-in that cycle would have run, taking
+  the young garbage since the last collection), then the unfreeze and the walk,
+  so a reclaim's count is what the freeze held and not that plus the young. A
+  reclaim records what its unfrozen collection found, `lastReclaimCollected`
+  (the garbage the freeze had held) and `reclaimCollected` (summed), and
+  `frozenAtReclaim`, `gc.get_freeze_count()` after its re-freeze, read only
+  there, where the walk was just paid for; each backstop also writes one stderr
+  line with those figures. A busy cycle judges the ended sessions only
   before the first freeze, as an idle one does: the initial freeze's collect
   takes their pre-freeze garbage, so the owed ones are dropped at no cost. Once
   a freeze is held, a busy cycle never judges an ended session. The
@@ -3316,11 +3320,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   stock one stands), `busyRuns` (of the
   runs, those a busy cycle made: a first freeze, load fold-ins and a busy
   backstop), `freezes` and
-  `reclaims` (a freeze ran one collection and a reclaim ran one, EXCEPT a full
-  release that unfroze runs TWO generation-2 collections for its one reclaim, so
-  `reclaims` alone cannot derive the organic count), `collections` (every
+  `reclaims` (a freeze ran one collection, and a reclaim that unfroze, a full
+  release or a backstop, ran TWO generation-2 collections for its one reclaim,
+  so `reclaims` alone cannot derive the organic count), `collections` (every
   `gc.collect()` the run step issued, so the organic full collections are
-  `gen."2".collections` less `collections`, an EQUALITY: a full release's two
+  `gen."2".collections` less `collections`, an EQUALITY: a reclaim's two
   collects are both counted here), `endedPending` (ended sessions
   registered by weakref and not yet judged, awaiting their worker thread to
   finish), `lastReconcileMs` and
