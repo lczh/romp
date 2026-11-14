@@ -3084,7 +3084,23 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   seconds since the process started, and whether the `romp-perf` log is on.
 - `process`: `rss_kb` (resident set size in KB: the current size on Linux,
   read from `/proc`; the peak, `ru_maxrss`, on macOS, which has no `/proc`),
-  `threads`, `cpu_s`, `pid`.
+  `threads`, `cpu_s`, `pid`, and `malloc`, glibc's own books for the process
+  (2026-11-14; `mallinfo2`, glibc 2.33 and later): `arena` (the main heap and
+  every further arena, in use and free), `mmapped` (chunks served by `mmap`
+  outright, where a record list or a decoded document over the mmap threshold
+  lands), `inUse` (what the process holds through malloc, both kinds), `free`
+  (chunks glibc keeps for reuse: the slack `MALLOC_ARENA_MAX=2` bounds),
+  `keepcost` (what `malloc_trim` would return from the main arena's top),
+  `other` (the resident size less `arena` and `mmapped`: the interpreter's
+  small-object arenas, code, stacks and libraries) and `readMs`, the read's own
+  cost. `rss_kb` less `inUse` less `other` is glibc's retained slack, exactly,
+  on every plain read, so a resident size past everything `heap` weighs can be
+  split between the allocator and a holder no gauge weighs. The read walks
+  every arena's free bins under their locks (about 18 ms at 200k free chunks),
+  so it is taken on the plain GET alone, never by the pusher or the restart
+  ledger's samplers; a runtime without `mallinfo2` (macOS, musl, an older
+  glibc) reads `null`, said once on stderr. `romp perf` prints `rss_kb`,
+  `inUse`, `free` and `other` on its memory line.
 - `heap`: where that resident size sits at the moment of the read, so a
   large `process.rss_kb` can be attributed live, without a restart or a
   debugger (the lag investigation, 2026-09-15, had to attribute a 5-6 GiB

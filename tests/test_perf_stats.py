@@ -573,6 +573,85 @@ class ProcessStatsFallback(unittest.TestCase):
             self.assertGreater(km._process_stats()["rss_kb"], 0, "VmRSS read from /proc")
 
 
+class MallocBooks(unittest.TestCase):
+    """2026-11-14: the /perf snapshot carried the resident size and the heap block's gauges, and no allocator gauge at all,
+    so a process whose resident size ran 3.7 GB past everything the heap block weighed could not say where the rest sat:
+    glibc's retained free chunks, the interpreter's own arenas, or a holder no gauge weighs. process.malloc reads glibc's
+    books (mallinfo2, glibc 2.33 and later, through ctypes): `arena` (the main heap and every mmapped arena), `mmapped`
+    (chunks served by mmap outright), `inUse` (allocated bytes, both kinds), `free` (chunks glibc holds for reuse),
+    `keepcost` (what malloc_trim would return from the top of the main arena), `other` (the resident size less glibc's two
+    totals: the interpreter's small-object arenas, code, stacks and libraries) and `readMs` (the walk's own cost, since
+    mallinfo2 walks every arena's bins under their locks). It is read on the plain GET alone, never by the restart ledger's
+    samplers, which take the same four fields as before, and a runtime without mallinfo2 (musl, macOS, an older glibc)
+    reads None, said once on stderr like a heap gauge the process cannot read."""
+
+    KEYS = ("arena", "mmapped", "inUse", "free", "keepcost", "other", "readMs")
+
+    def test_the_process_block_carries_the_allocators_books(self):
+        snap = km._PERF_STATS.snapshot()
+        self.assertIn("malloc", snap["process"], "the snapshot's process block carries the allocator's books (or None)")
+        m = snap["process"]["malloc"]
+        if not sys.platform.startswith("linux"):
+            self.assertIsNone(m, "not glibc: the key is None")
+            return
+        if m is None:
+            self.skipTest("this Linux runtime has no glibc mallinfo2 (musl, or glibc before 2.33)")
+        self.assertEqual(set(m), set(self.KEYS), sorted(m))
+        for k in self.KEYS[:-1]:
+            self.assertIsInstance(m[k], int, k)
+        self.assertIsInstance(m["readMs"], float)
+        self.assertGreaterEqual(m["readMs"], 0.0)
+        self.assertGreater(m["arena"], 0, "a running interpreter has a main arena")
+        self.assertLessEqual(m["inUse"], m["arena"] + m["mmapped"], "what is in use sits inside what glibc holds")
+        self.assertGreaterEqual(m["free"], 0)
+        self.assertGreaterEqual(m["other"], 0, "the resident size covers glibc's totals; the rest is the interpreter's and the binaries'")
+        self.assertEqual(m["other"], snap["process"]["rss_kb"] * 1024 - m["arena"] - m["mmapped"], "other is the identity, exactly")
+        held = bytes(32 << 20)                               # a 32 MiB block: over glibc's mmap threshold, so it lands in `mmapped`
+        try:
+            m2 = km._process_stats(malloc=True)["malloc"]
+            self.assertGreaterEqual(m2["mmapped"] - m["mmapped"], 30 << 20, "a held 32 MiB bytes object shows in mmapped")
+            self.assertGreaterEqual(m2["inUse"] - m["inUse"], 30 << 20, "and in what is in use")
+        finally:
+            del held
+        self.assertEqual(set(km._process_stats()), {"rss_kb", "threads", "cpu_s", "pid"},
+                         "the samplers' plain read takes the four fields and pays for no arena walk")
+
+    def test_without_mallinfo2_the_key_is_none_and_said_once(self):
+        """A libc without mallinfo2 (the ctypes handle lacks the symbol) answers None under the key, and the first failure
+        says one line on stderr; the second snapshot says nothing more (the heap gauges' rule: /perf is polled)."""
+        import ctypes
+
+        class _NoMallinfo2:
+            def __getattr__(self, name):
+                raise AttributeError("undefined symbol: %s" % name)
+
+        km._PROCESS_SAID.discard("malloc")
+        self.addCleanup(km._PROCESS_SAID.discard, "malloc")
+        err = io.StringIO()
+        with mock.patch.object(ctypes, "CDLL", return_value=_NoMallinfo2()), mock.patch.object(sys, "platform", "linux"), \
+                redirect_stderr(err):
+            first = km._process_stats(malloc=True)
+            second = km._process_stats(malloc=True)
+        self.assertIn("malloc", first)
+        self.assertIsNone(first["malloc"], "no mallinfo2: None, never a crash or a missing key")
+        self.assertIsNone(second["malloc"])
+        lines = [ln for ln in err.getvalue().splitlines() if "perf: process.malloc unavailable" in ln]
+        self.assertEqual(len(lines), 1, "said once across two snapshots: %r" % err.getvalue())
+        for k in ("rss_kb", "threads", "cpu_s", "pid"):
+            self.assertIn(k, first, "the rest of the block is unharmed")
+
+    def test_off_linux_the_key_is_none_without_a_libc_load(self):
+        import ctypes
+        km._PROCESS_SAID.discard("malloc")
+        self.addCleanup(km._PROCESS_SAID.discard, "malloc")
+        err = io.StringIO()
+        with mock.patch.object(ctypes, "CDLL", side_effect=AssertionError("libc.so.6 loaded off Linux")), \
+                mock.patch.object(sys, "platform", "darwin"), redirect_stderr(err):
+            st = km._process_stats(malloc=True)
+        self.assertIsNone(st["malloc"])
+        self.assertEqual(len([ln for ln in err.getvalue().splitlines() if "process.malloc" in ln]), 1, err.getvalue())
+
+
 class WakeCounting(unittest.TestCase):
     """_pusher_wake is a threading.Event whose set() counts: every existing call site — including the
     bound-method callbacks the backends hold — counts a wake without being touched."""

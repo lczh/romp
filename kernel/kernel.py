@@ -181,10 +181,47 @@ def _set_perf_log(on):
     return _PERF
 
 
-def _process_stats():
+_PROCESS_SAID = set()   # the process block's gauges whose read failed and said so once (the heap block's _HEAP_SAID, for this block)
+
+
+def _malloc_stats(rss_kb):
+    """glibc's books for the /perf snapshot's process.malloc (2026-11-14): the snapshot carried the resident size and the
+    heap block's gauges and no allocator gauge at all, so a resident size gigabytes past everything the heap block weighed
+    could not be split between glibc's retained free chunks, the interpreter's own arenas and a holder no gauge weighs.
+    mallinfo2 (glibc 2.33 and later; a struct of ten size_t, read through ctypes) gives `arena` (the main heap and every
+    mmapped arena, in use and free), `mmapped` (hblkhd: chunks served by mmap outright, the record lists and decoded
+    documents over the mmap threshold), `inUse` (uordblks plus hblkhd: what the process holds through malloc), `free`
+    (fordblks: chunks glibc keeps for reuse, the slack MALLOC_ARENA_MAX=2 bounds), `keepcost` (what malloc_trim would return
+    from the main arena's top) and `other`, the resident size less arena and mmapped: the interpreter's small-object
+    arenas, code, stacks and libraries (the lab identity held within 10 MB). rss - inUse - other is then glibc's retained
+    slack, exactly, on every plain read. `readMs` is the call's own wall time: mallinfo2 walks every arena's free bins under
+    the arena locks (18 ms at 200k free chunks measured), so it is read on the plain GET alone, never on the pusher's cycle
+    or the restart ledger's samplers (_process_stats takes it on request). Raises where there is no glibc mallinfo2 (off
+    Linux, musl, an older glibc); the caller reads it through _heap_read, which answers None and says so once."""
+    if not sys.platform.startswith("linux"):
+        raise OSError("glibc mallinfo2 is read on Linux only")
+    import ctypes
+
+    class MallInfo2(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_size_t) for name in ("arena", "ordblks", "smblks", "hblks", "hblkhd", "usmblks",
+                                                          "fsmblks", "uordblks", "fordblks", "keepcost")]
+    fn = ctypes.CDLL("libc.so.6").mallinfo2       # AttributeError on a libc without the symbol: said once by the caller
+    fn.restype = MallInfo2
+    fn.argtypes = ()
+    t0 = time.perf_counter()
+    mi = fn()
+    read_ms = (time.perf_counter() - t0) * 1000.0
+    arena, mmapped = int(mi.arena), int(mi.hblkhd)
+    return {"arena": arena, "mmapped": mmapped, "inUse": int(mi.uordblks) + mmapped, "free": int(mi.fordblks),
+            "keepcost": int(mi.keepcost), "other": int(rss_kb) * 1024 - arena - mmapped, "readMs": round(read_ms, 3)}
+
+
+def _process_stats(malloc=False):
     """rss_kb, thread count, CPU seconds and pid for the /perf snapshot. VmRSS from /proc is the CURRENT
     resident size; where /proc is absent (macOS) ru_maxrss is the PEAK, in bytes there, so it is scaled
-    to KB and the field is still called rss_kb."""
+    to KB and the field is still called rss_kb. With `malloc` the block also carries glibc's books under
+    `malloc` (_malloc_stats; None where the runtime has none, said once): the snapshot asks for it, the
+    restart ledger's samplers do not, so they pay for no arena walk."""
     rss = 0
     try:
         with open("/proc/self/status") as fh:
@@ -199,8 +236,11 @@ def _process_stats():
             rss = int(r // 1024) if sys.platform == "darwin" else int(r)
         except Exception:
             rss = 0
-    return {"rss_kb": rss, "threads": threading.active_count(), "cpu_s": time.process_time(),
-            "pid": os.getpid()}
+    out = {"rss_kb": rss, "threads": threading.active_count(), "cpu_s": time.process_time(),
+           "pid": os.getpid()}
+    if malloc:
+        out["malloc"] = _heap_read("malloc", lambda: _malloc_stats(rss), block="process", said=_PROCESS_SAID)
+    return out
 
 
 _HEAP_SAID = set()   # the heap gauges whose read failed and said so on stderr, once each: a source without that container (an
@@ -1404,7 +1444,7 @@ class _PerfStats:
         #                                                                              on a runner nobody can log into), on demand
         #                                                                              through GET /perf?stacks=1 (T401)
         return {"now": now, "since": since, "uptime_s": now - _STARTED, "log": _PERF, "stacks": stacks,
-                "process": _process_stats(), "heap": _heap_stats(),   # heap: where the resident size sits, now (2026-09-15)
+                "process": _process_stats(malloc=True), "heap": _heap_stats(),   # heap: where the resident size sits, now (2026-09-15); malloc: glibc's books (2026-11-14)
                 "gc": gc_block,                                       # gc: the collector's collections and pauses (2026-09-16)
                 "pusher": pusher, "jobs": jobs, "writer": writer, "stages_ms": stages,
                 "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "skillLoadIndex": skill_idx, "http": http,
