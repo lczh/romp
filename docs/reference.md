@@ -3174,11 +3174,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `recordCache.released` counts the pop as it counts every pop. A tail
   left behind by an upgrade counts here while `recordCache.bytes` rises to
   the whole file. It weighs records alone: the assembly entries' own atoms
-  and lookup maps are still only the count `assemblyEntries` (a whole
-  entry measured about 0.9 to 1.1 KB per record of its leaf on two
-  synthetic leaves, 0.3 to 4 bytes per file byte as the records run long
-  or short), so a `pinnedByAssembly` of 0 does not mean the entries are
-  free.
+  and lookup maps are `assemblyEstimate`'s (below), so a `pinnedByAssembly`
+  of 0 does not mean the entries are free. `assemblyEstimate` is the
+  entries' own weight: `entries`, `records` (each entry's adapter's uuid
+  map, summed: the whole leaf for a whole parse, the tail past the cut for
+  a restored one), `atoms` (the entries' emitted atoms) and `bytes`, records
+  times `recordBytes` (1,100: a whole entry measured 1,053 to 1,180 bytes
+  per record of its leaf on three synthetic leaves, short rows and 2 KB
+  tool results alike, 0.9 to 2.5 bytes per file byte as the records run
+  long or short); a restored entry's pre-cut seed and the parse store's
+  served copies (about 0.6 KB an atom) are not in it and stay the counts
+  `assemblyEntries` and `parseSlots`.
   `builtAtoms` is the materialized atoms: `slots` (the LRU's length),
   `live` (the atoms the live lazy indexes count as built in the LRU),
   `overSlots` (how far `live` runs past `slots`, 0 unless a count drifted)

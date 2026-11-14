@@ -73,7 +73,7 @@ em, jd = km.em, km.jd
 
 SID = "11111111-2222-3333-4444-%012d"
 T0 = 1790000000.0
-NEW_KEYS = ("recordCacheResident", "pinnedByAssembly", "builtAtoms", "restoredIndexes")
+NEW_KEYS = ("recordCacheResident", "pinnedByAssembly", "builtAtoms", "restoredIndexes", "assemblyEstimate")
 
 
 def _iso(t):
@@ -1205,6 +1205,29 @@ class ReadByPath(unittest.TestCase):
                     self.assertIn(missing, lines[0], "the line names what was missing")
 
 
+class AssemblyEstimate(Base):
+    """The assembly entries' own weight (2026-11-14), read off a genuine parse."""
+
+    def test_the_assembly_estimate_reads_a_whole_parse_as_its_leafs_records(self):
+        """On the whole-parse road every record of the leaf is in the adapter's uuid map, so the gauge's records are the leaf's
+        line count and its bytes that count times the measured figure; the atoms are the entry's; and a release of the leaf
+        takes them out of the gauge (release_assembly), as it takes the entry. Red before the gauge: no `assemblyEstimate` key."""
+        leaf = self.leaf("estimate", _recs(40))
+        sid = SID % 40
+        with em._ASM_LOCK:
+            base = len(em._ASM_CACHE)
+        em.parse_session(str(leaf), rompuuid=sid, name="web")
+        h = _heap()["assemblyEstimate"]
+        self.assertEqual(h["entries"], base + 1)
+        self.assertEqual(h["records"], 40, "every record of the leaf is in the adapter's uuid map")
+        self.assertEqual(h["bytes"], 40 * em.ASM_ENTRY_RECORD_BYTES)
+        self.assertEqual(h["recordBytes"], em.ASM_ENTRY_RECORD_BYTES)
+        self.assertGreater(h["atoms"], 0, "the entry's emitted atoms")
+        self.assertEqual(em.release_assembly(str(leaf), rompuuid=sid), 1)
+        h2 = _heap()["assemblyEstimate"]
+        self.assertEqual((h2["entries"], h2["records"]), (base, 0))
+
+
 class Counters(unittest.TestCase):
     COUNTERS = (("checkpoints", "documentBytes"), ("checkpoints", "readBytes"), ("asmCheckpoint", "hydratedBytes"),
                 ("asmCheckpoint", "hydratedAtoms"), ("asmIndex", "restoredTurns"), ("asmIndex", "rowDecodes"))
@@ -1239,20 +1262,23 @@ class Counters(unittest.TestCase):
         self.assertIn("paths=all", window)
         self.assertIn("walk=1", window)
 
-    def test_the_assembly_entries_own_size_is_said_to_be_a_count_alone(self):
+    def test_the_assembly_entries_own_size_is_the_estimates_and_a_pinned_zero_is_not_free(self):
         """Review of 2026-10-01: pinnedByAssembly weighs only the records an entry holds after the record cache let them go,
         and reads 0 in the steady state, while a whole entry's own atoms and lookup maps (about 0.9 to 1.1 KB per record of
-        its leaf, measured) stay unsized. The kernel's heap docstring, the gauge's docstring and the reference say so, so a 0
-        is never read as entries that cost nothing."""
+        its leaf, measured) were unsized, a count alone. Since 2026-11-14 they are assemblyEstimate's (asm_entries_estimate:
+        the adapters' uuid maps summed, times the measured per-record figure). The kernel's heap docstring, the pinned gauge's
+        docstring and the reference name that gauge as the holder and still say a pinned 0 is not entries that cost nothing."""
         for name, text in (("_heap_stats", km._heap_stats.__doc__), ("asm_pinned_records", em.asm_pinned_records.__doc__)):
             flat = " ".join((text or "").split())
-            self.assertIn("assemblyEntries", flat, name)
+            self.assertIn("assemblyEstimate", flat, name)
             self.assertIn("never says the entries are free", flat, name)
         doc = Path(HERE).parent.joinpath("docs", "reference.md").read_text()
         para = doc[doc.index("- `heap`:"):]
         para = " ".join(para[:para.index("\n- `", 10)].split())
-        self.assertIn("the assembly entries' own atoms and lookup maps are still only the count `assemblyEntries`", para)
+        self.assertIn("the assembly entries' own atoms and lookup maps are `assemblyEstimate`'s", para)
         self.assertIn("does not mean the entries are free", para)
+        self.assertNotIn("still only the count `assemblyEntries`", para, "the old claim is gone with the gauge that replaced it")
+
 
 
 if __name__ == "__main__":

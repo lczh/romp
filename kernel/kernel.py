@@ -257,16 +257,18 @@ def _heap_stats():
     JSON strings, which only the index wire (a proto-1 client) stores, so under the shipped wire it reads 0. These gauges
     attribute a resident size to its holders; they do not sum to it.
 
-    Four of them are ESTIMATES in memory units (the memory diagnosis, 2026-10-01: the kernel's resident size grew with about
+    Five of them are ESTIMATES in memory units (the memory diagnosis, 2026-10-01: the kernel's resident size grew with about
     2.85 times the record cache's file bytes, and the counts above, their three byte gauges aside (hydrated.bytes,
     builtChat.serializedBytes and imgCache.bytes), sized nothing): recordCacheResident (the record cache's entries by class, whole leaf, tail, subagent and logs under the state root except the Codex and Claude
     transcripts, their file bytes and those times the decoded multiple), pinnedByAssembly (records an assembly entry's adapter
     holds that the record cache no longer does), builtAtoms (the live materialized atoms times an atom's measured size, the dead
-    slots times an LRU entry's) and restoredIndexes (the live lazy indexes' rows, record rows and light facts). Each is O(entries)
+    slots times an LRU entry's), restoredIndexes (the live lazy indexes' rows, record rows and light facts) and assemblyEstimate (the
+    assembly entries' own adapters and atoms, about a kilobyte a record; the 2026-11-14 diagnosis, where those stood as a count while
+    3.7 GB of an 8 GB resident size had no holder). Each is O(entries)
     over its own container (the record cache's entries, the assembly entries' files, the live indexes), reads lengths, identities
     and numbers the holders keep, and never iterates a records list or an index's rows. They overlap where the holders share
-    objects, so they are not meant to be summed. The assembly entries' own atoms and lookup maps are still the count
-    assemblyEntries alone: pinnedByAssembly weighs only the records an entry holds after the record cache let them go, so it reads
+    objects, so they are not meant to be summed. The assembly entries' own atoms and lookup maps are assemblyEstimate's
+    (2026-11-14): pinnedByAssembly weighs only the records an entry holds after the record cache let them go, so it reads
     0 while the cache holds them, and that 0 never says the entries are free.
 
     What it never does: walk an object graph or the allocator's pools, collect, evict, fill a cache, read a file, build
@@ -344,7 +346,8 @@ def _heap_stats():
                                               lambda: em.record_cache_resident(jd.STATE, (jd.CODEXDIR / "projects", jd.PROJECTS))),
             "pinnedByAssembly": _heap_read("pinnedByAssembly", lambda: em.asm_pinned_records()),
             "builtAtoms": _heap_read("builtAtoms", lambda: em.built_atoms_estimate()),
-            "restoredIndexes": _heap_read("restoredIndexes", lambda: em.restored_index_estimate())}
+            "restoredIndexes": _heap_read("restoredIndexes", lambda: em.restored_index_estimate()),
+            "assemblyEstimate": _heap_read("assemblyEstimate", lambda: em.asm_entries_estimate())}
 
 
 def _perf_walks(snap):

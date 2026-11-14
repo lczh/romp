@@ -7070,7 +7070,8 @@ def asm_pinned_records() -> dict:
     in force, _RECORD_CACHE_MULTIPLE, read at the call). A list two entries share counts once. It weighs records alone: an
     entry's own atoms and lookup maps (by_uuid, the graph), about 0.9 to 1.1 KB per record of the leaf a whole entry parsed
     (tracemalloc on two synthetic leaves, 2026-10-01: 0.31 bytes per file byte where records carry long tool results, 4.0
-    where they are short), stay a count (assemblyEntries), so a 0 here never says the entries are free. O(entries x their files):
+    where they are short), are asm_entries_estimate's (the heap block's assemblyEstimate, 2026-11-14; a count, assemblyEntries,
+    before it), so a 0 here never says the entries are free. O(entries x their files):
     one record-cache lookup per file, taken under the cache's lock with nothing else, then two identities each after it, so a
     reader's hit never waits on the checks; no list is iterated; the two locks are taken one after the other."""
     with _ASM_LOCK:
@@ -7102,6 +7103,39 @@ def asm_pinned_records() -> dict:
     fb_total = sum(fb for _, fb in pinned.values())
     return {"lists": len(pinned), "records": sum(n for n, _ in pinned.values()), "fileBytes": fb_total,
             "bytes": int(round(fb_total * _RECORD_CACHE_MULTIPLE))}
+
+
+ASM_ENTRY_RECORD_BYTES = 1100         # what one record of a leaf costs its assembly entry beyond the records themselves: the adapter's
+#                                       per-uuid maps (by_uuid, seq_of, parent_of, ts_of, fsid_of, _seq_ts) and the entry's atoms; 1,053 to
+#                                       1,180 by tracemalloc over three synthetic whole-parse leaves of 10,000 to 40,000 records, short rows
+#                                       and rows with 2 KB tool results alike (Python 3.12, 2026-11-14), the 0.9 to 1.1 KB of 2026-10-01 again
+
+
+def asm_entries_estimate() -> dict:
+    """The assembly entries' OWN weight for /perf's heap block (the 2026-11-14 diagnosis: a kernel at 8 GB resident with 3.7 GB
+    attributed to no holder; the record cache weighs the records, pinnedByAssembly the records an entry keeps after the cache
+    let them go, and the entries' adapters and atoms, about a kilobyte a record, stood as the count assemblyEntries alone):
+    `entries`, `records` (each entry's adapter's uuid map, by_uuid, summed: every record the entry ingested, the whole leaf on
+    the whole-parse road and the tail past the document's cut on the restore road), `atoms` (the entries' emitted atoms,
+    summed), `recordBytes` (ASM_ENTRY_RECORD_BYTES) and `bytes`, records x recordBytes, an estimate. Not in it: a restored
+    entry's seed (the pre-cut graph's uuid sets) and the served copies the parse store holds, about 0.6 KB an atom in the same
+    lab, which stay the count parseSlots. An entry without an adapter counts its atoms and no records. O(entries): two lengths
+    each over a copied value list, never a walk over a map or an atoms list."""
+    with _ASM_LOCK:
+        entries = list(_ASM_CACHE.values())
+    records = atoms = 0
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        ad = e.get("ad")
+        m = getattr(ad, "by_uuid", None) if ad is not None else None
+        if isinstance(m, dict):
+            records += len(m)
+        a = e.get("atoms")
+        if isinstance(a, (list, tuple)):
+            atoms += len(a)
+    return {"entries": len(entries), "records": records, "atoms": atoms, "recordBytes": ASM_ENTRY_RECORD_BYTES,
+            "bytes": records * ASM_ENTRY_RECORD_BYTES}
 
 
 def _asm_lazy_uuids(e):
