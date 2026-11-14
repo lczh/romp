@@ -60,7 +60,8 @@ km = load_source("romp_kernel_perf_gc", os.path.join(BIN, "romp-kernel"))
 GC_KEYS = {"gen", "thresholds", "counts", "frozen", "errors", "hooked", "freeze"}
 FREEZE_KEYS = {"enabled", "active", "loadTrees", "gen2Threshold", "backstopFoldins", "backstopGrowth", "heapBlocks", "heapBlocksAtWalk",
                "lastReclaimCollected", "reclaimCollected", "frozenAtReclaim", "freezes", "reclaims", "busyRuns", "collections", "survivors",
-               "lastReleaseSurvivors", "lastReleaseSids", "endedPending", "lastReconcileMs", "lastReconcileKind", "totalReconcileMs", "errors"}
+               "lastReleaseSurvivors", "lastReleaseSids", "endedPending", "lastReconcileMs", "lastReconcileKind", "totalReconcileMs",
+               "lastReclaimMs", "reclaimMsMax", "errors"}
 GEN_KEYS = {"collections", "msSum", "msMax", "msLast", "collectedLast"}
 ROW_GC_KEYS = {"n0", "n1", "n2", "ms2"}
 

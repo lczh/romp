@@ -1676,6 +1676,56 @@ class HeapGrowthBackstop(unittest.TestCase):
         self.assertEqual(c.collections - before, 2, "two collects, like a full release: the organic arithmetic counts both")
         self.assertEqual((fake.young, fake.held), (0, 0))
 
+    def test_a_reclaims_whole_run_is_held_on_perf_until_the_next_reclaim(self):
+        """Review 2026-11-14 (medium): the growth-owed backstop is a full-heap walk with the GIL held, on by default, and its
+        pause at a loaded kernel's size (tens of millions of tracked objects) has never been measured: the only reading was
+        the backstop's stderr line and `lastReconcileMs`, which the next fold-in, minutes later, overwrites, and which times
+        the collections alone, not the re-freeze or the frozen count read that follow them. `lastReclaimMs` is the last
+        reclaim's WHOLE run, from its first collect to the frozen count read, held until the next reclaim, and `reclaimMsMax`
+        the largest since the process started, so the measurement can be read from /perf at any time after the first walk."""
+        clock = [0.0]
+        def now():
+            return clock[0]
+
+        class TimedGc(GarbageGc):
+            """A collector whose calls each take time: a collect 100 ms (the unfrozen walk 2 s), the frozen count read 400 ms."""
+            def collect(self, *a):
+                clock[0] += 2.0 if not self.is_frozen else 0.1
+                return super().collect(*a)
+            def get_freeze_count(self):
+                clock[0] += 0.4
+                return 30_000_000
+
+        fake, blocks = TimedGc(), [1000]
+        c = gf.GcFreeze(enabled=True, load_trees=8, backstop_foldins=1000, gc=fake, clock=now, heap_blocks=lambda: blocks[0],
+                        backstop_growth=0.25, backstop_growth_floor=0)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        self.assertEqual((c.last_reclaim_ms, c.reclaim_ms_max), (0.0, 0.0), "no reclaim yet: nothing measured")
+        blocks[0] = 1300
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertEqual(c.tick(inserts=9), "backstop")
+        self.assertAlmostEqual(c.last_ms, 2100.0, places=3, msg="lastReconcileMs times the collections alone (the cheap collect and the walk)")
+        self.assertAlmostEqual(c.last_reclaim_ms, 2500.0, places=3,
+                               msg="the whole run: the collections, the re-freeze and the 400 ms frozen count read, the stall a thread waiting on the GIL sees")
+        self.assertEqual(c.reclaim_ms_max, c.last_reclaim_ms)
+        blocks[0] = 1310
+        self.assertEqual(c.tick(inserts=17), "load")
+        self.assertAlmostEqual(c.last_ms, 100.0, places=3, msg="the fold-in overwrote lastReconcileMs, as before")
+        self.assertAlmostEqual(c.last_reclaim_ms, 2500.0, places=3, msg="and left the reclaim's figure standing")
+        fake.held = 10                                    # a second, cheaper walk: the max holds the first
+        def quick_collect(*a, _orig=TimedGc.collect):
+            clock[0] += 0.5 if not fake.is_frozen else 0.1
+            return GarbageGc.collect(fake, *a)
+        fake.collect = quick_collect
+        blocks[0] = 1700
+        self.assertEqual(c.tick(inserts=25), "load")
+        self.assertEqual(c.tick(inserts=25), "backstop")
+        self.assertAlmostEqual(c.last_reclaim_ms, 1000.0, places=3, msg="the last reclaim's own run")
+        self.assertAlmostEqual(c.reclaim_ms_max, 2500.0, places=3, msg="the largest stands")
+        p = c.perf()
+        self.assertEqual((p["lastReclaimMs"], p["reclaimMsMax"]), (1000.0, 2500.0), "both on /perf, beside lastReconcileMs")
+        self.assertEqual(p["lastReconcileMs"], 600.0)
+
     def test_the_kernel_wrapper_writes_one_line_per_backstop_naming_what_it_found(self):
         """The kernel's wrapper writes one stderr line per backstop (a rare frozen-heap walk) with what the unfrozen collection
         found and the frozen count after it, and none on a load tick, as it does for a release."""
@@ -1685,7 +1735,7 @@ class HeapGrowthBackstop(unittest.TestCase):
 
         class _Controller:
             def __init__(self, kind):
-                self.enabled = True; self._kind = kind; self.last_ms = 2345.6
+                self.enabled = True; self._kind = kind; self.last_ms = 2345.6; self.last_reclaim_ms = 2987.1
                 self.last_reclaim_collected = 123456; self.frozen_at_reclaim = 7890123; self.heap_blocks = 45678901
                 self.last_release_sids = []; self.last_release_survivors = 0; self.last_kept_sids = []
             def tick(self, inserts):
@@ -1700,8 +1750,8 @@ class HeapGrowthBackstop(unittest.TestCase):
             km.em.record_cache_stats = lambda: {"inserts": 3}
             out = _line(_Controller("backstop"))
             self.assertEqual(out.count("\n"), 1, "exactly one line per backstop: %r" % out)
-            for needle in ("backstop", "123456", "7890123", "45678901", "2345.6"):
-                self.assertIn(needle, out, "the backstop line names its finds: %s in %r" % (needle, out))
+            for needle in ("backstop", "123456", "7890123", "45678901", "2345.6", "2987.1"):
+                self.assertIn(needle, out, "the backstop line names its finds and its whole run: %s in %r" % (needle, out))
             self.assertEqual(_line(_Controller("load")), "", "a load tick writes no backstop line")
         finally:
             km._GC_FREEZE = saved_gf

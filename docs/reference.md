@@ -3306,7 +3306,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   (the garbage the freeze had held) and `reclaimCollected` (summed), and
   `frozenAtReclaim`, `gc.get_freeze_count()` after its re-freeze, read only
   there, where the walk was just paid for; each backstop also writes one stderr
-  line with those figures. A busy cycle judges the ended sessions only
+  line with those figures. The walk's pause at a loaded kernel's size is not
+  measured: the lab read half a second per million tracked objects, a kernel at
+  8 GB holds tens of millions, so a walk there is plausibly several seconds with
+  every other thread waiting on the GIL, four or five times in twelve hours at
+  the growth seen live, and that is a projection until the first walk is read.
+  `lastReclaimMs` is the last reclaim's whole run (both collections, the
+  re-freeze and the frozen count read, itself 14 ms per million frozen), held
+  until the next reclaim where `lastReconcileMs` is the next fold-in's within
+  minutes, and `reclaimMsMax` the largest since the process started; the
+  backstop's stderr line carries the same figure, and
+  `ROMP_GC_FREEZE_BACKSTOP_GROWTH=0` turns the growth bound off while that
+  reading is weighed. A busy cycle judges the ended sessions only
   before the first freeze, as an idle one does: the initial freeze's collect
   takes their pre-freeze garbage, so the owed ones are dropped at no cost. Once
   a freeze is held, a busy cycle never judges an ended session. The
@@ -3341,14 +3352,15 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   live-root release reads no sids, 0 survivors and its own kind, as an idle run
   that owed nothing does; a full release also
   writes one stderr line, "reclaimed" when nothing survived and otherwise naming the kept sids),
-  `totalReconcileMs` and `errors` (a reconcile that raised is counted here and
-  said once on stderr, never ending the pusher). The reconcile runs on the
+  `totalReconcileMs`, `lastReclaimMs` and `reclaimMsMax` (the last reclaim's
+  whole run and the largest, above) and `errors` (a reconcile that raised is
+  counted here and said once on stderr, never ending the pusher). The reconcile runs on the
   pusher thread after the pusher cycle closed its ring row, so the pusher ring
   never shows its pause. A jobs row can: when a jobs pass was open across the
   reconcile (common on a busy kernel, where the jobs thread is working when the
   pusher reconciles), the row's `n2` and `ms2` count the controller's
   collection along with any automatic one. `lastReconcileMs` is where a
-  reconcile's pause is read. The
+  reconcile's pause is read, `lastReclaimMs` where a frozen-heap walk's is. The
   freeze is on by default; `ROMP_GC_FREEZE=off` (or `0`/`false`) turns it off
   for a measurement, and `ROMP_GC_FREEZE_LOAD_TREES` sets the load threshold (a
   value that is not a positive integer falls back to the default, said once and

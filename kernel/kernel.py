@@ -1584,9 +1584,10 @@ def _gc_freeze_tick(idle, first):
         try:
             sys.stderr.write("gc-freeze: a backstop walked the frozen heap in %.1f ms and collected %d unreachable objects the freeze had "
                              "held out of the collector's reach, the young garbage taken before the walk (%s frozen after the re-freeze, "
-                             "%s small-object blocks live)\n"
+                             "%s small-object blocks live; the whole run %.1f ms with its re-freeze and frozen count read)\n"
                              % (getattr(_GC_FREEZE, "last_ms", 0.0), int(getattr(_GC_FREEZE, "last_reclaim_collected", 0) or 0),
-                                getattr(_GC_FREEZE, "frozen_at_reclaim", None), getattr(_GC_FREEZE, "heap_blocks", None)))
+                                getattr(_GC_FREEZE, "frozen_at_reclaim", None), getattr(_GC_FREEZE, "heap_blocks", None),
+                                getattr(_GC_FREEZE, "last_reclaim_ms", 0.0)))
         except Exception:
             pass
 

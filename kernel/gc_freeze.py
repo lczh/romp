@@ -58,7 +58,14 @@ constant per allocated block whether the growth was garbage or a cache filling; 
 quarter, never more. Every reclaim records what its unfrozen collection found (`last_reclaim_collected`: the garbage the freeze
 had locked away; a backstop, like a release, runs a cheap collect with the freeze in place first, so the young garbage since the
 last collection is taken before the walk and not counted in it) and the frozen count after its re-freeze (`frozen_at_reclaim`, a
-walk read only where a walk was just paid for), so /perf's plain read says how much the freeze held and holds without `?walk=1`. A busy
+walk read only where a walk was just paid for), so /perf's plain read says how much the freeze held and holds without `?walk=1`.
+THE WALK'S COST AT A LOADED KERNEL'S SIZE IS NOT MEASURED. The lab figure is 0.5 s per million tracked objects (the 2.83 s over 5.6
+million above); a kernel at 8 GB holds tens of millions, so a walk there is plausibly several seconds, with every handler and
+driver thread waiting on the GIL for it, four or five times in twelve hours at the live growth, and that is a projection until the
+first walk is read: `last_reclaim_ms` is that reclaim's WHOLE run (both collections, the re-freeze and the frozen count read,
+which is itself 14 ms per million frozen), held until the next reclaim where `last_ms` is the next fold-in's within minutes, and
+`reclaim_ms_max` the largest since boot; the backstop's stderr line carries the same figure. `ROMP_GC_FREEZE_BACKSTOP_GROWTH=0`
+turns the growth bound off while that reading is weighed. A busy
 cycle judges the ended sessions only before the first freeze, as the idle tick does: the initial freeze's
 collect takes their pre-freeze garbage, so the owed refs are dropped at no cost. Once a freeze is held, a
 busy cycle never judges them: their release waits for the idle tick. The record cache's
@@ -265,6 +272,10 @@ class GcFreeze:
         self.collections = 0         # gc.collect() calls the RUN STEP issued (a full release issues two): /perf, so organic = gen2 collections less this, exactly
         self.last_ms = 0.0           # the last reconcile's collection pause
         self.total_ms = 0.0          # every reconcile's collection pause, summed
+        self.last_reclaim_ms = 0.0   # the last RECLAIM's whole run, its collections, re-freeze and frozen count read (2026-11-14): held
+        #                              until the next reclaim, where last_ms is the next fold-in's within minutes; the stall a thread
+        #                              waiting on the GIL saw, and the only measurement of a frozen-heap walk at a loaded kernel's size
+        self.reclaim_ms_max = 0.0    # the largest such run since the process started
         self.last_kind = None        # "initial" | "load" | "release" | "backstop", for /perf
         self.gen2_threshold = None   # the full-collection trigger apply_gen2_threshold set, None while the stock one stands (/perf)
         self.gen2_replaced = None    # the trigger it replaced, put back when the controller is turned off
@@ -412,6 +423,8 @@ class GcFreeze:
             self.reclaim_collected += self.last_reclaim_collected
             self.frozen_at_reclaim = self._read_frozen()
             self.heap_blocks_at_walk = self.heap_blocks     # the growth bound measures from this walk
+            self.last_reclaim_ms = (self._clock() - t0) * 1000.0   # the whole run, the frozen count read included: what the GIL's waiters saw
+            self.reclaim_ms_max = max(self.reclaim_ms_max, self.last_reclaim_ms)
         else:
             self.last_kind = "initial" if not was_frozen else "load"   # a cheap-collect release folds in like a load
             self.freezes += 1
@@ -456,7 +469,8 @@ class GcFreeze:
                 "collections": self.collections, "survivors": self.survivors, "lastReleaseSurvivors": self.last_release_survivors,
                 "lastReleaseSids": list(self.last_release_sids),
                 "endedPending": len(self._ended), "lastReconcileMs": round(self.last_ms, 1),
-                "lastReconcileKind": self.last_kind, "totalReconcileMs": round(self.total_ms, 1)}
+                "lastReconcileKind": self.last_kind, "totalReconcileMs": round(self.total_ms, 1),
+                "lastReclaimMs": round(self.last_reclaim_ms, 1), "reclaimMsMax": round(self.reclaim_ms_max, 1)}
 
 
 def pusher_tick(controller, idle, first, stats_fn, on_error):
