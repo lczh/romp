@@ -197,7 +197,7 @@ def _malloc_stats(rss_kb):
     arenas, code, stacks and libraries (the lab identity held within 10 MB). rss - inUse - other is then glibc's retained
     slack, exactly, on every plain read. `readMs` is the call's own wall time: mallinfo2 walks every arena's free bins under
     the arena locks (18 ms at 200k free chunks measured), so it is read on the plain GET alone, never on the pusher's cycle
-    or the restart ledger's samplers (_process_stats takes it on request). Raises where there is no glibc mallinfo2 (off
+    or the restart ledger's samplers (_process_stats_perf, the snapshot's, takes it). Raises where there is no glibc mallinfo2 (off
     Linux, musl, an older glibc); the caller reads it through _heap_read, which answers None and says so once."""
     if not sys.platform.startswith("linux"):
         raise OSError("glibc mallinfo2 is read on Linux only")
@@ -218,12 +218,11 @@ def _malloc_stats(rss_kb):
             "keepcost": int(mi.keepcost), "other": int(rss_kb) * 1024 - arena - mmapped, "readMs": round(read_ms, 3)}
 
 
-def _process_stats(malloc=False):
+def _process_stats():
     """rss_kb, thread count, CPU seconds and pid for the /perf snapshot. VmRSS from /proc is the CURRENT
     resident size; where /proc is absent (macOS) ru_maxrss is the PEAK, in bytes there, so it is scaled
-    to KB and the field is still called rss_kb. With `malloc` the block also carries glibc's books under
-    `malloc` (_malloc_stats; None where the runtime has none, said once): the snapshot asks for it, the
-    restart ledger's samplers do not, so they pay for no arena walk."""
+    to KB and the field is still called rss_kb. The restart ledger's samplers read this too, some under a
+    session lock, so it reaches nothing but /proc: glibc's books are _process_stats_perf's, the snapshot's."""
     rss = 0
     try:
         with open("/proc/self/status") as fh:
@@ -238,10 +237,16 @@ def _process_stats(malloc=False):
             rss = int(r // 1024) if sys.platform == "darwin" else int(r)
         except Exception:
             rss = 0
-    out = {"rss_kb": rss, "threads": threading.active_count(), "cpu_s": time.process_time(),
-           "pid": os.getpid()}
-    if malloc:
-        out["malloc"] = _heap_read("malloc", lambda: _malloc_stats(rss), block="process", said=_PROCESS_SAID)
+    return {"rss_kb": rss, "threads": threading.active_count(), "cpu_s": time.process_time(),
+            "pid": os.getpid()}
+
+
+def _process_stats_perf():
+    """The /perf snapshot's process block: _process_stats plus glibc's books under `malloc` (_malloc_stats; None where
+    the runtime has none, said once through _heap_read under the block's own said-set). Only the snapshot reads this,
+    so the arena walk is paid on the plain GET alone, never by the pusher or the restart ledger's samplers."""
+    out = _process_stats()
+    out["malloc"] = _heap_read("malloc", lambda: _malloc_stats(out["rss_kb"]), block="process", said=_PROCESS_SAID)
     return out
 
 
@@ -1446,7 +1451,7 @@ class _PerfStats:
         #                                                                              on a runner nobody can log into), on demand
         #                                                                              through GET /perf?stacks=1 (T401)
         return {"now": now, "since": since, "uptime_s": now - _STARTED, "log": _PERF, "stacks": stacks,
-                "process": _process_stats(malloc=True), "heap": _heap_stats(),   # heap: where the resident size sits, now (2026-09-15); malloc: glibc's books (2026-11-14)
+                "process": _process_stats_perf(), "heap": _heap_stats(),   # heap: where the resident size sits, now (2026-09-15); malloc: glibc's books (2026-11-14)
                 "gc": gc_block,                                       # gc: the collector's collections and pauses (2026-09-16)
                 "pusher": pusher, "jobs": jobs, "writer": writer, "stages_ms": stages,
                 "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "skillLoadIndex": skill_idx, "http": http,

@@ -608,13 +608,16 @@ class MallocBooks(unittest.TestCase):
         self.assertEqual(m["other"], snap["process"]["rss_kb"] * 1024 - m["arena"] - m["mmapped"], "other is the identity, exactly")
         held = bytes(32 << 20)                               # a 32 MiB block: over glibc's mmap threshold, so it lands in `mmapped`
         try:
-            m2 = km._process_stats(malloc=True)["malloc"]
+            m2 = km._process_stats_perf()["malloc"]
             self.assertGreaterEqual(m2["mmapped"] - m["mmapped"], 30 << 20, "a held 32 MiB bytes object shows in mmapped")
             self.assertGreaterEqual(m2["inUse"] - m["inUse"], 30 << 20, "and in what is in use")
         finally:
             del held
         self.assertEqual(set(km._process_stats()), {"rss_kb", "threads", "cpu_s", "pid"},
                          "the samplers' plain read takes the four fields and pays for no arena walk")
+        src = inspect.getsource(km._process_stats)
+        self.assertNotIn("_malloc_stats", src, "and reaches no allocator read: the lock census follows it under a session lock")
+        self.assertNotIn("_heap_read", src)
 
     def test_without_mallinfo2_the_key_is_none_and_said_once(self):
         """A libc without mallinfo2 (the ctypes handle lacks the symbol) answers None under the key, and the first failure
@@ -630,8 +633,8 @@ class MallocBooks(unittest.TestCase):
         err = io.StringIO()
         with mock.patch.object(ctypes, "CDLL", return_value=_NoMallinfo2()), mock.patch.object(sys, "platform", "linux"), \
                 redirect_stderr(err):
-            first = km._process_stats(malloc=True)
-            second = km._process_stats(malloc=True)
+            first = km._process_stats_perf()
+            second = km._process_stats_perf()
         self.assertIn("malloc", first)
         self.assertIsNone(first["malloc"], "no mallinfo2: None, never a crash or a missing key")
         self.assertIsNone(second["malloc"])
@@ -647,7 +650,7 @@ class MallocBooks(unittest.TestCase):
         err = io.StringIO()
         with mock.patch.object(ctypes, "CDLL", side_effect=AssertionError("libc.so.6 loaded off Linux")), \
                 mock.patch.object(sys, "platform", "darwin"), redirect_stderr(err):
-            st = km._process_stats(malloc=True)
+            st = km._process_stats_perf()
         self.assertIsNone(st["malloc"])
         self.assertEqual(len([ln for ln in err.getvalue().splitlines() if "process.malloc" in ln]), 1, err.getvalue())
 
