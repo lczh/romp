@@ -1446,12 +1446,21 @@ _PERF_STATS = _PerfStats()
 _GC_FREEZE_ERRORS = [0]
 _GC_FREEZE_SAID = [False]
 _GC_FREEZE_LOAD_TREES, _gc_freeze_bad_knob = gcf.load_trees_from_env()   # parsed with a fallback, never a bare int() at import (#1735 high)
-_GC_FREEZE = gcf.GcFreeze(enabled=gcf.enabled_from_env(), load_trees=_GC_FREEZE_LOAD_TREES)   # the ended note (note_ended) is wired when the SDK backend loads (below)
+_GC_FREEZE_BACKSTOP_GROWTH, _gc_freeze_bad_growth = gcf.backstop_growth_from_env()   # the growth-owed backstop's fraction; 0 is its off switch (2026-11-14)
+_GC_FREEZE = gcf.GcFreeze(enabled=gcf.enabled_from_env(), load_trees=_GC_FREEZE_LOAD_TREES,
+                          backstop_growth=_GC_FREEZE_BACKSTOP_GROWTH)   # the ended note (note_ended) is wired when the SDK backend loads (below)
 if _gc_freeze_bad_knob is not None:     # a bad ROMP_GC_FREEZE_LOAD_TREES fell back to the default: said once, counted, never fatal
     _GC_FREEZE_ERRORS[0] += 1
     try:
         sys.stderr.write("gc-freeze: ROMP_GC_FREEZE_LOAD_TREES=%r is not a positive integer; using the default %d\n"
                          % (_gc_freeze_bad_knob[:80], gcf.DEFAULT_LOAD_TREES))
+    except Exception:
+        pass
+if _gc_freeze_bad_growth is not None:   # a bad ROMP_GC_FREEZE_BACKSTOP_GROWTH fell back to the default: the same, said once, counted
+    _GC_FREEZE_ERRORS[0] += 1
+    try:
+        sys.stderr.write("gc-freeze: ROMP_GC_FREEZE_BACKSTOP_GROWTH=%r is not a fraction from 0 (off) to 1; using the default %s\n"
+                         % (_gc_freeze_bad_growth[:80], gcf.DEFAULT_BACKSTOP_GROWTH))
     except Exception:
         pass
 _GC_GEN2_THRESHOLD, _gc_gen2_bad_knob = gcf.gen2_threshold_from_env()   # the full-collection trigger while the freeze is on;

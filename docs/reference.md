@@ -3330,7 +3330,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   for a measurement, and `ROMP_GC_FREEZE_LOAD_TREES` sets the load threshold (a
   value that is not a positive integer falls back to the default, said once and
   counted under `errors`, and it is floored at 1 so it cannot make the reconcile
-  fire every cycle). While the freeze is on, the kernel also raises CPython's
+  fire every cycle). `ROMP_GC_FREEZE_BACKSTOP_GROWTH` sets the growth fraction
+  that owes the backstop (`backstopGrowth`, default 0.25): 0 turns the growth
+  bound off and leaves the fold-in count as the only backstop, a value above 1 is
+  clamped to 1, and one that is not a number from 0 to 1 falls back to the
+  default, said once and counted under `errors`. While the freeze is on, the kernel also raises CPython's
   full-collection trigger (the third of `thresholds`, stock 10) to 100 at boot,
   and `gen2Threshold` reads it. CPython runs an automatic full collection once
   generation 2 has seen more than that many generation-1 collections and the

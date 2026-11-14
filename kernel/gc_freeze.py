@@ -150,6 +150,25 @@ def load_trees_from_env(env=None):
     return max(MIN_LOAD_TREES, n), None
 
 
+def backstop_growth_from_env(env=None):
+    """(fraction, bad_raw): the ROMP_GC_FREEZE_BACKSTOP_GROWTH knob, parsed like `load_trees_from_env`: the heap growth,
+    as a fraction of the reading at the last frozen-heap walk, that owes the next walk (DEFAULT_BACKSTOP_GROWTH). 0 turns
+    the growth bound OFF, leaving the fold-in count as the only backstop (the switch a new multi-second full-collection
+    trigger on a production kernel owes, 2026-11-14); a value above 1 is clamped to 1, a heap that doubled being bound
+    enough; a value that is not a finite number, or is negative, falls back to the default and comes back as `bad_raw`
+    (the caller says it once and counts it), else None. Never a bare float() at the kernel's import."""
+    raw = (env if env is not None else os.environ).get("ROMP_GC_FREEZE_BACKSTOP_GROWTH")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_BACKSTOP_GROWTH, None
+    try:
+        f = float(raw.strip())
+    except (TypeError, ValueError):
+        return DEFAULT_BACKSTOP_GROWTH, raw
+    if f != f or f in (float("inf"), float("-inf")) or f < 0:
+        return DEFAULT_BACKSTOP_GROWTH, raw
+    return min(1.0, f), None
+
+
 def gen2_threshold_from_env(env=None):
     """(threshold, bad_raw): the ROMP_GC_GEN2_THRESHOLD knob, parsed like `load_trees_from_env`: a value that is not an
     integer, or is above MAX_GEN2_THRESHOLD (the largest C int, the most gc.set_threshold takes, which raises past it),

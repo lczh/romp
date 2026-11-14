@@ -1088,7 +1088,7 @@ class KernelKnob(unittest.TestCase):
         """Load the kernel with `var` set to `value` and `extra` beside it. The two knobs this class tests are cleared
         unless passed (review 2026-10-03): a value exported in the shell for one must never reach the other's case."""
         import contextlib, io
-        env = {"ROMP_GC_FREEZE_LOAD_TREES": None, "ROMP_GC_GEN2_THRESHOLD": None}
+        env = {"ROMP_GC_FREEZE_LOAD_TREES": None, "ROMP_GC_GEN2_THRESHOLD": None, "ROMP_GC_FREEZE_BACKSTOP_GROWTH": None}
         env.update(extra or {})
         env[var] = value
         saved = {k: os.environ.get(k) for k in env}
@@ -1200,6 +1200,29 @@ class KernelKnob(unittest.TestCase):
         self.assertEqual(km0._GC_FREEZE_LOAD_TREES, 1, "0 is floored to 1")
         self.assertEqual(km0._GC_FREEZE_ERRORS[0], 0, "a floored 0 is a valid int, no error")
         self.assertEqual(err0, "", "and nothing said for a valid, floored value")
+
+    def test_a_bad_growth_knob_falls_back_and_is_said_a_zero_turns_the_bound_off(self):
+        """2026-11-14: ROMP_GC_FREEZE_BACKSTOP_GROWTH reaches the controller the kernel builds at import. A bad value falls
+        back to the default, is counted under errors and said once on stderr, as the load-trees knob is; 0 is the off switch,
+        no error; a fraction is passed as given."""
+        km, err = self._load_with("abc", "romp_kernel_knob_growth_abc", var="ROMP_GC_FREEZE_BACKSTOP_GROWTH")
+        self.assertEqual(km._GC_FREEZE_BACKSTOP_GROWTH, km.gcf.DEFAULT_BACKSTOP_GROWTH, "abc falls back to the default")
+        self.assertEqual(km._GC_FREEZE.backstop_growth, km.gcf.DEFAULT_BACKSTOP_GROWTH, "and the controller runs the default")
+        self.assertEqual(km._GC_FREEZE_ERRORS[0], 1, "the bad knob is counted under errors, once")
+        lines = [ln for ln in err.splitlines() if "ROMP_GC_FREEZE_BACKSTOP_GROWTH" in ln]
+        self.assertEqual(len(lines), 1, "and said once on stderr: %r" % err)
+        self.assertIn("'abc'", lines[0])
+        self.assertIn("using the default 0.25", lines[0])
+        self.assertNotIn("ROMP_GC_FREEZE_LOAD_TREES", err, "the other knob, unset, says nothing")
+        km0, err0 = self._load_with("0", "romp_kernel_knob_growth_zero", var="ROMP_GC_FREEZE_BACKSTOP_GROWTH")
+        self.assertEqual(km0._GC_FREEZE_BACKSTOP_GROWTH, 0.0, "0 is the off switch")
+        self.assertEqual(km0._GC_FREEZE.backstop_growth, 0.0, "and the controller holds it: growth_due is False at any reading")
+        self.assertEqual(km0._GC_FREEZE_ERRORS[0], 0, "no error for the switch")
+        self.assertNotIn("ROMP_GC_FREEZE_BACKSTOP_GROWTH", err0, "and nothing said: %r" % err0)
+        km5, err5 = self._load_with("0.5", "romp_kernel_knob_growth_half", var="ROMP_GC_FREEZE_BACKSTOP_GROWTH")
+        self.assertEqual(km5._GC_FREEZE.backstop_growth, 0.5, "a fraction is passed to the controller as given")
+        self.assertEqual(km5._GC_FREEZE_ERRORS[0], 0)
+        self.assertNotIn("ROMP_GC_FREEZE_BACKSTOP_GROWTH", err5)
 
 
 def _install_fake_sdk():
@@ -1635,3 +1658,67 @@ class HeapGrowthBackstop(unittest.TestCase):
         finally:
             km._GC_FREEZE = saved_gf
             km.em.record_cache_stats = saved_stats
+
+
+class BackstopGrowthKnob(unittest.TestCase):
+    """2026-11-14: the growth-owed backstop is a new multi-second full collection trigger on a production kernel, so like
+    every other freeze threshold it has a switch of its own: ROMP_GC_FREEZE_BACKSTOP_GROWTH, the fraction of the heap reading
+    at the last walk that owes the next one. Parsed like ROMP_GC_FREEZE_LOAD_TREES (never a bare float() at the kernel's
+    import): 0 turns the growth bound OFF and leaves the fold-in count as the only backstop, a value above 1 is clamped to 1
+    (a heap that doubled is bound enough), and a value that is not a finite number, or is negative, falls back to the default
+    and comes back as `bad_raw` for the kernel to say once and count."""
+
+    def test_the_knob_parses_like_the_load_trees_knob(self):
+        self.assertEqual(gf.backstop_growth_from_env({}), (gf.DEFAULT_BACKSTOP_GROWTH, None), "absent: the default, no complaint")
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "  "}), (gf.DEFAULT_BACKSTOP_GROWTH, None),
+                         "whitespace: the default")
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "0"}), (0.0, None), "0 is the off switch")
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "0.5"}), (0.5, None))
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": " 1 "}), (1.0, None), "the ceiling, stripped")
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "3"}), (1.0, None), "above the ceiling: clamped")
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "abc"}), (gf.DEFAULT_BACKSTOP_GROWTH, "abc"),
+                         "not a number: falls back and is named")
+        self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "-1"}), (gf.DEFAULT_BACKSTOP_GROWTH, "-1"),
+                         "a negative fraction is no fraction: falls back and is named")
+        for raw in ("nan", "inf", "-inf"):
+            with self.subTest(raw=raw):
+                self.assertEqual(gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": raw}), (gf.DEFAULT_BACKSTOP_GROWTH, raw),
+                                 "a non-finite float is a bad value, never a bound of nan or a clamp of inf")
+        self.assertEqual(gf.DEFAULT_BACKSTOP_GROWTH, 0.25, "the default the fallbacks above return")
+
+    def test_zero_turns_the_growth_bound_off_and_leaves_the_fold_in_count(self):
+        """A controller built from the parsed 0 never owes a backstop to growth, at any reading: the heap can grow tenfold
+        between fold-ins and the idle tick folds in or does nothing, until the fold-in count alone (the old bound) is reached."""
+        fraction, bad = gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "0"})
+        self.assertEqual((fraction, bad), (0.0, None))
+        fake, blocks = FakeGc(), [1000]
+        c = gf.GcFreeze(enabled=True, load_trees=8, backstop_foldins=4, gc=fake, clock=lambda: 0.0,
+                        heap_blocks=lambda: blocks[0], backstop_growth=fraction, backstop_growth_floor=0)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        inserts = 1
+        for grown in (2000, 5000, 10000):            # three fold-ins, under the count bound of four, over a heap grown tenfold
+            blocks[0] = grown
+            inserts += 8
+            self.assertEqual(c.tick(inserts=inserts), "load", "a material load folds in; growth owes nothing at %d" % grown)
+            self.assertFalse(c.growth_due(1), "growth_due is False at any reading with the fraction at 0 (reading %d)" % grown)
+            self.assertFalse(c.growth_due(2))
+            self.assertIsNone(c.tick(inserts=inserts), "and an idle tick with nothing loaded runs nothing")
+            self.assertIsNone(c.tick_busy(inserts), "a busy one neither")
+        inserts += 8
+        self.assertEqual(c.tick(inserts=inserts), "load", "the fourth fold-in reaches the count bound")
+        self.assertEqual(c.tick(inserts=inserts), "backstop", "and the fold-in count (4) is the one bound left")
+        self.assertEqual(c.perf()["backstopGrowth"], 0.0, "/perf shows the bound off")
+
+    def test_the_default_controller_takes_the_parsed_fraction(self):
+        fraction, _ = gf.backstop_growth_from_env({"ROMP_GC_FREEZE_BACKSTOP_GROWTH": "0.5"})
+        fake, blocks = FakeGc(), [1000]
+        c = gf.GcFreeze(enabled=True, gc=fake, clock=lambda: 0.0, heap_blocks=lambda: blocks[0],
+                        backstop_growth=fraction, backstop_growth_floor=0)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        blocks[0] = 1400
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertFalse(c.growth_due(1), "40% is under a half")
+        blocks[0] = 1500
+        self.assertEqual(c.tick(inserts=17), "load")
+        self.assertTrue(c.growth_due(1), "a half owes the walk")
+        self.assertEqual(c.tick(inserts=17), "backstop")
