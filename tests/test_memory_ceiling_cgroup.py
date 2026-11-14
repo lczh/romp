@@ -157,5 +157,21 @@ class MachineMemoryUnderALimit(unittest.TestCase):
         self.assertEqual(em._HYDRATED_CAP, max(256 * 1024 ** 2, em._machine_memory_bytes() // 48))
 
 
+class TheReferenceSaysWhenTheLimitIsRead(unittest.TestCase):
+    def test_the_unit_paragraph_says_the_limit_is_read_at_the_kernels_start(self):
+        """Review 2026-11-14 (medium): the reference told the operator to set MemoryHigh= with set-property and read
+        recordCache.cgroupLimitBytes, but the limit is read ONCE at import (em._CGROUP_MEMORY_LIMIT; every memory-scaled bound
+        is an import-time constant), so set-property on the running unit changes nothing until the kernel restarts. The
+        paragraph says so, and the code is what it says: the module constant, not a per-read call."""
+        with open(os.path.join(ROOT, "docs", "reference.md")) as fh:
+            paras = [p for p in fh.read().split("\n\n") if "set-property romp-manager.service MemoryHigh" in p]
+        self.assertEqual(len(paras), 1, "one paragraph names the set-property command")
+        para = paras[0]
+        self.assertIn("restart", para, "the paragraph says the setting takes effect at the kernel's next restart: %r" % para[-400:])
+        self.assertIn("at start", para.replace("at its start", "at start"), "and that the kernel reads the limit at start")
+        self.assertIsInstance(em._CGROUP_MEMORY_LIMIT, int, "the limit is a module constant, read at load")
+        self.assertEqual(em.record_cache_stats()["cgroupLimitBytes"], em._CGROUP_MEMORY_LIMIT, "/perf shows that constant")
+
+
 if __name__ == "__main__":
     unittest.main()
