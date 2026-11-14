@@ -182,6 +182,7 @@ def _set_perf_log(on):
 
 
 _PROCESS_SAID = set()   # the process block's gauges whose read failed and said so once (the heap block's _HEAP_SAID, for this block)
+_MALLINFO2_STRUCT = []  # the ctypes struct class mallinfo2 returns, built on the first read (_malloc_stats) and kept
 
 
 def _malloc_stats(rss_kb):
@@ -201,12 +202,13 @@ def _malloc_stats(rss_kb):
     if not sys.platform.startswith("linux"):
         raise OSError("glibc mallinfo2 is read on Linux only")
     import ctypes
-
-    class MallInfo2(ctypes.Structure):
-        _fields_ = [(name, ctypes.c_size_t) for name in ("arena", "ordblks", "smblks", "hblks", "hblkhd", "usmblks",
-                                                          "fsmblks", "uordblks", "fordblks", "keepcost")]
+    if not _MALLINFO2_STRUCT:                     # the struct class once per process: a class per read is cyclic garbage per poll
+        class MallInfo2(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_size_t) for name in ("arena", "ordblks", "smblks", "hblks", "hblkhd", "usmblks",
+                                                              "fsmblks", "uordblks", "fordblks", "keepcost")]
+        _MALLINFO2_STRUCT.append(MallInfo2)
     fn = ctypes.CDLL("libc.so.6").mallinfo2       # AttributeError on a libc without the symbol: said once by the caller
-    fn.restype = MallInfo2
+    fn.restype = _MALLINFO2_STRUCT[0]
     fn.argtypes = ()
     t0 = time.perf_counter()
     mi = fn()
