@@ -19,6 +19,9 @@ ROOT = os.path.dirname(HERE)
 BIN = os.path.join(ROOT, "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
+for _knob in ("ROMP_SPEND_GUARD_TREE_MEMO_BYTES", "ROMP_HYDRATED_CAP_MB", "ROMP_RECORD_CACHE_BUDGET_MB"):
+    os.environ.pop(_knob, None)   # the bounds compared below honour these overrides at import: a developer shell exporting one
+#                                   must not fail a test about the cgroup limit (review 2026-11-14), as KernelKnob clears the freeze knobs
 em = load_source("romp_event_model_cgroup_ceiling", os.path.join(BIN, "romp-event-model"))
 km = load_source("romp_kernel_cgroup_ceiling", os.path.join(BIN, "romp-kernel"))
 
