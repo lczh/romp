@@ -4011,7 +4011,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `ROMP_RECORD_CACHE_DECODED_MULTIPLE` sets it, over 0 and at most 1000, and
   1 weighs file bytes as before 2026-10-01); `budgetBytes`, the byte budget
   in memory, per process, which `realBytes` is weighed against, the least
-  recently used entries going past it (half of MemTotal; never under 4 GiB of file bytes,
+  recently used entries going past it (half of MemTotal, or of the process's
+  cgroup memory limit where one sits below it, the smallest `memory.max` or
+  `memory.high` of its cgroup and their ancestors, a service unit's
+  `MemoryMax=` or `MemoryHigh=`, shown as `cgroupLimitBytes`, 0 when none;
+  never under 4 GiB of file bytes,
   which is 4 GiB times `decodedMultiple` in memory, so a machine under about
   23 GiB, or one without `/proc/meminfo` such as macOS, holds 4 GiB of file
   bytes (before 2026-10-01 a Linux machine over 8 GiB held half its memory
