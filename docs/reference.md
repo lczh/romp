@@ -3298,7 +3298,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   warm-up never walks), the next idle cycle runs the backstop; a busy cycle takes
   it at a half. The walk comes once per quarter of growth whether the growth was
   garbage or a cache filling, so it costs a constant per allocated block, as
-  CPython's rule does. A backstop is staged as a release is: a cheap collect
+  CPython's rule does. The floor protects a small kernel's warm-up only: the
+  baseline is the first freeze's reading, so a loaded kernel's warm-up walks at
+  every quarter of its fill, several walks in a restart's first minutes (a
+  tenfold fill walks eight times), bounded by the series rather than the floor,
+  since each walk costs its heap's size and the sizes grow by a quarter: their
+  sum is under five times the final heap's, under three on busy cycles. A backstop is staged as a release is: a cheap collect
   with the freeze in place first (the fold-in that cycle would have run, taking
   the young garbage since the last collection), then the unfreeze and the walk,
   so a reclaim's count is what the freeze held and not that plus the young. A

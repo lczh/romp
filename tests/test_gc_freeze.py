@@ -1519,7 +1519,8 @@ class HeapGrowthBackstop(unittest.TestCase):
     memory before then never walked at all. The bound is now also the heap's own growth, CPython's quarter rule (a full collection
     once the objects promoted since the last one reach a quarter of what survived it) applied to the generation the freeze hides
     from it: a fold-in reads sys.getallocatedblocks() after its freeze, and once the reading has grown past a quarter of the
-    reading at the last walk (and by the floor, so a small kernel's warm-up never walks), the next idle tick runs the backstop;
+    reading at the last walk (and by the floor, so a small kernel's warm-up never walks; a loaded kernel's warm-up walks at every
+    quarter of its fill, a bounded geometric series, the cadence test below), the next idle tick runs the backstop;
     a busy cycle takes it at a half, as it takes the fold-in count at twice its bound. The reading is a count of the small-object
     allocator's live blocks, about a millisecond per 9 million (never gc.get_freeze_count, a 14 ms per million walk that would
     double a fold-in's pause), so the trigger costs a fold-in nothing it can feel. A reclaim also reports what its unfrozen
@@ -1604,6 +1605,34 @@ class HeapGrowthBackstop(unittest.TestCase):
         blocks[0] = 1600
         self.assertEqual(c.tick(inserts=17), "load")
         self.assertEqual(c.tick(inserts=17), "backstop", "past the floor and past a quarter: the walk")
+
+    def test_a_loaded_kernels_warm_up_walks_at_every_quarter_a_bounded_geometric_series(self):
+        """Review 2026-11-14 (low): the floor in blocks protects a SMALL kernel's warm-up only. The baseline is the reading at the
+        initial freeze, the first loaded cycle, so a restarted kernel that fills from a few million blocks to tens of millions
+        walks at every quarter of growth on the way, several walks in its first minutes, when it is already slowest catching
+        up; what bounds that is the series, not the floor: each walk costs its heap's size, the sizes grow by a quarter, so the
+        sum is under five times the final heap's (one over one minus four fifths), and under three on busy cycles at a half.
+        Pinned here with a 2M floor and 100k-block steps: a tenfold fill, 4M to 40M, walks eight times at the listed sizes (the
+        reading is taken after a run, so each walk comes at the tick after the reading crossed the threshold, and re-baselines
+        at that tick's reading), and the docstring and the reference say so rather than leaving the floor to imply one early walk."""
+        fake, blocks = FakeGc(), [4_000_000]
+        c = self._controller(fake, blocks, backstop_growth_floor=2_000_000)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        walks, ins = [], 1
+        while blocks[0] < 40_000_000:
+            blocks[0] += 100_000
+            ins += 8
+            if c.tick(inserts=ins) == "backstop":
+                walks.append(blocks[0])
+        self.assertEqual(walks, [6_100_000, 8_200_000, 10_400_000, 13_100_000, 16_500_000, 20_800_000, 26_100_000, 32_800_000],
+                         "the floor holds the first two walks to +2M, then each comes at +25% of the last walk's reading, one tick after")
+        self.assertEqual(len(walks), 8, "eight walks over a tenfold warm-up")
+        self.assertLess(sum(walks), 5 * blocks[0], "their summed size, the cost, is under five times the final heap's: %d" % sum(walks))
+        self.assertGreater(sum(walks), 3 * blocks[0], "and not small: over three times it (%d), the restart's price for the bound" % sum(walks))
+        flat = lambda text: " ".join(text.split())        # the reference wraps its lines: compare the words
+        self.assertIn("warm-up walks at every quarter", flat(gf.__doc__), "the module docstring states the loaded kernel's cadence")
+        with open(os.path.join(ROOT, "docs", "reference.md")) as fh:
+            self.assertIn("warm-up walks at every quarter", flat(fh.read()), "and so does the reference")
 
     def test_the_defaults_and_a_heap_reader_that_raises(self):
         self.assertEqual(gf.DEFAULT_BACKSTOP_GROWTH, 0.25, "CPython's own quarter")

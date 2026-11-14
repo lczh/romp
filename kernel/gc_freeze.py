@@ -53,6 +53,11 @@ where `gc.get_freeze_count()` is a 14 ms per million walk of the frozen list tha
 the reading has grown past `backstop_growth` of the reading at the last walk (a quarter, CPython's own trigger for a full
 collection applied to the generation the freeze hides from it) and past the floor (two million blocks, so a small kernel's
 warm-up never walks), the next idle tick runs the backstop; a busy cycle takes it at a half, as it takes the count at twice.
+The floor protects a small kernel's warm-up only: the baseline is the initial freeze's reading, the first loaded cycle, so a
+loaded kernel's warm-up walks at every quarter of its fill, from a few million blocks to tens of millions, several walks in a
+restart's first minutes, when it is already slowest catching up (a tenfold fill walks eight times). What bounds that is the
+series, not the floor: each walk costs its heap's size and the sizes grow by a quarter, so their sum is under five times the
+final heap's, under three on busy cycles at a half.
 The walk's cost is linear in the frozen heap and it comes once per quarter of growth, so, like CPython's rule, it costs a
 constant per allocated block whether the growth was garbage or a cache filling; a cache filling buys one wasted walk per
 quarter, never more. Every reclaim records what its unfrozen collection found (`last_reclaim_collected`: the garbage the freeze
@@ -132,7 +137,9 @@ DEFAULT_BACKSTOP_GROWTH = 0.25   # the heap's growth since the last frozen-heap 
 #                                  that rule. Read as sys.getallocatedblocks() after a run's freeze: the small-object allocator's live
 #                                  blocks, about a millisecond per nine million, never gc.get_freeze_count (14 ms per million frozen)
 DEFAULT_BACKSTOP_GROWTH_FLOOR_BLOCKS = 1 << 21   # and by at least this many blocks (a few hundred MB of small objects): a small kernel
-#                                                  grows by a quarter in its first minutes of warm-up and owes no frozen-heap walk for it
+#                                                  grows by a quarter in its first minutes of warm-up and owes no frozen-heap walk for it.
+#                                                  A loaded kernel's warm-up is not protected by it: that one walks at every quarter of
+#                                                  its fill, a geometric series summing to under five times the final heap (docstring)
 MAX_GEN2_THRESHOLD = 2147483647  # the largest C int, the most gc.set_threshold takes: a knob past it falls back to the default
 _OFF = ("off", "0", "false")
 
