@@ -1525,7 +1525,7 @@ that hangs is
 killed with everything under it, TERM then KILL, so a version manager's shim that
 runs `node` without replacing itself leaks nothing.
 
-The installed unit also sets `MALLOC_ARENA_MAX=2` for the manager and every kernel it spawns (2026-09-11): the kernel is a many-threaded Python process that rebuilds large record lists, and the allocator's per-thread arenas kept hundreds of megabytes of freed memory between restarts; two arenas return it. A line in `service.env` overrides it.
+The installed unit also sets `MALLOC_ARENA_MAX=2` for the manager and every kernel it spawns (2026-09-11): the kernel is a many-threaded Python process that rebuilds large record lists, and the allocator's per-thread arenas kept hundreds of megabytes of freed memory between restarts; two arenas return it. A line in `service.env` overrides it. The kernel's memory-scaled bounds (the record cache budget, the hydrated-body cap, the atom slots, the memo bounds) read the unit's `MemoryHigh=` or `MemoryMax=` when one is set (`systemctl --user set-property romp-manager.service MemoryHigh=24G`, or a drop-in), taking the smaller of it and the machine's memory, and `recordCache.cgroupLimitBytes` on `GET /perf` shows what was read; with `MemorySwapMax=0` a cgroup high throttles the process rather than freeing anything, so the setting is a sizing hint for romp and not a mitigation on its own.
 
 Romp holds no API key (the user 2026-09-08, who wants romp to hold no key). A
 session's credential is Claude Code's own resolution: the `apiKeyHelper` in its
