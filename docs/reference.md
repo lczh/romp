@@ -3259,13 +3259,34 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   registered is bounded by the next thousand loads, not the process lifetime.
   The backstop walks the frozen heap, so an idle cycle runs it; a busy cycle
   runs it only once the fold-ins reach twice `backstopFoldins`, so a pusher that
-  never idles still bounds it. A busy cycle judges the ended sessions only
+  never idles still bounds it. The backstop is also owed by the heap's GROWTH
+  (2026-11-14): a fold-in freezes every live object, the soon-to-die cycles of
+  every other thread's work in flight included, and a cycle frozen live that dies
+  later is out of every collection's reach until the next frozen-heap walk; a
+  loaded kernel made about 40 fold-ins an hour, so the count alone was more than
+  a day. Each run reads the heap after its freeze (`sys.getallocatedblocks()`,
+  the small-object allocator's live blocks, about a millisecond per nine million;
+  `heapBlocks`), and once it has grown past `backstopGrowth` (a quarter, CPython's
+  own full-collection trigger applied to the generation the freeze hides from it)
+  of the reading at the last walk (`heapBlocksAtWalk`: the initial freeze, a full
+  release or a backstop) and by at least two million blocks (a small kernel's
+  warm-up never walks), the next idle cycle runs the backstop; a busy cycle takes
+  it at a half. The walk comes once per quarter of growth whether the growth was
+  garbage or a cache filling, so it costs a constant per allocated block, as
+  CPython's rule does. A reclaim records what its unfrozen collection found,
+  `lastReclaimCollected` (the garbage the freeze had held, exactly) and
+  `reclaimCollected` (summed), and `frozenAtReclaim`, `gc.get_freeze_count()`
+  after its re-freeze, read only there, where the walk was just paid for; each
+  backstop also writes one stderr line with those figures. A busy cycle judges the ended sessions only
   before the first freeze, as an idle one does: the initial freeze's collect
   takes their pre-freeze garbage, so the owed ones are dropped at no cost. Once
   a freeze is held, a busy cycle never judges an ended session. The
   sub-block carries `enabled`, `active` (whether a freeze is held now; named
   apart from the `frozen` count above, `gc.get_freeze_count()` on `?walk=1`),
-  `loadTrees` and `backstopFoldins` (the two thresholds), `gen2Threshold` (the
+  `loadTrees`, `backstopFoldins` and `backstopGrowth` (the three thresholds),
+  `heapBlocks`, `heapBlocksAtWalk`, `lastReclaimCollected`, `reclaimCollected` and
+  `frozenAtReclaim` (the growth bound's readings and the last reclaim's finds,
+  above), `gen2Threshold` (the
   full-collection trigger the controller set, below, or `null` while the
   stock one stands), `busyRuns` (of the
   runs, those a busy cycle made: a first freeze, load fold-ins and a busy
