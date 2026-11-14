@@ -57850,12 +57850,17 @@ _SPEND_TREE_CACHE = {}              # leaf -> {"dirs": {dir: mtime}, "files": {p
 #                                     stat pass, "seen": epoch}: the session's subagents tree, watched by directory mtimes
 
 
-def _mem_total_bytes(meminfo="/proc/meminfo"):
-    """The machine's memory (MemTotal from /proc/meminfo; sysconf where there is no procfs), for the bounds that scale
-    with the box (the user's caches direction 2026-09-11: a memo's bound is a fraction of memory, never a small literal).
-    A masked /proc or a hardened container answers sysconf with 0 or -1 (its documented indeterminate answer), and a
-    bound of zero would drop every live memo each tick, the opposite of a memo, so anything not positive falls to an
-    8 GB default (the follow-up review's second round)."""
+def _mem_total_bytes(meminfo="/proc/meminfo", cgroup_limit=None):
+    """The memory this process has (MemTotal from /proc/meminfo; sysconf where there is no procfs; held under the
+    process's cgroup memory limit where one sits below it: `cgroup_limit` in bytes, em._cgroup_memory_limit_bytes, which
+    None reads for the default meminfo path and is none for a path a test names, so the file named is the whole input;
+    0 is none), for the bounds that scale with the box (the user's caches direction 2026-09-11: a memo's bound is a
+    fraction of memory, never a small literal; a service unit's MemoryMax= or MemoryHigh= is the memory the process may
+    use, 2026-11-14). A masked /proc or a hardened container answers sysconf with 0 or -1 (its documented indeterminate
+    answer), and a bound of zero would drop every live memo each tick, the opposite of a memo, so anything not positive
+    falls to an 8 GB default (the follow-up review's second round)."""
+    if cgroup_limit is None:
+        cgroup_limit = em._cgroup_memory_limit_bytes() if meminfo == "/proc/meminfo" else 0
     total = 0
     try:
         with open(meminfo) as f:
@@ -57871,6 +57876,8 @@ def _mem_total_bytes(meminfo="/proc/meminfo"):
             total = pages * page if pages > 0 and page > 0 else 0   # each factor on its own: two -1s multiply to 1
         except (OSError, ValueError, AttributeError, TypeError):
             total = 0
+    if cgroup_limit and cgroup_limit > 0:
+        total = min(total, cgroup_limit) if total > 0 else cgroup_limit
     return total if total > 0 else 8 * 1024 ** 3
 
 

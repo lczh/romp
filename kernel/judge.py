@@ -21765,7 +21765,8 @@ def _serve_counter_blocks():
 
 
 _SERVE_GAUGES = {                                 # the keys of each block that are GAUGES (a current size, a cap), not counters:
-    "recordCache": ("entries", "bytes", "realBytes", "decodedMultiple", "budgetBytes", "countCap"),   #  they ride as their current values, never as a difference
+    "recordCache": ("entries", "bytes", "realBytes", "decodedMultiple", "budgetBytes", "cgroupLimitBytes", "countCap"),   #  they ride as their
+    #                                                                                                      current values, never as a difference
     "asmCheckpoint": ("asmDocMemo",),             # (round three); restoreMs is NOT one: _restore_ms accumulates since boot, so its
     "parses": (), "goalIo": (),                   #  per-pass difference is the pass's own restore time (round four)
     "tierGate": ("stamps",)}                      # the stamps held is a size, the per-tier counters are counters
