@@ -514,6 +514,34 @@ class ProvisionalLegsMatchBuilt(unittest.TestCase):
         light = km._light_status(S3, self.path, row, self.now)
         return {k: built.get(k) for k in self.PAINTER_KEYS}, {k: light.get(k) for k in self.PAINTER_KEYS}
 
+    # the billing position the tab's own menu reads off the status (render.ts showTabMenu), carried by the provisional
+    # status since 2026-11-15, when a tab nobody is watching stopped being rebuilt (tests/test_unwatched_tabs.py)
+    BILLING_KEYS = ("auth", "authOwn", "authLive", "authBoth", "authAvail", "authPickUnavailable", "authAcct", "authLogin",
+                    "authLabel", "authLoginLive", "authPending", "relaunchWaits")
+
+    def test_the_billing_fields_the_tabs_menu_reads_agree_with_the_built_status(self):
+        self._plain_transcript()
+        for what, row in (("a row with no billing fields", self._row()),
+                          ("a session on its own pick, a stored login, switching", self._row(
+                              relaunchWaits="its turn to end", authOwn=True, authLogin="lg-1", authLabel="Work", authLoginLive="lg-1",
+                              authPending=True, auth="login", authLive="key", authPickUnavailable="key")),
+                          ("a session following the machine's default", self._row(auth="key", authOwn=False, authLive="key"))):
+            live = {S3: row}
+            km.Sessions.live = lambda live=live: dict(live)
+            km._live_scope.snapshot = None
+            built = km.build_session(S3, self.now, live)["status"]
+            light = km._light_status(S3, self.path, row, self.now)
+            for k in self.BILLING_KEYS:
+                self.assertIn(k, light, "%s: the provisional status carries %s" % (what, k))
+                self.assertEqual(light[k], built.get(k), "%s: %s" % (what, k))
+        src = open(os.path.join(os.path.dirname(HERE), "ui", "webview", "render.ts"), encoding="utf-8").read()
+        menu = src[src.index("const st = s ? s.status : null;\n  if (st && st.auth && (st.authAvail || st.authBoth)) {"):]
+        menu = menu[:menu.index("\n}\n")]
+        import re as _re
+        read = set(_re.findall(r"\bst\.(auth\w*|relaunchWaits)", menu))
+        self.assertTrue(read, "the scan found the menu's reads")
+        self.assertTrue(read <= set(self.BILLING_KEYS), "billing fields the menu reads that the pin does not compare: %r" % sorted(read - set(self.BILLING_KEYS)))
+
     def test_the_painter_keys_agree_on_every_leg(self):
         legs = []
         self._plain_transcript(); legs.append(("idle, context 37", self._row()))

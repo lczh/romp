@@ -117,8 +117,8 @@ test("statusOnly begins with the skeleton branch: store + scheduleRenderTabs (on
   // …and the copy the page still holds takes the status too (noteHeldStatus, 2026-11-15): the bookkeeping readers of
   // `sessions` (a folded section's pip, the mention roster) read it for tabs that are not on screen
   assert.equal(first, 'if (onStatus(skeletonTabs, msg.id, msg.status) === "skeleton") { noteHeldStatus(msg.id, msg.status); scheduleRenderTabs(); return; }');
-  assert.match(fn("noteHeldStatus"), /const held = sessions\.get\(id\);\s*\n\s*if \(held && status\) held\.status = status as Status;/,
-    "the status alone, and only of a copy that exists: its events stay behind liveSession");
+  assert.match(fn("noteHeldStatus"), /const held = sessions\.get\(id\);\s*\n\s*if \(held && status\) held\.status = \{ \.\.\.held\.status, \.\.\.\(status as Status\) \};/,
+    "the status alone, laid over what the last build said (the short status carries no billing, no directory), and only of a copy that exists: its events stay behind liveSession");
   // The shim's FIFO carries a newer strip to the END of a burst, so a skeleton's statuses can land ahead of the strip that
   // names the set (a later chat column's open sends two strips, 2026-09-11): the status waits for the strip. The ask that
   // stood here loaded the whole board into a column opened as a view of one session, one ask per withheld tab.

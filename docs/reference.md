@@ -4443,10 +4443,13 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   for, whose build signature moved past its cached build; the pushes after it
   count under `coldSkipped`) and `restHeld` (per reason, the unwatched tabs that
   were built after all: `asked` and `unserved` are a page's own ask and a page
-  being handed a tab it holds in no form; `noCap` is a chat client that never
+  being handed a tab it holds in no form; `uncached` is the one build a tab
+  with no cached build gets before it can rest; `noCap` is a chat client that never
   said it can take a loaded tab back, a page loaded before this build or the
   VS Code chat panel, and while one is connected every tab it holds is
-  rebuilt each cycle; `plainOutline` an Outline pane without provisional rows;
+  rebuilt each cycle; `unreported` a page that names no tab it is showing,
+  which keeps what it holds built; `plainOutline` an Outline pane without
+  provisional rows;
   `noLiveRow`, `noClient`, `armed` and `watched` the remaining cases),
   `active_built` and `bg_built` (rebuilds of the watched tab
   against rebuilds of a background tab), `moved` (builds not cached because

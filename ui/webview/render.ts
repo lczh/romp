@@ -23872,13 +23872,15 @@ function awaitKey(st: Status | undefined): string {
 
 // The copy of a skeleton tab the page still holds keeps the kernel's STATUS current (2026-11-15), never its events. The
 // bookkeeping readers of `sessions` read that status for tabs that are not on screen (a folded section's pip, the
-// mention roster, the retry tick's set), and a tab now rests for as long as nobody opens it: a status frozen at the
-// moment of the rest hid a session that had since stopped on a question behind its section's fold. Display paths
-// still read through liveSession, so nothing paints the copy's events as current, and the full that loads the tab
-// replaces the whole entry.
+// mention roster, the retry tick's set, the tab's own menu), and a tab now rests for as long as nobody opens it: a
+// status frozen at the moment of the rest hid a session that had since stopped on a question behind its section's
+// fold. The frame's fields go OVER the copy's: a skeleton's status is the kernel's short one (the state, the needs-you
+// mark, the gauge, the model and effort), and what it does not carry (the billing the tab's menu offers, the
+// directory) stays as the last build said it. Display paths still read through liveSession, so nothing paints the
+// copy's events as current, and the full that loads the tab replaces the whole entry.
 function noteHeldStatus(id: string, status: unknown): void {
   const held = sessions.get(id);
-  if (held && status) held.status = status as Status;
+  if (held && status) held.status = { ...held.status, ...(status as Status) };
 }
 
 function statusOnly(msg: any) {

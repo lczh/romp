@@ -107,6 +107,7 @@ class _Base(unittest.TestCase):
         km.jd._rebind_state(state)                     # the goal directory follows (the provisional row reads the store)
         (state / "session-hosts").write_text("off\n")
         km._built_chat.clear(); km._prev_chat_events.clear(); km._prev_chat_ledger.clear(); km._chat_baseline_raced.clear()
+        getattr(km, "_chat_rest_retried", set()).clear()
         if hasattr(km, "_prov_ledger_memo"):
             km._prov_ledger_memo.clear()
         del km._clients[:]
@@ -377,6 +378,75 @@ class UnwatchedTabs(_Base):
         self.assertIsNone(km._rest_unwatched(S2, [c], light))
         self.assertIsNone(km._rest_unwatched(S2, [c], light), "a tab already at rest stays, and no second frame goes")
         self.assertEqual(len(self._frames(c, "status", S2)), 1)
+
+    def test_16_a_page_that_names_no_tab_keeps_what_it_holds(self):
+        # a first load with no saved tab: the dial carries no active hint, the page's first report is an activeTab with no
+        # id (its first paint runs before a session has landed), and the report naming the tab follows. The kernel cannot
+        # know which tab is on screen until then, so none is taken back: taken back in that moment, the tab the reader was
+        # on went to the loader and was fetched a second time
+        c = self._client()
+        self.assertNotIn("active", c)
+        self._warm(c)
+        for report in (None, {"type": "activeTab", "id": None}, {"type": "activeTab", "id": ""}):
+            if report is not None:
+                km.Handler._dispatch_ws(_Self(), report, c)
+            del self.built[:]; km._PERF_STATS.reset()
+            self._move(S1); self._move(S2)
+            km._push([c])
+            self.assertEqual(sorted(self.built), [S1, S2], "both built, as before: %r" % (report,))
+            self.assertEqual(self._frames(c, "status"), [])
+            self.assertEqual(self._chat()["restHeld"], {"unreported": 2})
+        del self.built[:]; c["_frames"].clear()
+        km.Handler._dispatch_ws(_Self(), {"type": "activeTab", "id": S1}, c)   # the page names its tab
+        self._move(S1); self._move(S2)
+        km._push([c])
+        self.assertEqual(self.built, [S1], "it watches web: api rests")
+        self.assertEqual([f.get("rest") for f in self._frames(c, "status", S2)], [True])
+        # a linked machine's relay names an active only while the page's tab lives here: for it none named is the report
+        relay = self._client(kind="relay")
+        self._warm_second(relay, c)
+        del self.built[:]
+        self._move(S3)
+        km._push([c, relay])
+        self.assertEqual(self.built, [], "neither the page nor the relay watches tests")
+        self.assertEqual([f.get("rest") for f in self._frames(relay, "status", S3)], [True])
+
+    def test_17_a_tab_with_no_cached_build_gets_one_build_and_rests_if_that_one_cannot_be_cached_either(self):
+        # the page holds api whole from a build nothing recorded (an ask's own push whose inputs moved under it, a
+        # per-session push): there is no signature for it to have moved past, so one build says where it stands. A
+        # session's very first build is the common case: it mints the goal store and so moves its own signature, and
+        # without this build every tab the idle prefetch had just filled went straight back to rest
+        c = self._client(active=S1)
+        self._warm(c)
+        km._built_chat.pop(S2)                               # the build the page's copy came from was never cached
+        km._push([c])
+        self.assertEqual(self.built, [S2], "built once, though nobody watches it and nothing moved")
+        self.assertEqual(self._frames(c, "status"), [], "and it stays a loaded tab")
+        self.assertIn(S2, c["echat"]); self.assertIn(S2, km._built_chat)
+        self.assertEqual(self._chat()["restHeld"], {"uncached": 1})
+        del self.built[:]
+        km._push([c])
+        self.assertEqual(self.built, [], "cached now: served, as any unwatched tab whose signature holds")
+        # a session that keeps moving under its builds: the one build cannot be cached either, and the tab rests
+        km._built_chat.pop(S2)
+        real = km.build_session
+
+        def moving(sid, now, live_map=None, **kw):
+            m = real(sid, now, live_map, **kw)
+            if sid == S2:
+                self._move(S2)                               # the transcript grew while the build ran
+            return m
+        km.build_session = moving
+        km._push([c])
+        self.assertEqual(self.built, [S2], "its one build")
+        self.assertNotIn(S2, km._built_chat, "which could not be cached: an input moved under it")
+        self.assertEqual(self._frames(c, "status"), [])
+        del self.built[:]
+        km._push([c])
+        self.assertEqual(self.built, [], "no second build for a tab nobody watches")
+        self.assertEqual([f.get("rest") for f in self._frames(c, "status", S2)], [True], "it is taken back instead")
+        self.assertEqual(self._chat()["restHeld"], {"uncached": 2})
+        self.assertNotIn(S2, km._chat_rest_retried, "the mark goes with the rest")
 
     def test_12_the_per_session_push_states_a_resting_tabs_status_and_builds_nothing(self):
         c = self._client(active=S1)
