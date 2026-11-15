@@ -21,7 +21,9 @@ long session has), and one chat page spoken as the real one speaks, over a WebSo
   then the clicks, each timed from the click to the page holding the session's newest step as of the click (click to
   fresh; 0 when a frame it already had carried that step): the other tabs of the watched set (inside), --clicks small tabs
   outside it, and every large tab outside it. A tab outside the set went out of date, so its click sends what the page
-  sends (activeTab, then the ask its loader makes), and for a large one the row says where the wait went: the kernel's
+  sends (activeTab, then the ask for the tab whole; the page shows the copy it holds meanwhile, so the time measured is
+  the copy's catching up, not a blank pane); each such click is split in the --json row into the kernel's push for the
+  ask and the session's build inside it (outsideSplit), and for a large one the row says where the wait went: the kernel's
   whole push for the ask, the restore of the session's saved document inside it, what was parsed, and the frame's bytes.
 
 --tracking sets the kernel's Task tracking switch (default off, the measured machine's setting: no feed is built). On,
@@ -578,8 +580,8 @@ def run_road(road, a, watched_k, root, total):
             at = page.count()
             tc = time.monotonic()
             page.say({"type": "activeTab", "id": tr.sid})
-            if ask:                                  # a tab that went out of date shows the loader and asks (render.ts showActive)
-                page.say({"type": "needFull", "id": tr.sid, "why": "skeleton-click"})
+            if ask:                                  # a tab at rest shows the copy the page holds and asks (render.ts catchUp)
+                page.say({"type": "needFull", "id": tr.sid, "why": "rest-open"})
             hit = page.wait(lambda typ, fid, raw, s=tr.sid, m=newest: fid == s and typ in ("chatTail", "session") and m in raw,
                             since=f0, timeout=1800)  # from the span's start: a frame the page already held may carry it
             state_now["on"] = tr
@@ -593,9 +595,10 @@ def run_road(road, a, watched_k, root, total):
         rr = random.Random(13)
         picks = list(outside_small)
         rr.shuffle(picks)
-        outside = [click(tr, rest)[0] for tr in picks[:a.clicks]]
-        large_rows = []
-        for tr in outside_large:
+        def split_click(tr):
+            """A click on a tab outside the set, with the kernel's own clocks read before and after it: (seconds to fresh,
+            the frame, the two /perf reads, the session's build row before and after, the ask's push in ms and how many
+            pushes answered asks meanwhile)."""
             q0 = _get(port, token, "/perf")
             dt, raw = click(tr, rest)
             time.sleep(0.5)
@@ -603,14 +606,30 @@ def run_road(road, a, watched_k, root, total):
             row0 = next((r for r in _dig(q0, "builds", "chat", "bySession") or [] if r.get("sid") == tr.sid), {})
             row1 = next((r for r in _dig(q1, "builds", "chat", "bySession") or [] if r.get("sid") == tr.sid), {})
             rep0, rep1 = _dig(q0, "pusher", "connectPush", "repair") or {}, _dig(q1, "pusher", "connectPush", "repair") or {}
+            return dt, raw, q0, q1, row0, row1, rep1.get("ms_sum", 0) - rep0.get("ms_sum", 0), rep1.get("count", 0) - rep0.get("count", 0)
+
+        # a small tab outside the set: the click, the kernel's push for its ask, and the build inside that push (the
+        # session's own build timer), so a wait that is neither says so
+        outside, outside_split = [], []
+        for tr in picks[:a.clicks]:
+            dt, raw, q0, q1, row0, row1, push_ms, pushes = split_click(tr)
+            outside.append(dt)
+            built = (row1.get("n") or 0) - (row0.get("n") or 0)
+            outside_split.append({"clickToFreshMs": _ms(dt), "askPushMs": round(push_ms, 1), "askPushes": pushes,
+                                  "buildMs": round(row1.get("last") or 0, 1) if built else None, "chatBuilds": built})
+        large_rows = []
+        for tr in outside_large:
+            dt, raw, q0, q1, row0, row1, push_ms, pushes = split_click(tr)
             road0, road1 = _dig(q0, "parses", "byRoad") or {}, _dig(q1, "parses", "byRoad") or {}
             rs0, rs1 = _find(q0, "restoreMs") or {}, _find(q1, "restoreMs") or {}
-            push_ms = rep1.get("ms_sum", 0) - rep0.get("ms_sum", 0)
             restore = {k: round(v - rs0.get(k, 0), 1) for k, v in rs1.items() if isinstance(v, (int, float)) and v - rs0.get(k, 0) >= 0.05}
             large_rows.append({
                 "sid": tr.sid[:8], "transcriptMB": round(os.path.getsize(tr.path) / 1048576, 1), "clickToFreshMs": _ms(dt),
                 # the kernel's whole push for the ask (the strip, the build, the frame handed to the socket's queue)
-                "askPushMs": round(push_ms, 1), "askPushes": rep1.get("count", 0) - rep0.get("count", 0),
+                "askPushMs": round(push_ms, 1), "askPushes": pushes,
+                # the session's build inside it, by the kernel's per-session build timer (the last build's time, when the
+                # click built it): what is left of the push is the strip, the statuses, the send, and any wait on another thread
+                "buildMs": round(row1.get("last") or 0, 1) if (row1.get("n") or 0) > (row0.get("n") or 0) else None,
                 # the restore of the session's saved document inside it, by part (the kernel's own clocks), when one ran:
                 # a session nobody reads has its parsed history handed to its document and is read back on the ask
                 "restoreMs": restore,
@@ -660,6 +679,7 @@ def run_road(road, a, watched_k, root, total):
             "insideClicks": len(inside), "insideClickToFreshMs": {"p50": _ms(_pct(ok_in, 0.5)), "max": _ms(max(ok_in)) if ok_in else None},
             "outsideClicks": len(outside), "outsideUnanswered": len(outside) - len(ok_out),
             "outsideClickToFreshMs": {"p50": _ms(_pct(ok_out, 0.5)), "max": _ms(max(ok_out)) if ok_out else None},
+            "outsideSplit": outside_split,
             "largeOutside": large_rows,
             # each large session's chat builds over the span (the kernel's per-session timer): how many, and what one cost
             "largeBuilds": [{"sid": t.sid[:8], "watched": bool(rest and t.sid in (want or ())) or not rest,
