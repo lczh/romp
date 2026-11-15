@@ -3319,14 +3319,21 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `recordCache.cgroupLimitBytes` is that limit as read at start). A 30 GB
   kernel on a 2 TB host does not walk for growth, a 3 GB kernel on a 15 GB
   machine not until it passes 7.5 GB, and a kernel under a unit's `MemoryHigh=`
-  or `MemoryMax=` walks from half that limit. Both readings are taken once per
-  run, after its freeze, and the bound is read live, so a limit lowered on a
-  running kernel arms the gate at its next fold-in. Under the fraction a run
+  or `MemoryMax=` walks from half that limit. The bound is read once, at the
+  first run, as every memory-scaled bound is read once at start, so a
+  `MemoryHigh=` changed on a running kernel applies at its next start. The
+  resident size is read once per run, after its freeze, by one read of
+  `/proc/self/statm`: three syscalls. A run is on the pusher thread, where
+  each syscall releases the GIL and can cost the pusher a switch interval to
+  get the interpreter back, and re-reading the bound's cgroup files there
+  made 115 syscalls a run on a five-level cgroup path (beside two CPU-bound
+  threads in a lab, a median of 521 ms a run then and 21 ms now), which a
+  limit applying without a restart is not worth. Under the fraction a run
   reads neither `sys.getallocatedblocks()` (`heapBlocks` is then `null`) nor,
   on a reclaim, `gc.get_freeze_count()` (`frozenAtReclaim` is then `null`;
   `?walk=1` still reads the count), so a run costs what it did before the
-  growth bound plus the two readings (0.4 ms measured on a six-level cgroup
-  path); the fold-in count and a release walk at any size. A gate that opens
+  growth bound plus that one read (0.04 ms uncontended); the fold-in count
+  and a release walk at any size. A gate that opens
   after the first freeze has no walk to measure from, so the walk is owed at
   once (past the floor, on a busy cycle too) and the quarter rule holds from
   that walk on; the baseline moves only at a walk whose reading was taken and
@@ -3364,8 +3371,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   apart from the `frozen` count above, `gc.get_freeze_count()` on `?walk=1`),
   `loadTrees`, `backstopFoldins` and `backstopGrowth` (the three thresholds),
   `backstopResident`, `memoryBoundBytes`, `residentBytes`, `growthArmed` and
-  `growthWalks` (the growth gate: its fraction, the two readings of the last
-  run, whether growth owed the walk by them, and how many it has owed),
+  `growthWalks` (the growth gate: its fraction, the bound as read once at
+  the first run, the resident size at the last run, whether growth owed the
+  walk by them, and how many it has owed),
   `heapBlocks`, `heapBlocksAtWalk`, `lastReclaimCollected`, `reclaimCollected` and
   `frozenAtReclaim` (the growth bound's readings and the last reclaim's finds,
   above), `gen2Threshold` (the

@@ -1250,20 +1250,31 @@ class KernelKnob(unittest.TestCase):
     def test_the_resident_knob_reaches_the_kernels_controller_with_the_kernels_two_readers(self):
         """2026-11-15: ROMP_GC_FREEZE_BACKSTOP_RESIDENT reaches the controller the kernel builds at import, parsed like the
         growth knob beside it (a bad value falls back to the default, counted and said once; 0 is the switch that arms the
-        growth walk at any size; a fraction is passed as given), and that controller is given the kernel's own two readings:
-        the resident size /perf reports under process.rss_kb, and the memory bound every memory-scaled bound takes
-        (_mem_total_bytes, MemTotal under the process's cgroup limit). Unset, the default is one half."""
+        growth walk at any size; a fraction is passed as given), and that controller is given the kernel's own two readers:
+        _resident_bytes (the second field of /proc/self/statm times the page size, the counters /perf reports under
+        process.rss_kb; where that file cannot be read, _process_stats's own fallbacks), and the memory bound every
+        memory-scaled bound takes (_mem_total_bytes, MemTotal under the process's cgroup limit). Unset, the default is one half."""
         from unittest import mock
         km, err = self._load_with(None, "romp_kernel_knob_resident_unset", var="ROMP_GC_FREEZE_BACKSTOP_RESIDENT")
         self.assertEqual((km._GC_FREEZE.backstop_resident, km.gcf.DEFAULT_BACKSTOP_RESIDENT), (0.5, 0.5), "unset: one half")
         self.assertEqual(km._GC_FREEZE_ERRORS[0], 0)
         gib = 1 << 30
-        with mock.patch.object(km, "_process_stats", lambda: {"rss_kb": 3 * gib // 1024}), \
-             mock.patch.object(km, "_mem_total_bytes", lambda: 15 * gib):
-            self.assertEqual(km._GC_FREEZE._resident(), 3 * gib, "the resident reader is the /perf process block's rss_kb, in bytes")
-            self.assertEqual(km._GC_FREEZE._memory_bound(), 15 * gib, "the bound reader is the kernel's _mem_total_bytes, read at the call")
-        self.assertGreater(km._GC_FREEZE._resident(), 0, "this process's own resident size reads")
-        self.assertEqual(km._GC_FREEZE._memory_bound(), km._mem_total_bytes(), "and its own bound")
+        self.assertIs(km._GC_FREEZE._resident, km._resident_bytes, "the resident reader is the kernel's one-read _resident_bytes")
+        with mock.patch.object(km, "_mem_total_bytes", lambda: 15 * gib):
+            self.assertEqual(km._GC_FREEZE._memory_bound(), 15 * gib, "the bound reader is the kernel's _mem_total_bytes")
+        self.assertEqual(km._GC_FREEZE._memory_bound(), km._mem_total_bytes(), "this process's own bound")
+        if os.path.exists("/proc/self/statm"):
+            with open("/proc/self/statm") as fh:
+                want = int(fh.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+            got, status = km._resident_bytes(), km._process_stats()["rss_kb"] * 1024
+            self.assertAlmostEqual(got, want, delta=64 << 20, msg="the second field of /proc/self/statm, in bytes")
+            self.assertAlmostEqual(got, status, delta=64 << 20, msg="the same resident size /perf reports from VmRSS")
+        def no_statm(path, *a, **k):
+            raise FileNotFoundError(path)
+        with mock.patch.object(km.os, "open", no_statm), mock.patch.object(km, "_process_stats", lambda: {"rss_kb": 3 * gib // 1024}):
+            self.assertEqual(km._resident_bytes(), 3 * gib, "no /proc/self/statm: _process_stats answers, with its own fallbacks")
+        with mock.patch.object(km.os, "open", no_statm), mock.patch.object(km, "_process_stats", lambda: {"rss_kb": 0}):
+            self.assertEqual(km._resident_bytes(), 0, "nothing readable anywhere reads 0, which the gate takes as no reading")
         bad, errb = self._load_with("abc", "romp_kernel_knob_resident_abc", var="ROMP_GC_FREEZE_BACKSTOP_RESIDENT")
         self.assertEqual(bad._GC_FREEZE.backstop_resident, 0.5, "abc falls back to the default")
         self.assertEqual(bad._GC_FREEZE_ERRORS[0], 1, "the bad knob is counted under errors, once")
@@ -1279,27 +1290,70 @@ class KernelKnob(unittest.TestCase):
         self.assertEqual(km3._GC_FREEZE.backstop_resident, 0.3, "a fraction is passed to the controller as given")
         self.assertEqual(km3._GC_FREEZE_ERRORS[0], 0)
 
-    def test_the_kernels_controller_reads_no_heap_while_the_kernel_is_small_for_its_memory(self):
-        """The whole road, on the controller the kernel builds: a 3 GB kernel on a 15 GB machine folds in and never calls
-        sys.getallocatedblocks(), its /perf block says why (armed false, both readings), and the same kernel at 8 GB reads
-        the heap on its next fold-in."""
+    def test_a_fold_in_under_the_gate_is_one_file_read_on_the_kernels_own_controller(self):
+        """The whole road, on the controller the kernel builds, with every file the fold-in touches counted. A fold-in runs
+        on the pusher thread, where each syscall releases the GIL and can cost the pusher a switch interval to get the
+        interpreter back: the gate's first form made 115 per fold-in on a five-level cgroup path (VmRSS out of
+        /proc/self/status, and the bound's /proc/meminfo, /proc/self/cgroup and two files per cgroup level, re-read every
+        time), and its review measured a median of 27 to 52 ms per fold-in so spent. Now the bound is read once, at the
+        first reconcile, and a fold-in makes ONE file read: one os.open of /proc/self/statm, one os.read, one os.close,
+        and no buffered open() at all. A 3 GB kernel on a 15 GB machine folds in so and never calls
+        sys.getallocatedblocks(); its /perf block says why; the same kernel at 8 GB reads the heap on its next fold-in.
+        The statm the kernel opens is a synthetic one here (the open is redirected to a file this test writes)."""
+        import builtins
         from unittest import mock
         km, _ = self._load_with(None, "romp_kernel_knob_resident_road", var="ROMP_GC_FREEZE_BACKSTOP_RESIDENT")
-        gib, c, reads = 1 << 30, km._GC_FREEZE, []
+        gib, c, page = 1 << 30, km._GC_FREEZE, os.sysconf("SC_PAGE_SIZE")
+        heap_reads, bound_reads, calls, me = [], [], [], threading.get_ident()
         c.enabled, c._gc, c._clock = True, FakeGc(), (lambda: 0.0)
-        c._heap_blocks = lambda: reads.append(1) or 5_000_000
-        rss = [3 * gib]
-        with mock.patch.object(km, "_process_stats", lambda: {"rss_kb": rss[0] // 1024}), \
-             mock.patch.object(km, "_mem_total_bytes", lambda: 15 * gib):
+        c._heap_blocks = lambda: heap_reads.append(1) or 5_000_000
+        statm = os.path.join(tempfile.mkdtemp(), "statm")
+        def resident(n):
+            with open(statm, "w") as fh:               # size resident shared text lib data dt, in pages
+                fh.write("%d %d 2500 600 0 %d 0\n" % (2 * n // page, n // page, n // page))
+        real_open, real_read, real_close, real_builtin_open = os.open, os.read, os.close, builtins.open
+        def os_open(path, *a, **k):
+            if threading.get_ident() != me:
+                return real_open(path, *a, **k)
+            calls.append(("os.open", path))
+            return real_open(statm if path == "/proc/self/statm" else path, *a, **k)
+        def os_read(fd, n):
+            if threading.get_ident() == me:
+                calls.append(("os.read",))
+            return real_read(fd, n)
+        def os_close(fd):
+            if threading.get_ident() == me:
+                calls.append(("os.close",))
+            return real_close(fd)
+        def builtin_open(path, *a, **k):
+            if threading.get_ident() == me:
+                calls.append(("open", path))
+            return real_builtin_open(path, *a, **k)
+        def bound():
+            bound_reads.append(1)
+            return 15 * gib
+        one_read = [("os.open", "/proc/self/statm"), ("os.read",), ("os.close",)]
+        resident(3 * gib)
+        with mock.patch.object(km, "_mem_total_bytes", bound), mock.patch.object(os, "open", os_open), \
+             mock.patch.object(os, "read", os_read), mock.patch.object(os, "close", os_close), \
+             mock.patch.object(builtins, "open", builtin_open):
             self.assertEqual(c.tick(inserts=1), "initial")
-            self.assertEqual(c.tick(inserts=9), "load")
-            self.assertEqual(reads, [], "no heap read on the first freeze or the fold-in: the kernel is a fifth of its memory")
+            self.assertEqual((bound_reads, calls), ([1], one_read), "the first reconcile reads the bound, once, and the resident size")
+            del calls[:]
+            for k in range(1, 6):
+                self.assertEqual(c.tick(inserts=1 + 8 * k), "load")
+                self.assertIsNone(c.tick(inserts=1 + 8 * k), "and a tick with nothing owed")
+            self.assertEqual(calls, one_read * 5, "each fold-in: one open, one read, one close of /proc/self/statm, and nothing else")
+            self.assertEqual(bound_reads, [1], "the bound was read at the first reconcile and never again")
+            self.assertEqual(heap_reads, [], "no heap read on the first freeze or the fold-ins: the kernel is a fifth of its memory")
             p = c.perf()
             self.assertEqual((p["growthArmed"], p["residentBytes"], p["memoryBoundBytes"], p["backstopResident"], p["growthWalks"]),
                              (False, 3 * gib, 15 * gib, 0.5, 0))
-            rss[0] = 8 * gib
-            self.assertEqual(c.tick(inserts=17), "load")
-            self.assertEqual(reads, [1], "past half its memory the fold-in reads the heap")
+            resident(8 * gib)
+            del calls[:]
+            self.assertEqual(c.tick(inserts=49), "load")
+            self.assertEqual(calls, one_read, "the same one read finds the kernel past half its memory")
+            self.assertEqual((heap_reads, bound_reads), ([1], [1]), "and the fold-in reads the heap")
             self.assertTrue(c.perf()["growthArmed"])
 
 
@@ -1924,8 +1978,9 @@ class GrowthGate(unittest.TestCase):
     quarter of growth, and what it buys is the frozen garbage's memory back. On a machine whose kernel is a small part of its memory that is a pause for memory nobody
     is short of, repeated as the heap fills after every restart. So growth owes the walk only while the process's resident
     size is at or above `backstop_resident` (one half) of its memory bound, the same min(MemTotal, the process's cgroup
-    limit) every memory-scaled bound takes; under it a run reads neither sys.getallocatedblocks() nor, on a reclaim,
-    gc.get_freeze_count(), which only the growth bound and its report needed. The fold-in count and a release walk as they
+    limit) every memory-scaled bound takes, read once as they are; the resident size is the one reading a run takes; under
+    the fraction a run reads neither sys.getallocatedblocks() nor, on a reclaim, gc.get_freeze_count(), which only the
+    growth bound and its report needed. The fold-in count and a release walk as they
     did. Pinned here on readers that count their calls: under the fraction (no walk, no heap read), at or above it (the
     growth bound as it was written), the gate opening later (one walk, then the quarter rule), a walk that itself closes
     the gate (still the baseline), the override fractions, the growth knob's 0, a reading that cannot be had, and /perf."""
@@ -1966,7 +2021,7 @@ class GrowthGate(unittest.TestCase):
             self.assertIsNone(c.tick(inserts=inserts), "an idle tick with nothing loaded runs nothing")
             self.assertIsNone(c.tick_busy(inserts), "a busy one neither")
         self.assertEqual(calls["heap"], 0, "sys.getallocatedblocks() was read on none of the four runs")
-        self.assertEqual((calls["resident"], calls["bound"]), (4, 4), "the gate's two readings, once per run and never per tick")
+        self.assertEqual((calls["resident"], calls["bound"]), (4, 1), "the resident size once per run and never per tick, the bound once at the first run")
         self.assertEqual((c.heap_blocks, c.heap_blocks_at_walk), (None, None), "no heap reading was taken")
         self.assertEqual((c.growth_armed, c.resident_bytes, c.memory_bound_bytes), (False, 3 * GB, 15 * GB))
         owner = _Owner()
@@ -2112,14 +2167,20 @@ class GrowthGate(unittest.TestCase):
         self.assertEqual(c.tick(inserts=9), "backstop", "a quarter of growth walks, 1 GB resident of 2 TB or not")
         self.assertEqual((calls["resident"], calls["bound"]), (0, 0), "the override at 0 reads neither the resident size nor the bound")
         self.assertEqual((c.growth_armed, c.growth_walks, c.resident_bytes, c.memory_bound_bytes), (True, 1, None, None))
-        # the bound is read at each run, so a limit lowered on a running kernel arms the gate at its next fold-in
+        # the bound is read ONCE, as the memory-scaled bounds are read once at start: a limit changed on a running kernel
+        # applies at its next start, never at a fold-in (a fold-in is no place for the cgroup tree's files)
         bound = [2048 * GB]
         c, calls = self._controller(CountingGc(), [1000], [30 * GB], bound)
         self.assertEqual(c.tick(inserts=1), "initial")
         self.assertFalse(c.growth_armed, "30 GB of 2 TB")
         bound[0] = 32 * GB
         self.assertEqual(c.tick(inserts=9), "load")
-        self.assertEqual((c.growth_armed, c.memory_bound_bytes), (True, 32 * GB), "30 GB of a 32 GB limit set since: armed, no restart")
+        self.assertEqual(c.tick(inserts=17), "load")
+        self.assertEqual((c.growth_armed, c.memory_bound_bytes, calls["bound"], calls["resident"]), (False, 2048 * GB, 1, 3),
+                         "a limit set since is not read: the bound of the first run stands, read once over three runs")
+        c, calls = self._controller(CountingGc(), [1000], [30 * GB], bound)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        self.assertEqual((c.growth_armed, c.memory_bound_bytes), (True, 32 * GB), "a kernel started under the 32 GB limit reads it: 30 GB of 32, armed")
 
     def test_the_resident_knob_parses_like_the_growth_knob(self):
         name = "ROMP_GC_FREEZE_BACKSTOP_RESIDENT"
@@ -2150,18 +2211,27 @@ class GrowthGate(unittest.TestCase):
     def test_a_reading_that_cannot_be_had_leaves_the_growth_walk_armed_and_says_so(self):
         """The gate holds a walk back on a reading that memory is plentiful, never on the lack of one: a reader that raises
         or answers nothing positive leaves growth owing the walk as it did before the gate, flagged for the kernel to say
-        once, with the missing reading null on /perf. A controller given no readers has no gate at all (the tests of the
-        growth bound itself build theirs so) and flags nothing."""
+        once, with the missing reading null on /perf. A bound that could not be read is not asked for again (it is read
+        once), and the resident size is then not read at all: there is nothing to compare it with. A controller given no
+        readers has no gate at all (the tests of the growth bound itself build theirs so) and flags nothing."""
         GB = self.GB
+        asked = {"resident": 0, "bound": 0}
         def boom():
             raise OSError("no /proc here")
-        for label, res, bnd, want in (("resident raises", boom, lambda: 15 * GB, (None, 15 * GB)),
-                                      ("resident reads 0", lambda: 0, lambda: 15 * GB, (None, 15 * GB)),
-                                      ("bound raises", lambda: 3 * GB, boom, (3 * GB, None))):
+        def counted(name, read):
+            def reader():
+                asked[name] += 1
+                return read()
+            return reader
+        for label, res, bnd, want, reads in (("resident raises", boom, lambda: 15 * GB, (None, 15 * GB), (3, 1)),
+                                             ("resident reads 0", lambda: 0, lambda: 15 * GB, (None, 15 * GB), (3, 1)),
+                                             ("bound raises", lambda: 3 * GB, boom, (None, None), (0, 1))):
             with self.subTest(label):
                 blocks = [1000]
+                asked.update(resident=0, bound=0)
                 c = gf.GcFreeze(enabled=True, load_trees=8, gc=CountingGc(), clock=lambda: 0.0, heap_blocks=lambda: blocks[0],
-                                backstop_growth=0.25, backstop_growth_floor=0, resident=res, memory_bound=bnd)
+                                backstop_growth=0.25, backstop_growth_floor=0, resident=counted("resident", res),
+                                memory_bound=counted("bound", bnd))
                 self.assertEqual(c.tick(inserts=1), "initial", "a reader that raises never fails the reconcile")
                 self.assertEqual((c.growth_armed, c.growth_gate_unread), (True, True))
                 self.assertEqual((c.resident_bytes, c.memory_bound_bytes), want)
@@ -2170,6 +2240,7 @@ class GrowthGate(unittest.TestCase):
                 self.assertEqual(c.tick(inserts=9), "backstop", "growth owes the walk as before the gate")
                 p = c.perf()
                 self.assertEqual((p["growthArmed"], p["residentBytes"], p["memoryBoundBytes"]), (True,) + want)
+                self.assertEqual((asked["resident"], asked["bound"]), reads, "over three runs: the bound asked for once, read or not")
         bare = gf.GcFreeze(enabled=True, load_trees=8, gc=CountingGc(), clock=lambda: 0.0, heap_blocks=lambda: 1000)
         self.assertTrue(bare.perf()["growthArmed"], "armed from the start, as /perf says before any run")
         self.assertEqual(bare.tick(inserts=1), "initial")

@@ -248,6 +248,34 @@ def _process_stats():
             "pid": os.getpid()}
 
 
+_PAGE_BYTES = []   # the page size, asked once on _resident_bytes's first call (sysconf answers from the process image: no syscall)
+
+
+def _resident_bytes():
+    """The process's resident size in bytes by ONE file read: the second field of /proc/self/statm (resident pages) times
+    the page size, through one open, one read and one close on the raw descriptor. The GC freeze's growth gate reads it
+    at every reconcile, on the pusher thread (2026-11-15), and there a syscall costs more than its microseconds: each
+    releases the GIL, and beside CPU-bound threads a release can cost the caller a switch interval before it has the
+    interpreter back. The gate's first form took _process_stats's VmRSS (/proc/self/status through a buffered text file)
+    and re-read the memory bound at every fold-in, 115 syscalls on a five-level cgroup path, and its review measured a
+    median of 27 to 52 ms per fold-in so spent, 0.4 s at worst; this is three, and the bound is read once
+    (gc_freeze's _read_gate). The counters are the ones VmRSS and /perf's process.rss_kb report. Where the file cannot
+    be read (macOS, a masked /proc) _process_stats answers with its own fallbacks: VmRSS, else getrusage's peak."""
+    try:
+        if not _PAGE_BYTES:
+            _PAGE_BYTES.append(int(os.sysconf("SC_PAGE_SIZE")))
+        if _PAGE_BYTES[0] <= 0:
+            raise OSError("no page size")
+        fd = os.open("/proc/self/statm", os.O_RDONLY)
+        try:
+            raw = os.read(fd, 256)
+        finally:
+            os.close(fd)
+        return int(raw.split()[1]) * _PAGE_BYTES[0]
+    except Exception:
+        return _process_stats()["rss_kb"] * 1024
+
+
 def _process_stats_perf():
     """The /perf snapshot's process block: _process_stats plus glibc's books under `malloc` (_malloc_stats; None where
     the runtime has none, said once through _heap_read under the block's own said-set). Only the snapshot reads this,
@@ -1498,7 +1526,8 @@ _PERF_STATS = _PerfStats()
 # or on a busy one past twice its bound. The frozen-heap walks wait for an idle cycle, except that busy backstop past twice
 # its bound. The backstop the heap's growth owes (2026-11-14) waits for memory to be scarce (2026-11-15): it is armed only while
 # this process's resident size is at or above half its memory bound (_mem_total_bytes: MemTotal under the process's cgroup
-# limit), the two readings the controller is handed below, taken once per reconcile. Default on; ROMP_GC_FREEZE=off.
+# limit). The controller is handed the two readers below: the bound it reads once, at its first reconcile, as every
+# memory-scaled bound is read once at start; the resident size once per reconcile, one file read. Default on; ROMP_GC_FREEZE=off.
 _GC_FREEZE_ERRORS = [0]
 _GC_FREEZE_SAID = [False]
 _GC_FREEZE_GATE_SAID = [False]   # the growth gate's unreadable resident size or bound, said once (_gc_freeze_tick)
@@ -1508,10 +1537,11 @@ _GC_FREEZE_BACKSTOP_RESIDENT, _gc_freeze_bad_resident = gcf.backstop_resident_fr
 #                                                                          before growth owes that backstop; 0 arms it at any size (2026-11-15)
 _GC_FREEZE = gcf.GcFreeze(enabled=gcf.enabled_from_env(), load_trees=_GC_FREEZE_LOAD_TREES,
                           backstop_growth=_GC_FREEZE_BACKSTOP_GROWTH, backstop_resident=_GC_FREEZE_BACKSTOP_RESIDENT,
-                          resident=lambda: _process_stats()["rss_kb"] * 1024,   # the resident size /perf reports (process.rss_kb), and
-                          memory_bound=lambda: _mem_total_bytes())   # the bound the memory-scaled caches take, both read at the call (a
-#                                                                      reconcile, never import: _mem_total_bytes is defined far below).
-#                                                                      The ended note (note_ended) is wired when the SDK backend loads (below)
+                          resident=_resident_bytes,   # the resident size by one read of /proc/self/statm, per reconcile, and
+                          memory_bound=lambda: _mem_total_bytes())   # the bound the memory-scaled caches take, read ONCE by the
+#                                                                      controller at its first reconcile (never at import:
+#                                                                      _mem_total_bytes is defined far below). The ended note
+#                                                                      (note_ended) is wired when the SDK backend loads (below)
 if _gc_freeze_bad_knob is not None:     # a bad ROMP_GC_FREEZE_LOAD_TREES fell back to the default: said once, counted, never fatal
     _GC_FREEZE_ERRORS[0] += 1
     try:
