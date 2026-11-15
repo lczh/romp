@@ -19,18 +19,21 @@ The rules under test (_spend_resume_pass, driven by the jobs pass's autoRetry jo
   R6  at most three retries out; a slot frees on the API's answer (an error as much as output) or the session's end;
       a press that finds the slots full keeps its probe; the log names the unanswered sessions the rest wait on
   R7  the person's Stop cancels the rest and holds, through the manual pause clearing itself and through a restart
+      (the door's own write carries it); only their own message to a session, or their Resume, lifts its hold
   R8  a kernel restart sends nothing twice and keeps the count of retries out: both come from the transcripts and
       the backend's queue (RealBackendHandOver drives the real backend)
   R9  `still` is per billing: it rides the status of the sessions on the billing the refused retry was on, and clears
       with the next write of the pause (the page's half is rendered in ui/webview/apierror-line-browser.test.ts)
   R10 afterRetry is never a guess: a tail window that cannot settle it is widened
   and an ANSWER is a record the model wrote in this conversation: not one the CLI writes itself (model "<synthetic>"),
-  not a subagent's (isSidechain), for the evidence, for a slot's release and for the pause's own lift (RealAnswers)
+  not a subagent's (isSidechain), for the evidence, for a slot's release and for the pause's own lift (RealAnswers);
+  whether a session is BLOCKED, and the health latch, read every record exactly as before this change (AsOnMain)
 
 Synthetic fixtures only: a private synthetic sid family, the notes-api demo's session names, invented error text.
 """
 import asyncio
 import contextlib
+import errno
 import inspect
 import io
 import json
@@ -44,6 +47,7 @@ import unittest
 from datetime import datetime, timezone
 from importlib.machinery import ModuleSpec
 from pathlib import Path
+from unittest import mock
 
 from romp_load import load_source
 
@@ -88,9 +92,9 @@ def synthetic_line(t):
     return _line("assistant", t, message={"role": "assistant", "model": "<synthetic>", "content": [{"type": "text", "text": "No response requested."}]})
 
 
-def err_line(t, text=SPEND_TEXT):
+def err_line(t, text=SPEND_TEXT, **extra):
     return _line("assistant", t, isApiErrorMessage=True, apiErrorStatus=429, error="billing_error",
-                 message={"role": "assistant", "model": "<synthetic>", "content": [{"type": "text", "text": text}]})
+                 message={"role": "assistant", "model": "<synthetic>", "content": [{"type": "text", "text": text}]}, **extra)
 
 
 def prompt_line(t, text="please continue", **extra):
@@ -100,8 +104,13 @@ def prompt_line(t, text="please continue", **extra):
 NUDGE = "Where does this stand?\n\n<!-- romp-injected -->"     # a prompt romp put into the session: not the person's
 
 
-def tool_line(t):
-    return _line("user", t, message={"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_test", "content": "ok"}]})
+def tool_line(t, **extra):
+    return _line("user", t, message={"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_test", "content": "ok"}]}, **extra)
+
+
+def stop_line(t):
+    """The CLI's own stop record, written for the person's Esc and for a turn a restart cut alike."""
+    return prompt_line(t, "[Request interrupted by user]")
 
 
 class _Clock:
@@ -200,7 +209,7 @@ class _World(unittest.TestCase):
         for name in ("_auto_retried", "_auto_retry_state", "_spend_press", "_spend_stopped", "_api_err_cache", "_api_last_failed_cache"):
             vars(km).get(name, {}).clear()
         for name, empty in (("_spend_door", None), ("_spend_wait_said", None), ("_spend_press_seq", 0), ("_RETRY_PAUSE_STILL", None),
-                            ("_RETRY_PAUSE_SEQ", 0)):
+                            ("_RETRY_PAUSE_SEQ", 0), ("_spend_doc_fault", False)):
             vars(km).get(name, [None])[0] = empty
 
     # ── the world's pieces ──
@@ -412,28 +421,35 @@ class RealAnswers(_World):
         # settle. Read as output, that one record lifted the pause and sent three retries into the standing cap.
         self.evidence(3, streamer=False)
         idle = self.serving(STREAM)
-        self.append(idle, prompt_line(self.T + 4, "[Request interrupted by user]"))
+        self.append(idle, stop_line(self.T + 4))
         self.append(idle, synthetic_line(self.T + 5))
         for at in (6, 7, 8):
             self.cycle(at)
         self.assertTrue(self.paused(), "the pause's own lift reads a model's answer, not the CLI's settle")
         self.assertEqual(self.be.sent, [])
-        self.assertEqual((km._api_last_output_t(self.path[idle]), km._api_served_times(self.path[idle])), (self.T - 60, (0, False)),
-                         "the newest answer is still the one before it, and no request stands served")
+        self.assertEqual((km._api_last_output_t(self.path[idle]), km._api_served_times(self.path[idle])), (self.T - 60, (0, False, 0.0)),
+                         "the newest answer is still the one before it, no request stands served, and nobody wrote")
 
     def test_a_subagent_s_record_is_another_conversation_s(self):
         (web,) = self.evidence(1, streamer=False)
         idle = self.serving(STREAM)
-        # a subagent's prompt and answer in a capped session's transcript: it stays parked
-        self.append(web, prompt_line(self.T + 3, "search the notes table", isSidechain=True))
-        self.append(web, out_line(self.T + 4, isSidechain=True))
-        self.assertTrue(km._api_error(self.path[web])["spendLimit"], "still parked on its cap record")
-        # ... and in an idle session on the same billing: no lift, no evidence
-        self.append(idle, tool_line(self.T + 4))
+        # a subagent's request and answer in an idle session on the capped billing: no lift, no evidence
+        self.append(idle, tool_line(self.T + 4, isSidechain=True))
         self.append(idle, out_line(self.T + 5, isSidechain=True))
         for at in (6, 7, 8):
             self.cycle(at)
         self.assertEqual((self.paused(), self.be.sent), (True, []))
+        self.assertEqual((km._api_last_output_t(self.path[idle]), km._api_served_times(self.path[idle])), (self.T - 60, (0, False, 0.0)))
+        # ... and in the capped session's own transcript. Whether that session is BLOCKED is not this change's to
+        # redefine (AsOnMain): it reads as it always did, moved on. What this change reads still passes over the
+        # record: it lifts no pause and is nobody's evidence
+        self.append(web, tool_line(self.T + 9, isSidechain=True))
+        self.append(web, out_line(self.T + 10, isSidechain=True))
+        self.assertIsNone(km._api_error(self.path[web]))
+        for at in (11, 12, 13):
+            self.cycle(at)
+        self.assertEqual((self.paused(), self.be.sent), (True, []))
+        self.assertEqual((km._api_last_output_t(self.path[web]), km._api_served_times(self.path[web])), (0, (0, False, 0.0)))
 
     def test_only_a_model_s_answer_or_an_api_error_frees_a_slot(self):
         capped = self.evidence(6)
@@ -841,11 +857,15 @@ class ResumeProbe(_World):
         self.assertTrue(self.paused())
 
     def test_the_door_hands_the_press_to_the_next_pass(self):
+        # a Resume waits in memory for the pass half a second on (a restart spends it); a Stop is written into the
+        # pause file by the door itself (StopHolds), and the newest press is the one the pass reads
         client = {"app": "chat", "wid": "w1", "alive": True, "send": lambda raw: None}
-        km.Handler._dispatch_ws(None, {"type": "setGlobalRetryPaused", "value": True}, client)
-        self.assertEqual(km._spend_door[0], "stop")
         km.Handler._dispatch_ws(None, {"type": "setGlobalRetryPaused", "value": False}, client)
-        self.assertEqual(km._spend_door[0], "resume", "the newest press is the one the pass reads")
+        self.assertEqual((km._spend_door[0], km._retry_pause_doc().get("stop")), ("resume", None))
+        km.Handler._dispatch_ws(None, {"type": "setGlobalRetryPaused", "value": True}, client)
+        self.assertEqual((km._spend_door[0], km._retry_pause_doc().get("stop")), (None, float(self.T)))
+        km.Handler._dispatch_ws(None, {"type": "setGlobalRetryPaused", "value": False}, client)
+        self.assertEqual((km._spend_door[0], km._retry_pause_doc().get("stop")), ("resume", None))
 
 
 class Stagger(_World):
@@ -963,7 +983,7 @@ class StopHolds(_World):
 
     def test_a_stop_holds_through_a_restart(self):
         # deploy restarts are routine: a Stop that a restart undid sent the held sessions a retry nobody asked for.
-        # The hold is in the pause file, by record identity, and the next kernel reads it there
+        # The hold is in the pause file, by session with the Stop's instant, and the next kernel reads it there
         capped = self.evidence(6)
         self.cycle(6)
         self.assertEqual(self.be.sent, NAMES[:3])
@@ -976,15 +996,34 @@ class StopHolds(_World):
             self.serves(SIDS[STREAM], at - 0.5)
             self.cycle(at)
         self.assertEqual((self.paused(), self.be.sent), (False, NAMES[:3]), "the pause cleared itself; the hold did not")
-        self.assertEqual(sorted(km._retry_pause_doc()["held"]), sorted(capped[3:]),
-                         "the three it had not reached, by session, carried by every write since")
+        self.assertEqual(km._retry_pause_doc()["held"], {sid: self.T + 7.0 for sid in capped[3:]},
+                         "the three it had not reached, held since the Stop, carried by every write since")
         self.restart()
         self.press_resume(50)                                    # their Resume, after another restart: it lifts the hold
         self.cycle(51)
         self.assertEqual(self.be.sent, NAMES[:6])
 
+    def test_a_stop_holds_when_the_kernel_dies_before_its_next_pass(self):
+        # the door's own write carries the Stop, so it is on file before any pass has looked. Kept in memory for the
+        # pass half a second on, a kernel that died in that half second forgot it: the next one retried the rest
+        capped = self.evidence(6)
+        self.cycle(6)
+        self.assertEqual(self.be.sent, NAMES[:3])
+        self.press_stop(7)
+        self.assertEqual(km._retry_pause_doc().get("stop"), self.T + 7.0, "written by the door, with the press's instant")
+        self.restart()                                           # ... and the kernel dies before a pass reads it
+        for sid in capped[:3]:
+            self.answer(sid, 8)
+        for at in range(9, 39, 2):
+            self.serves(SIDS[STREAM], at - 0.5)
+            self.cycle(at)
+        self.assertEqual((self.paused(), self.be.sent), (False, NAMES[:3]), "the three the wave had not reached are held")
+        doc = km._retry_pause_doc()
+        self.assertEqual((doc["held"], doc.get("stop")), ({sid: self.T + 7.0 for sid in capped[3:]}, None),
+                         "the first pass of the next kernel turned the marker into the hold")
+
     def test_a_pass_that_reads_no_row_for_a_held_session_leaves_its_hold(self):
-        # one liveness read that misses a session (or a CLI between two lives) is not the session leaving its record
+        # one liveness read that misses a session (or a CLI between two lives) is not the person writing to it
         capped = self.evidence(4)
         self.press_stop(1)
         self.cycle(2)
@@ -999,28 +1038,115 @@ class StopHolds(_World):
             self.cycle(at)
         self.assertEqual(self.be.sent, [], "web is held still, with the other three")
         self.assertEqual(sorted(km._retry_pause_doc()["held"]), sorted(capped))
-        # a held session SEEN to have left its record (the person wrote to it, and it was served) leaves the hold
+        # the person writes to a held session, and it is served: it leaves the hold on the pass that reads their message
         self.append(capped[0], prompt_line(self.T + 10, "carry on"))
+        self.cycle(10.5)
+        self.assertEqual(sorted(km._retry_pause_doc()["held"]), sorted(capped[1:]))
         self.answer(capped[0], 11)
         self.cycle(12)
         self.assertEqual(sorted(km._retry_pause_doc()["held"]), sorted(capped[1:]))
+
+    def test_a_prompt_romp_put_in_does_not_spend_the_hold(self):
+        # only the person's own message, or their Resume, lifts a hold. A nudge is romp's: the refusal that answers it
+        # is a new record on a held session, and read as the session having moved on it drew one retry
+        capped = self.evidence(4)
+        self.press_stop(1)
+        self.cycle(2)
+        km._set_retry_paused(False)                              # (the manual pause aside: the hold's own reading is under test)
+        self.cycle(6)
+        self.assertEqual(self.be.sent, [], "held")
+        self.append(capped[1], prompt_line(self.T + 10, NUDGE))
+        self.cycle(10.5)                                         # seen between the prompt and its refusal: on no record at all
+        self.answer(capped[1], 11, ok=False)
+        self.cycle(12)
+        self.assertTrue(self.paused(), "a new record engages the pause")
+        self.serves(SIDS[STREAM], 14)
+        self.cycle(15)
+        self.assertEqual((self.paused(), self.be.sent), (False, []), "the billing serves again, and the nudged session is held still")
+        # a turn something cut leaves the CLI's stop record, the same one as the person's Esc, and romp's next prompt
+        # follows it: neither is a message of theirs
+        self.append(capped[2], stop_line(self.T + 20))
+        self.append(capped[2], prompt_line(self.T + 21, NUDGE))
+        self.answer(capped[2], 22, ok=False)
+        self.cycle(23)
+        self.serves(SIDS[STREAM], 25)
+        self.cycle(26)
+        self.assertEqual(self.be.sent, [])
+        self.assertEqual(km._retry_pause_doc()["held"], {sid: self.T + 1.0 for sid in capped}, "all four, held since the Stop")
+        # their own message is: refused on the cap too, its record is one evidence may retry once
+        self.append(capped[3], prompt_line(self.T + 30, "try that again"))
+        self.answer(capped[3], 31, ok=False)
+        self.cycle(32)
+        self.serves(SIDS[STREAM], 34)
+        self.cycle(35)
+        self.assertEqual(self.be.sent, ["docs"])
+        self.assertEqual(sorted(km._retry_pause_doc()["held"]), sorted(capped[:3]))
+
+    def test_a_second_stop_holds_beside_the_first(self):
+        capped = self.evidence(2)
+        self.press_stop(1)
+        self.cycle(2)
+        late = self.capped(2, at=4)                              # parked after the first Stop
+        self.append(capped[1], prompt_line(self.T + 5, NUDGE))   # a held session with romp's prompt out: on no record now
+        self.press_stop(6)
+        self.cycle(7)
+        self.assertEqual(km._retry_pause_doc()["held"], {capped[0]: self.T + 6.0, capped[1]: self.T + 1.0, late: self.T + 6.0},
+                         "the sessions parked at the second Stop, and the one the first still holds")
+        km._set_retry_paused(False)                              # (the manual pause aside)
+        self.answer(capped[1], 8, ok=False)
+        for at in (10, 12, 14):
+            self.serves(SIDS[STREAM], at)
+            self.cycle(at + 1)
+        self.assertEqual(self.be.sent, [])
 
     def test_the_hold_is_written_without_touching_the_pause_and_rides_every_later_write(self):
         km._set_retry_paused(True, reason="spend", bills="key")
         before = km._retry_pause_doc()
         seq = km._RETRY_PAUSE_SEQ[0]
-        self.assertTrue(km._spend_held_write({"s1": "rec-1"}))
-        self.assertEqual(km._retry_pause_doc(), dict(before, held={"s1": "rec-1"}), "the pause as it stood, and the hold")
+        self.assertTrue(km._spend_held_write({"s1": 5.0}, before))
+        self.assertEqual(km._retry_pause_doc(), dict(before, held={"s1": 5.0}), "the pause as it stood, and the hold")
         self.assertEqual(km._RETRY_PAUSE_SEQ[0], seq, "no pause write: no frame, and a standing press is not spent by it")
         km._set_retry_paused(False, lifted_at=self.T + 5)        # the lift
         km._set_retry_paused(True, reason="limit")               # an engage of another kind
         km._set_retry_paused(False)                              # its lift
-        km._set_retry_paused(True)                               # a second Stop at the door, before its pass
-        self.assertEqual(km._retry_pause_doc()["held"], {"s1": "rec-1"})
-        km._set_retry_paused(False, resumed=True)                # the person's Resume
+        self.clock.at = self.T + 9
+        km._set_retry_paused(True, stop=True)                    # a second Stop at the door: its marker, beside the hold
+        km._set_retry_paused(True, reason="spend", bills="key")  # ... and an engage before the pass that reads the marker
+        doc = km._retry_pause_doc()
+        self.assertEqual((doc["held"], doc["stop"]), ({"s1": 5.0}, self.T + 9.0), "both ride every write that is not a Resume")
+        # a Resume that lands between a pass's read of the file and its write is not answered with a hold computed
+        # before it: the write stands down, and the next pass reads the file again
+        km._set_retry_paused(False, resumed=True)
+        self.assertFalse(km._spend_held_write({"s1": 5.0, "s2": self.T + 9.0}, doc))
+        after = km._retry_pause_doc()
+        self.assertEqual((after.get("held"), after.get("stop")), (None, None), "the person's Resume dropped both")
+        self.assertTrue(km._spend_held_write({}, after))
         self.assertNotIn("held", km._retry_pause_doc())
-        self.assertTrue(km._spend_held_write({}))
-        self.assertNotIn("held", km._retry_pause_doc())
+
+    def test_a_pause_file_that_cannot_be_read_sends_nothing(self):
+        # the hold lives in the pause file. A read fault on it (a kernel out of descriptors, a flaky mount) is not the
+        # file saying nobody is held: read that way, the held sessions were retried for the span of the fault
+        self.evidence(4)
+        self.press_stop(1)
+        self.cycle(2)
+        km._set_retry_paused(False)                              # (the manual pause aside: the hold's own reading is under test)
+        real = Path.read_text
+
+        def faulting(p, *a, **k):
+            if p.name == "retry-paused.json":
+                raise OSError(errno.EMFILE, "too many open files")
+            return real(p, *a, **k)
+        err = io.StringIO()
+        with mock.patch.object(Path, "read_text", faulting), contextlib.redirect_stderr(err):
+            for at in (7, 8, 9):
+                self.serves(SIDS[STREAM], at - 0.5)
+                self.cycle(at)
+        self.assertEqual(self.be.sent, [])
+        self.assertEqual(err.getvalue().count("auto-retry: the pause file could not be read, so no retry after a spend cap is sent "
+                                              "until it reads again\n"), 1, "said once for the fault, not once a pass")
+        self.serves(SIDS[STREAM], 10)
+        self.cycle(11)                                           # it reads again: the hold is there
+        self.assertEqual(self.be.sent, [])
 
     def test_a_stop_drops_a_resume_s_press(self):
         capped = self.evidence(4, streamer=False)
@@ -1320,7 +1446,7 @@ class TheReadings(_World):
 
     def test_the_served_readings_are_when_the_request_was_made_and_whether_a_retry_is_out(self):
         sid = self.session(0, out_line(self.T - 100))
-        served = lambda: km._api_served_times(self.path[sid])
+        served = lambda: km._api_served_times(self.path[sid])[:2]
         self.assertEqual(served(), (0, False), "an answer with no request in sight claims nothing")
         self.append(sid, err_line(self.T - 90, OTHER_TEXT))
         self.append(sid, prompt_line(self.T - 85, km.RETRY_MSG))
@@ -1347,7 +1473,22 @@ class TheReadings(_World):
         self.append(sid, prompt_line(self.T - 30, km.RETRY_MSG))
         self.append(sid, prompt_line(self.T - 29, "never mind, try the other route"))
         self.assertEqual(served(), (0, False), "the person's own prompt after it: theirs now")
-        self.assertEqual(km._api_served_times(str(self.dir / "absent.jsonl")), (0, False))
+        self.assertEqual(km._api_served_times(str(self.dir / "absent.jsonl")), (0, False, 0.0))
+
+    def test_the_person_s_newest_own_message_is_timed_and_nothing_else_is_theirs(self):
+        sid = self.session(0, out_line(self.T - 100))
+        wrote = lambda: km._api_served_times(self.path[sid])[2]
+        self.assertEqual(wrote(), 0.0)
+        self.append(sid, prompt_line(self.T - 90.25, "run the import"))
+        self.assertEqual(wrote(), self.T - 90.25, "to the millisecond the CLI stamps")
+        for line in (out_line(self.T - 89), err_line(self.T - 80), prompt_line(self.T - 70, km.RETRY_MSG), err_line(self.T - 69),
+                     prompt_line(self.T - 60, NUDGE), err_line(self.T - 59), stop_line(self.T - 50), synthetic_line(self.T - 49),
+                     prompt_line(self.T - 40, "<task-notification>done</task-notification>", origin={"kind": "task-notification"}),
+                     prompt_line(self.T - 30, "search the notes table", isSidechain=True), tool_line(self.T - 20)):
+            self.append(sid, line)
+            self.assertEqual(wrote(), self.T - 90.25, "romp's prompts, the CLI's stop record and notices, a subagent's prompt: none is theirs")
+        self.append(sid, prompt_line(self.T - 10, "carry on"))
+        self.assertEqual(wrote(), self.T - 10)
 
 
 class TailWindow(_World):
@@ -1396,6 +1537,97 @@ class TailWindow(_World):
             whole = self._read(sid, 1 << 20)
             for window in (40, 300, 700, 1500):
                 self.assertEqual(self._read(sid, window), whole, "%d records, window %d" % (n, window))
+
+
+class AsOnMain(_World):
+    """Whether a session is BLOCKED on an API error (_api_error) and the health latch beside it (_api_last_failed) are
+    not this change's to redefine: the card, the feed, the nudge walk, the bottom bar's API cell and the subagent
+    viewer read them, and each must read every transcript as it did before. What this change reads passes over the
+    CLI's own records and a subagent's (RealAnswers); the verdict and the latch pass over nothing."""
+
+    KEYS = {"text", "status", "category", "uuid", "t", "tExact", "tooLong", "spendLimit", "modelLimit", "authErr",
+            "parentUuid", "refusal", "noRetry"}                   # the error dict before this change, which adds afterRetry
+    KINDS = (out_line, synthetic_line, err_line, lambda t: err_line(t, OTHER_TEXT),
+             lambda t: prompt_line(t, "go on"), lambda t: prompt_line(t, km.RETRY_MSG), lambda t: prompt_line(t, NUDGE), stop_line,
+             tool_line, lambda t: _line("user", t, isMeta=True, message={"role": "user", "content": "a note the CLI added"}),
+             lambda t: out_line(t, isSidechain=True), lambda t: err_line(t, isSidechain=True),
+             lambda t: prompt_line(t, "search the notes table", isSidechain=True), lambda t: tool_line(t, isSidechain=True))
+
+    @staticmethod
+    def before(lines):
+        """The rule before this change, in full -> (the uuid of the error record _api_error reports, the latch's), None
+        for none. An API error record stands for both. Assistant output clears both, whoever wrote it. A user record
+        that is not a tool result clears the first and leaves the latch."""
+        err = latched = None
+        for line in lines:
+            o = json.loads(line)
+            content = (o.get("message") or {}).get("content")
+            if o["type"] == "assistant":
+                if o.get("isApiErrorMessage"):
+                    err = latched = o["uuid"]
+                elif any(b.get("type") in ("text", "tool_use", "thinking") for b in content):
+                    err = latched = None
+            elif o["type"] == "user" and not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                err = None
+        return err, latched
+
+    def now(self, sid, lines, window=1 << 20):
+        saved = km._API_ERR_TAIL_WINDOW
+        try:
+            km._API_ERR_TAIL_WINDOW = window
+            Path(self.path[sid]).write_text("".join(lines))
+            km._api_err_cache.clear()
+            km._api_last_failed_cache.clear()
+            return km._api_error(self.path[sid]), km._api_last_failed(self.path[sid])
+        finally:
+            km._API_ERR_TAIL_WINDOW = saved
+
+    def test_every_short_transcript_reads_as_it_did(self):
+        # every sequence of up to three records of every kind the readings tell apart, read whole and through a tail
+        # window of about one record (the read that widens)
+        sid = self.session(0)
+        seqs = [()]
+        for _ in range(3):
+            seqs = [q + (k,) for q in seqs for k in range(len(self.KINDS))]
+            for q in seqs:
+                lines = [self.KINDS[k](self.T - 100 + i) for i, k in enumerate(q)]
+                want = self.before(lines)
+                for window in (1 << 20, 300):
+                    got = self.now(sid, lines, window)
+                    self.assertEqual(tuple(d and d["uuid"] for d in got), want, "kinds %r, window %d" % (q, window))
+                    for d in got:
+                        self.assertEqual(set(d or self.KEYS) - {"afterRetry"}, self.KEYS, "kinds %r" % (q,))
+
+    def test_an_error_then_the_cli_s_settle_reads_recovered(self):
+        sid = self.session(0)
+        lines = [prompt_line(self.T - 50, "run the import"), err_line(self.T - 49), synthetic_line(self.T - 40)]
+        self.assertEqual(self.now(sid, lines), (None, None), "the card leaves the session and the latch clears, as before")
+        self.assertEqual(km._api_last_output_t(self.path[sid]), 0, "... while the pause's lift reads no answer in it")
+
+    def test_an_error_a_retry_an_interrupt_and_the_settle_read_recovered(self):
+        sid = self.session(0)
+        lines = [prompt_line(self.T - 50, "run the import"), err_line(self.T - 49), prompt_line(self.T - 40, km.RETRY_MSG),
+                 stop_line(self.T - 35), synthetic_line(self.T - 34)]
+        for upto in (3, 4):                                      # the retry un-blocks the card, and the latch holds through it
+            err, latched = self.now(sid, lines[:upto])
+            self.assertEqual((err, latched["uuid"]), (None, json.loads(lines[1])["uuid"]), "%d records" % upto)
+        self.assertEqual(self.now(sid, lines), (None, None), "the settle clears the latch, as before")
+        self.assertEqual((km._api_last_output_t(self.path[sid]), km._api_served_times(self.path[sid])[:2]), (0, (0, False)),
+                         "... while the pause's lift reads no answer in it, and the retry the interrupt cut holds no slot")
+
+    def test_an_agent_s_own_file_yields_its_api_error(self):
+        # the subagent viewer reads an agent's file, where every record is a sidechain one
+        sid = self.session(0)
+        last = err_line(self.T - 30, OTHER_TEXT, isSidechain=True, parentUuid="user-parent")
+        lines = [prompt_line(self.T - 50, "search the notes table", isSidechain=True), out_line(self.T - 45, isSidechain=True),
+                 tool_line(self.T - 40, isSidechain=True), last]
+        want = {"text": OTHER_TEXT, "status": 429, "category": "billing_error", "uuid": json.loads(last)["uuid"], "t": self.T - 30,
+                "tExact": self.T - 30.0, "tooLong": False, "spendLimit": False, "modelLimit": False, "authErr": False,
+                "parentUuid": "user-parent", "refusal": False, "noRetry": False, "afterRetry": False}
+        self.assertEqual(self.now(sid, lines), (want, want))
+        cap = err_line(self.T - 20, isSidechain=True)
+        got = self.now(sid, lines + [cap], window=300)[0]
+        self.assertEqual((got["uuid"], got["spendLimit"]), (json.loads(cap)["uuid"], True), "a cap in it too, through a tail window")
 
 
 class Wiring(unittest.TestCase):

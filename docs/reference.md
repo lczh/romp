@@ -6366,7 +6366,9 @@ happens:
   already in flight when the limit fell does not count. An answer is one the
   model wrote in that conversation: a record Claude Code writes itself (its
   "No response requested." after an interrupt) and a subagent's record are
-  not answers, here or for the `spend` pause's own lift.
+  not answers, here or for the `spend` pause's own lift. Whether a session
+  shows as stopped on an API error is read as it always was, from every
+  record.
 - The session's CLI comes up on a different billing after the error. Only
   that session is retried, even while the pause on the billing it left holds.
 - You press `Resume all auto-retries`. That is a request, not evidence, so
@@ -6395,9 +6397,12 @@ changes.
 
 `Stop all auto-retries` cancels what a Resume started and leaves the
 sessions it had not reached as they are until you press Resume or write to
-them. That holds after the stop itself has cleared and across a kernel
-restart: the held sessions are recorded in the pause file (`held`, each with
-the error record it was stopped on).
+them. Nothing else lifts that: not a prompt romp puts into a held session,
+not the new error that answers it, not an interrupt. It holds after the stop
+itself has cleared and across a kernel restart, one that happens the moment
+after the press included: the press is written into the pause file as it
+lands (`stop`), and the held sessions are recorded there (`held`, each with
+the time of the Stop).
 
 Not retried this way: a session with no running CLI (its next message is its
 retry), a session you interrupted, a session mid-compaction, a session
