@@ -25,7 +25,7 @@ const OFF: RetryPause = { paused: false, resumeAt: null, reason: "" };
 const MANUAL: RetryPause = { paused: true, resumeAt: null, reason: "" };
 const SPEND: RetryPause = { paused: true, resumeAt: null, reason: "spend" };
 const LIMIT: RetryPause = { paused: true, resumeAt: NOW / 1000 + 134, reason: "limit" };
-const STILL: RetryPause = { paused: true, resumeAt: null, reason: "spend", still: true };
+const STILL: ApiCardStatus = { spendStill: true };   // the kernel's word for a session whose billing a refused retry was on
 const PAUSES: [string, RetryPause][] = [["off", OFF], ["manual", MANUAL], ["spend", SPEND], ["limit", LIMIT]];
 
 const ON_YOU: [string, ApiCardStatus, string][] = [
@@ -73,23 +73,26 @@ test("Resume all over a spend pause leaves a spend-capped card naming the cap, n
   assert.equal(after, before, "the flip changes nothing on a card the kernel never auto-retries");
 });
 
-test("a Resume the cap refused is answered: the pause comes back marked, and the capped card says the limit is still in force", () => {
-  // the kernel sends ONE capped session a retry on the Resume press; refused, the spend pause re-engages with
-  // `still` on its frame. Without it the card would read exactly as it did before the press.
-  const st: ApiCardStatus = { apiSpendLimit: true };
-  assert.equal(apiCardLine(st, STILL, undefined, NOW), "spend limit still in force — raise it at claude.ai/settings/usage");
-  assert.equal(SPEND_STILL_REMEDY, apiCardLine(st, STILL, undefined, NOW));
-  assert.equal(retryPausedText(STILL, NOW), "monthly spend limit still in force — raise it at claude.ai/settings/usage");
-  assert.equal(apiCardLine({}, STILL, NOW + 4_000, NOW), retryPausedText(STILL, NOW), "a transient card under that pause wears the pause's line");
-  // the mark belongs to a standing spend pause and to the cap's own card: nothing else reads it
-  assert.equal(apiCardLine(st, { ...STILL, paused: false }, undefined, NOW), SPEND_CAP_REMEDY, "the pause lifted: the plain line");
-  assert.equal(apiCardLine(st, { ...STILL, reason: "limit" }, undefined, NOW), SPEND_CAP_REMEDY);
-  assert.equal(apiCardLine(st, SPEND, undefined, NOW), SPEND_CAP_REMEDY, "a spend pause with no mark: the plain line");
-  assert.equal(apiCardLine({ apiModelLimit: true }, STILL, undefined, NOW), MODEL_LIMIT_REMEDY, "a spent model allowance is not the spend cap");
-  assert.equal(apiCardLine({ apiAuthErr: true }, STILL, undefined, NOW), AUTH_REMEDY);
-  assert.equal(apiCardLine({ apiRefusal: true }, STILL, undefined, NOW), REFUSAL_REMEDY);
-  // the frame's field reaches the decider, and a kernel that sends none reads as the plain line
-  assert.match(R, /globalRetryStill = m\.still === true;/);
+test("a Resume the cap refused is answered on the billing it was refused on: its sessions' cards say the limit is still in force", () => {
+  // the kernel sends ONE capped session per billing a retry on the Resume press; refused, the spend pause re-engages
+  // and the sessions on THAT billing carry spendStill on their status. Without it the card would read exactly as it
+  // did before the press. A session capped on another billing was not asked about and keeps the plain line.
+  const st: ApiCardStatus = { apiSpendLimit: true, ...STILL };
+  assert.equal(apiCardLine(st, SPEND, undefined, NOW), "spend limit still in force — raise it at claude.ai/settings/usage");
+  assert.equal(SPEND_STILL_REMEDY, apiCardLine(st, SPEND, undefined, NOW));
+  assert.equal(apiCardLine({ apiSpendLimit: true }, SPEND, undefined, NOW), SPEND_CAP_REMEDY, "capped on another billing: the plain line");
+  assert.equal(retryPausedText(SPEND, NOW, true), "monthly spend limit still in force — raise it at claude.ai/settings/usage");
+  assert.equal(apiCardLine(STILL, SPEND, NOW + 4_000, NOW), retryPausedText(SPEND, NOW, true), "a transient card on that billing wears the pause's line");
+  assert.equal(apiCardLine({}, SPEND, NOW + 4_000, NOW), retryPausedText(SPEND, NOW), "…and one on another billing the plain paused line");
+  // the mark is the spend cap's alone: nothing else reads it
+  assert.equal(apiCardLine({ apiModelLimit: true, ...STILL }, SPEND, undefined, NOW), MODEL_LIMIT_REMEDY, "a spent model allowance is not the spend cap");
+  assert.equal(apiCardLine({ apiAuthErr: true, ...STILL }, SPEND, undefined, NOW), AUTH_REMEDY);
+  assert.equal(apiCardLine({ apiRefusal: true, ...STILL }, SPEND, undefined, NOW), REFUSAL_REMEDY);
+  assert.equal(apiCardLine(STILL, LIMIT, NOW + 4_000, NOW), retryPausedText(LIMIT, NOW), "a usage-window pause has its own line");
+  assert.equal(apiCardLine(STILL, MANUAL, undefined, NOW), "auto-retry off (global)");
+  // it rides the session's status, never the pause frame: the page keeps no pause-wide copy of it
+  assert.doesNotMatch(R, /globalRetryStill|m\.still\b/);
+  assert.match(R, /retryTries\?: number \| null; spendStill\?: boolean;/, "the status carries it");
 });
 
 test("a thread the person stopped says so once the pause is off; while a pause holds, the pause's line leads", () => {
@@ -126,12 +129,12 @@ test("a remedy is told from a short form: what the person must do, against a cou
   for (const [what, st] of ON_YOU) for (const [name, pause] of PAUSES) assert.equal(apiCardSays(st, pause, undefined, NOW).remedy, true, `${what}, pause ${name}`);
   assert.deepEqual(apiCardSays({ retrySuppressed: true }, OFF, undefined, NOW), { line: SUPPRESSED_LINE, remedy: true }, "a thread they stopped: send a message");
   assert.equal(apiCardSays({}, SPEND, undefined, NOW).remedy, true, "a spend pause names what to do: raise the cap");
-  assert.equal(apiCardSays({}, STILL, undefined, NOW).remedy, true);
+  assert.equal(apiCardSays(STILL, SPEND, undefined, NOW).remedy, true);
   assert.deepEqual(apiCardSays({}, MANUAL, undefined, NOW), { line: "auto-retry off (global)", remedy: false });
   assert.equal(apiCardSays({}, LIMIT, undefined, NOW).remedy, false, "a usage window counts down to its reset");
   assert.deepEqual(apiCardSays({}, OFF, undefined, NOW), { line: "retrying soon…", remedy: false });
   assert.deepEqual(apiCardSays({ retryTries: 4 }, OFF, NOW + 150_000, NOW), { line: "retrying in 2m 30s · 4 tries so far", remedy: false });
-  for (const [st, pause, next] of [[{ apiSpendLimit: true }, STILL, undefined], [{}, LIMIT, NOW + 5_000], [{ retrySuppressed: true }, OFF, undefined]] as const) {
+  for (const [st, pause, next] of [[{ apiSpendLimit: true, spendStill: true }, SPEND, undefined], [{}, LIMIT, NOW + 5_000], [{ retrySuppressed: true }, OFF, undefined]] as const) {
     assert.equal(apiCardSays(st, pause, next, NOW).line, apiCardLine(st, pause, next, NOW), "the line alone is the same line");
   }
 });
@@ -147,7 +150,7 @@ test("every status field the card reads is one the kernel projects onto a commen
   for (const k of API_CARD_STATUS_KEYS) assert.ok(projected.has(k), `the thread status projection lacks ${k}`);
   // …and the list names what the decider and the card's render read, no less
   const L = fs.readFileSync(path.join(ROOT, "ui", "webview", "api-card-line.ts"), "utf8");
-  const read = new Set(Array.from((L + card + lineFor).matchAll(/\bst\??\.(api\w+|retry\w+)/g)).map((m) => m[1]));
+  const read = new Set(Array.from((L + card + lineFor).matchAll(/\bst\??\.(api\w+|retry\w+|spend\w+)/g)).map((m) => m[1]));
   assert.deepEqual(Array.from(read).sort(), Array.from(API_CARD_STATUS_KEYS).slice().sort(), "API_CARD_STATUS_KEYS is exactly what the card reads off a status");
 });
 
@@ -158,7 +161,7 @@ const tick = R.slice(R.indexOf("function apiRetryTick("), R.indexOf("function re
 
 test("render.ts reads a card's line through ONE helper, from the card's own session and the page's pause", () => {
   assert.match(lineFor, /const st = apiCardStatus\(sid\);/);
-  assert.match(lineFor, /return apiCardSays\(st, \{ paused: globalRetryPaused, resumeAt: globalRetryResumeAt, reason: globalRetryReason, still: globalRetryStill \},\n\s+next, Date\.now\(\)\);/);
+  assert.match(lineFor, /return apiCardSays\(st, \{ paused: globalRetryPaused, resumeAt: globalRetryResumeAt, reason: globalRetryReason \}, next, Date\.now\(\)\);/);
   // the next retry is the tick's schedule for a tab, else the kernel's deadline off the status (a thread's, or a card painted before the first tick)
   assert.match(lineFor, /const next = sid \? apiRetryNext\.get\(sid\) \?\? \(st\?\.retryNextAt \? st\.retryNextAt \* 1000 : undefined\) : undefined;/);
   // the status is the card's own session's: a tab's, or the open comment thread's for a card in its popover

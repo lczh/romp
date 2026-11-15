@@ -21,6 +21,9 @@ export interface ApiCardStatus {
   retrySuppressed?: boolean;
   retryNextAt?: number | null;   // epoch SECONDS of the kernel's next automatic retry for this session
   retryTries?: number | null;
+  spendStill?: boolean;          // the spend pause came back because a retry sent after the cap looked lifted, or on
+                                 // Resume, was refused ON THIS SESSION'S BILLING: there the cap is still in force. Per
+                                 // session, the kernel's word: a session capped on another billing was not asked about
 }
 
 // Every status field the live card reads, for its line and for its buttons. A comment thread's card is the same
@@ -28,15 +31,13 @@ export interface ApiCardStatus {
 // kernel/kernel.py): a field read here and missing there makes a thread's card wear the wrong line (a thread stopped
 // on a spend cap read as about to retry). apierror-line.test.ts holds the two lists together.
 export const API_CARD_STATUS_KEYS = ["apiSpendLimit", "apiModelLimit", "apiAuthErr", "apiRefusal", "apiNoRetry",
-                                     "retrySuppressed", "retryNextAt", "retryTries"] as const satisfies readonly (keyof ApiCardStatus)[];
+                                     "retrySuppressed", "retryNextAt", "retryTries", "spendStill"] as const satisfies readonly (keyof ApiCardStatus)[];
 
 /** The global retry pause as the kernel's globalRetryPaused frame carries it. */
 export interface RetryPause {
   paused: boolean;
   resumeAt: number | null;   // epoch SECONDS the limiting usage window resets; null for a manual or spend pause
   reason: string;            // "spend" for a monthly spend cap, "limit" for a usage window, "" for a manual Stop
-  still?: boolean;           // a spend pause that came back because a retry sent after the cap looked lifted, or on
-                             // Resume, was refused: the cap is still in force (the kernel's word, on the same frame)
 }
 
 // The lines of the four stops nothing retries (the card draws no Retry button for them): each names its own fix, in
@@ -46,8 +47,9 @@ export interface RetryPause {
 export const REFUSAL_REMEDY = "the model's safeguards refused this prompt — rewrite it or drop this thread";
 // A monthly spend cap.
 export const SPEND_CAP_REMEDY = "spend limit reached — raise it at claude.ai/settings/usage";
-// …and the spend cap's own line once a retry has been tried and refused (the pause's `still`): the answer to a
-// Resume press that changed nothing, in place of a line that would read exactly as it did before the press.
+// …and the spend cap's own line once a retry has been tried and refused on the session's billing (the status's
+// spendStill): the answer to a Resume press that changed nothing, in place of a line that would read exactly as it
+// did before the press.
 export const SPEND_STILL_REMEDY = "spend limit still in force — raise it at claude.ai/settings/usage";
 // A spent model allowance: the retry line's and the bell's own words for it (api-error-reason.ts), read from there.
 export const MODEL_LIMIT_REMEDY = apiErrorReason({ modelLimit: true });
@@ -66,10 +68,10 @@ export function apiCardOnYou(st: ApiCardStatus | null | undefined): boolean {
 /** The paused line names why and until when: a usage-window pause carries the window's reset, so the card
  *  counts down to it (the user 2026-07-13); a monthly spend cap has no reset and lifts only when it is
  *  raised, so the line says so (the user 2026-07-14); a manual Stop is the plain off label. */
-export function retryPausedText(pause: RetryPause, nowMs: number): string {
+export function retryPausedText(pause: RetryPause, nowMs: number, still = false): string {
   if (pause.reason === "spend") {
-    return pause.still ? "monthly spend limit still in force — raise it at claude.ai/settings/usage"
-                       : "monthly spend limit reached — raise it at claude.ai/settings/usage";
+    return still ? "monthly spend limit still in force — raise it at claude.ai/settings/usage"
+                 : "monthly spend limit reached — raise it at claude.ai/settings/usage";
   }
   if (pause.resumeAt) {
     const dt = Math.max(0, Math.ceil(pause.resumeAt - nowMs / 1000));
@@ -91,10 +93,10 @@ export function apiCardSays(st: ApiCardStatus | null | undefined, pause: RetryPa
                             nextAtMs: number | undefined, nowMs: number): { line: string; remedy: boolean } {
   const remedy = (line: string) => ({ line, remedy: true }), short = (line: string) => ({ line, remedy: false });
   if (st?.apiRefusal) return remedy(REFUSAL_REMEDY);
-  if (st?.apiSpendLimit) return remedy(pause.paused && pause.reason === "spend" && pause.still ? SPEND_STILL_REMEDY : SPEND_CAP_REMEDY);
+  if (st?.apiSpendLimit) return remedy(st.spendStill ? SPEND_STILL_REMEDY : SPEND_CAP_REMEDY);
   if (st?.apiModelLimit) return remedy(MODEL_LIMIT_REMEDY);
   if (st?.apiAuthErr) return remedy(AUTH_REMEDY);
-  if (pause.paused) return { line: retryPausedText(pause, nowMs), remedy: pause.reason === "spend" };
+  if (pause.paused) return { line: retryPausedText(pause, nowMs, !!st?.spendStill), remedy: pause.reason === "spend" };
   if (st?.retrySuppressed) return remedy(SUPPRESSED_LINE);
   if (!nextAtMs) return short("retrying soon…");
   const left = Math.max(0, Math.ceil((nextAtMs - nowMs) / 1000));

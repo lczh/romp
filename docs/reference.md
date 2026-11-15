@@ -6363,30 +6363,41 @@ happens:
 
 - Another session on the same billing (the same login, or the API key) is
   served a request it made after the error. An answer to a request that was
-  already in flight when the limit fell does not count, though the `spend`
-  pause itself lifts on any fresh answer.
+  already in flight when the limit fell does not count. An answer is one the
+  model wrote in that conversation: a record Claude Code writes itself (its
+  "No response requested." after an interrupt) and a subagent's record are
+  not answers, here or for the `spend` pause's own lift.
 - The session's CLI comes up on a different billing after the error. Only
   that session is retried, even while the pause on the billing it left holds.
 - You press `Resume all auto-retries`. That is a request, not evidence, so
   one stopped session per capped billing is retried as a probe. If the probe
   is served, every session that was stopped on that billing when you pressed
-  gets its retry. If it is refused, the pause returns, the stopped sessions'
-  cards read `spend limit still in force`, and nothing else is sent.
+  gets its retry. If the probe, or one of the retries it opened, is refused,
+  the pause returns, the cards of the sessions stopped on that billing read
+  `spend limit still in force`, and nothing else of that press is sent. A
+  press is over once the pause is next changed by anything else, and at a
+  kernel restart.
 
 A spend-limit error that itself answers such a retry is yours to move: romp
 does not retry it again, whatever other sessions do. A limit can serve one
 session's small request and refuse another's large one, and without this
 rule the first session's answers would draw a retry each. Your Resume, a
-message of yours to that session, or moving it to another billing retries
-it.
+message you write to that session, or moving it to another billing retries
+it; a prompt romp puts into the session (a nudge, a notice) does not.
 
 At most three of these retries are unanswered at a time
 (`ROMP_BOOT_RESUME_CONCURRENCY`, the setting that paces CLI launches); the
-next is sent when the API answers one, with output or with an error. A
-Resume pressed while three are out keeps its probe until one is answered.
+next is sent when the API answers one, with output or with an error, or when
+its session ends, loses its CLI or is interrupted. A Resume pressed while
+three are out keeps its probe until one is answered. While retries wait, the
+Log names the unanswered sessions they wait on, once each time that set
+changes.
+
 `Stop all auto-retries` cancels what a Resume started and leaves the
 sessions it had not reached as they are until you press Resume or write to
-them, even after the stop itself has cleared.
+them. That holds after the stop itself has cleared and across a kernel
+restart: the held sessions are recorded in the pause file (`held`, each with
+the error record it was stopped on).
 
 Not retried this way: a session with no running CLI (its next message is its
 retry), a session you interrupted, a session mid-compaction, a session
@@ -6394,13 +6405,13 @@ holding a message of yours that was queued behind the limit (that message is
 delivered instead), a session covered by a usage-limit pause or a manual
 stop, and a Codex session.
 
-The `still in force` wording lasts until the pause is next written: it
-lifts, you press Stop or Resume, or a pause of another kind engages. A
-kernel restart clears it too, and the pause then reads `spend limit
+The `still in force` wording is per billing: only sessions on the billing
+the refused retry was on show it. It lasts until the pause is next written
+(it lifts, you press Stop or Resume, or a pause of another kind engages) and
+is cleared by a kernel restart, after which the pause reads `spend limit
 reached`. A restart sends no retry twice and keeps the count of three: a
 session already retried has the retry in its conversation or in the
-backend's queue, and both are read again. A Resume's or a Stop's standing
-effect on the sessions it had not reached is forgotten by a restart.
+backend's queue, and both are read again.
 
 ## Where things live
 

@@ -14,27 +14,35 @@ The rules under test (_spend_resume_pass, driven by the jobs pass's autoRetry jo
   R3  on evidence, a parked session whose record does not answer romp's own retry gets ONE retry
   R4  a cap record that answers romp's own retry is the person's: evidence never retries it again
   R5  the person's Resume: one probe per capped billing; served, every record parked at the press on that billing
-      gets its retry, R4's included; refused, the pause re-engages marked `still` and nothing else is sent
+      gets its retry, R4's included; a retry of the press refused, the pause re-engages marked `still` and nothing
+      else of that press is sent; the next write of the pause, or a restart, spends the press
   R6  at most three retries out; a slot frees on the API's answer (an error as much as output) or the session's end;
-      a press that finds the slots full keeps its probe
-  R7  the person's Stop cancels the rest and holds, through the manual pause clearing itself
+      a press that finds the slots full keeps its probe; the log names the unanswered sessions the rest wait on
+  R7  the person's Stop cancels the rest and holds, through the manual pause clearing itself and through a restart
   R8  a kernel restart sends nothing twice and keeps the count of retries out: both come from the transcripts and
-      the backend's queue
-  R9  `still` rides the globalRetryPaused frame and clears with the next write of the pause (the page's half is
-      rendered in ui/webview/apierror-line-browser.test.ts)
+      the backend's queue (RealBackendHandOver drives the real backend)
+  R9  `still` is per billing: it rides the status of the sessions on the billing the refused retry was on, and clears
+      with the next write of the pause (the page's half is rendered in ui/webview/apierror-line-browser.test.ts)
   R10 afterRetry is never a guess: a tail window that cannot settle it is widened
+  and an ANSWER is a record the model wrote in this conversation: not one the CLI writes itself (model "<synthetic>"),
+  not a subagent's (isSidechain), for the evidence, for a slot's release and for the pause's own lift (RealAnswers)
 
 Synthetic fixtures only: a private synthetic sid family, the notes-api demo's session names, invented error text.
 """
+import asyncio
 import contextlib
 import inspect
 import io
 import json
 import os
+import shutil
+import sys
 import tempfile
 import time
+import types
 import unittest
 from datetime import datetime, timezone
+from importlib.machinery import ModuleSpec
 from pathlib import Path
 
 from romp_load import load_source
@@ -45,8 +53,10 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 # Hermetic state BEFORE the loads: they resolve their state root at import time, and only pytest runs
 # conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()    # the real backend below keeps its transcripts here, never ~/.claude
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 km = load_source("romp_kernel_spend_resume", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_spend_resume", os.path.join(BIN, "romp_sdk_backend.py"))
 
 SIDS = ["99999999-aaaa-4bbb-8ccc-%012d" % i for i in range(1, 15)]     # a private synthetic family for this module
 NAMES = ["web", "api", "tests", "docs", "build", "lint", "deploy", "search", "mail", "sync", "cron", "notes", "index", "stream"]
@@ -69,17 +79,25 @@ def _stamp(line):
     return datetime.strptime(json.loads(line)["timestamp"], "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc).timestamp()
 
 
-def out_line(t):
-    return _line("assistant", t, message={"role": "assistant", "content": [{"type": "text", "text": "done"}]})
+def out_line(t, **extra):
+    return _line("assistant", t, message={"role": "assistant", "model": "claude-test-1", "content": [{"type": "text", "text": "done"}]}, **extra)
+
+
+def synthetic_line(t):
+    """The record the CLI writes itself after a stop: no request was served to produce it."""
+    return _line("assistant", t, message={"role": "assistant", "model": "<synthetic>", "content": [{"type": "text", "text": "No response requested."}]})
 
 
 def err_line(t, text=SPEND_TEXT):
     return _line("assistant", t, isApiErrorMessage=True, apiErrorStatus=429, error="billing_error",
-                 message={"role": "assistant", "content": [{"type": "text", "text": text}]})
+                 message={"role": "assistant", "model": "<synthetic>", "content": [{"type": "text", "text": text}]})
 
 
-def prompt_line(t, text="please continue"):
-    return _line("user", t, message={"role": "user", "content": [{"type": "text", "text": text}]})
+def prompt_line(t, text="please continue", **extra):
+    return _line("user", t, message={"role": "user", "content": [{"type": "text", "text": text}]}, **extra)
+
+
+NUDGE = "Where does this stand?\n\n<!-- romp-injected -->"     # a prompt romp put into the session: not the person's
 
 
 def tool_line(t):
@@ -179,12 +197,11 @@ class _World(unittest.TestCase):
     def restart(self):
         """Everything the kernel holds in memory about retries is gone, as after a restart: what stands is the pause
         file, the transcripts and the backend's queue. (The names absent before this change read as empty.)"""
-        for name in ("_auto_retried", "_auto_retry_state", "_spend_press", "_spend_stopped", "_spend_resume_inflight",
-                     "_spend_served_seen", "_api_err_cache", "_api_last_failed_cache"):
+        for name in ("_auto_retried", "_auto_retry_state", "_spend_press", "_spend_stopped", "_api_err_cache", "_api_last_failed_cache"):
             vars(km).get(name, {}).clear()
-        vars(km).get("_spend_door", [None])[0] = None
-        vars(km).get("_spend_probe_asked", [False])[0] = False
-        vars(km).get("_RETRY_PAUSE_STILL", [False])[0] = False
+        for name, empty in (("_spend_door", None), ("_spend_wait_said", None), ("_spend_press_seq", 0), ("_RETRY_PAUSE_STILL", None),
+                            ("_RETRY_PAUSE_SEQ", 0)):
+            vars(km).get(name, [None])[0] = empty
 
     # ── the world's pieces ──
     def session(self, i, *lines, auth="key", **row):
@@ -258,8 +275,12 @@ class _World(unittest.TestCase):
         transcript here (the test's own reading, not the kernel's)."""
         for line in reversed(Path(self.path[sid]).read_text().splitlines()):
             rec = json.loads(line)
+            if rec.get("isSidechain"):
+                continue                                         # a subagent's record
             if rec["type"] == "assistant":
-                return False
+                if rec["message"].get("model") == "<synthetic>" and not rec.get("isApiErrorMessage"):
+                    continue                                     # the CLI's own record
+                return False                                     # the model's answer, or an API error
             content = (rec.get("message") or {}).get("content")
             if rec["type"] == "user" and isinstance(content, list) and content and content[0].get("type") == "text":
                 return content[0]["text"].endswith(km.RETRY_MSG)
@@ -379,6 +400,74 @@ class LiftOnEvidence(_World):
         self.cycle(8)
         self.assertTrue(self.paused(), "api's record is new information: the pause is back")
         self.assertEqual(self.be.sent, ["web"])
+
+
+class RealAnswers(_World):
+    """An answer is a record the MODEL wrote in this conversation. The CLI writes records of its own (model "<synthetic>":
+    "No response requested." after a stop), and older transcripts hold a subagent's records beside the conversation's
+    (isSidechain). Neither says the API served this billing a request, and neither answers a retry."""
+
+    def test_a_record_the_cli_wrote_itself_lifts_no_pause_and_retries_nobody(self):
+        # a hard cap: nothing is served. An idle session on the same billing is interrupted, and the CLI writes its
+        # settle. Read as output, that one record lifted the pause and sent three retries into the standing cap.
+        self.evidence(3, streamer=False)
+        idle = self.serving(STREAM)
+        self.append(idle, prompt_line(self.T + 4, "[Request interrupted by user]"))
+        self.append(idle, synthetic_line(self.T + 5))
+        for at in (6, 7, 8):
+            self.cycle(at)
+        self.assertTrue(self.paused(), "the pause's own lift reads a model's answer, not the CLI's settle")
+        self.assertEqual(self.be.sent, [])
+        self.assertEqual((km._api_last_output_t(self.path[idle]), km._api_served_times(self.path[idle])), (self.T - 60, (0, False)),
+                         "the newest answer is still the one before it, and no request stands served")
+
+    def test_a_subagent_s_record_is_another_conversation_s(self):
+        (web,) = self.evidence(1, streamer=False)
+        idle = self.serving(STREAM)
+        # a subagent's prompt and answer in a capped session's transcript: it stays parked
+        self.append(web, prompt_line(self.T + 3, "search the notes table", isSidechain=True))
+        self.append(web, out_line(self.T + 4, isSidechain=True))
+        self.assertTrue(km._api_error(self.path[web])["spendLimit"], "still parked on its cap record")
+        # ... and in an idle session on the same billing: no lift, no evidence
+        self.append(idle, tool_line(self.T + 4))
+        self.append(idle, out_line(self.T + 5, isSidechain=True))
+        for at in (6, 7, 8):
+            self.cycle(at)
+        self.assertEqual((self.paused(), self.be.sent), (True, []))
+
+    def test_only_a_model_s_answer_or_an_api_error_frees_a_slot(self):
+        capped = self.evidence(6)
+        self.cycle(6)
+        self.assertEqual(self.be.sent, NAMES[:3])
+        self.append(capped[0], synthetic_line(self.T + 7))                    # the CLI's own record
+        self.append(capped[1], out_line(self.T + 7, isSidechain=True))        # a subagent's
+        self.append(capped[2], tool_line(self.T + 7))                         # a tool result
+        self.cycle(8)
+        self.assertEqual((self.be.sent, self.out()), (NAMES[:3], sorted(NAMES[:3])), "none of the three is an answer: three out still")
+        self.answer(capped[0], 9)                                             # the model's answer
+        self.answer(capped[1], 9, ok=False, text=OTHER_TEXT)                  # an API error
+        self.cycle(10)
+        self.assertEqual(sorted(self.be.sent), sorted(NAMES[:5] + ["api"]), "two answers, two more (and the ladder's retry of the overload)")
+
+    def test_three_sessions_that_never_answer_hold_every_slot_and_the_log_names_them(self):
+        capped = self.evidence(6)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.cycle(6)
+            for at in range(7, 27):                              # twenty passes: only records that are no answer arrive
+                self.append(capped[at % 3], _line("system", self.T + at - 0.5, subtype="note"))
+                self.serves(SIDS[STREAM], at - 0.25)
+                self.cycle(at)
+        self.assertEqual(self.be.sent, NAMES[:3])
+        line = "auto-retry: retries after the spend cap are waiting on 3 unanswered session(s): web, api, tests\n"
+        self.assertEqual(err.getvalue().count(line), 1, "said once for the set, not once a pass\n" + err.getvalue())
+        # a slot frees when its session ends, loses its CLI or is stopped; the set changes, and the log says the new one
+        self.live[capped[0]]["connected"] = False
+        with contextlib.redirect_stderr(err):
+            self.cycle(28)
+            self.cycle(29)
+        self.assertEqual(self.be.sent, NAMES[:4])
+        self.assertEqual(err.getvalue().count("waiting on 3 unanswered session(s): api, tests, docs\n"), 1, err.getvalue())
 
 
 class Parked(_World):
@@ -529,6 +618,31 @@ class StrictLoopBreaker(_World):
         failed, _ = self.drive(20, 24, refused={web})
         self.assertEqual((self.be.sent, failed), (["web", "web"], {"web": 1}), "one retry for the new record, then none")
 
+    def test_romp_s_own_prompts_do_not_reopen_a_refused_record(self):
+        # a nudge, a notice, another session's mail: prompts the PERSON did not write. Each one opens a turn that the
+        # cap refuses, and each refusal is a new record; read as "a prompt other than the retry", five of them drew
+        # five more retries. The refusal that follows romp's own prompt still answers no one who asked.
+        (web,) = self.evidence(1)
+        self.cycle(6)
+        self.answer(web, 7, ok=False)
+        self.assertTrue(km._api_error(self.path[web])["afterRetry"])
+        for k in range(5):
+            at = 10 + 4 * k
+            self.append(web, prompt_line(self.T + at, NUDGE))
+            self.answer(web, at + 1, ok=False)
+            self.assertTrue(km._api_error(self.path[web])["afterRetry"], "romp's own prompt: the record is the person's still")
+            self.serves(SIDS[STREAM], at + 2)
+            self.cycle(at + 3)
+        self.assertEqual(self.be.sent, ["web"], "five nudges, five refusals, no further retry")
+        # mail from another session (the CLI's own stamp says a peer wrote it) reopens nothing either
+        self.append(web, prompt_line(self.T + 40, "the import is unblocked on my side", origin={"kind": "peer"}))
+        self.answer(web, 41, ok=False)
+        self.assertTrue(km._api_error(self.path[web])["afterRetry"])
+        # the person's own message does
+        self.append(web, prompt_line(self.T + 50, "try that again", promptSource="sdk"))
+        self.answer(web, 51, ok=False)
+        self.assertFalse(km._api_error(self.path[web])["afterRetry"])
+
     def test_the_person_s_own_failed_prompt_is_a_record_evidence_may_retry_once(self):
         (web,) = self.evidence(1)
         self.cycle(6)
@@ -607,7 +721,10 @@ class ResumeProbe(_World):
         self.assertEqual(self.be.sent, ["web", "docs", "build"], "the login's sessions follow their probe; the key's do not")
         self.assertEqual((self.paused(), km._retry_pause_reason(), km._retry_pause_bills()), (True, "spend", "key"),
                          "the pause is back for the billing whose probe was refused")
-        self.assertTrue(km._RETRY_PAUSE_STILL[0])
+        self.assertEqual(km._RETRY_PAUSE_STILL[0], ("sdk", "key", ""), "still in force, on the key's billing")
+        # R9: the mark rides the status of the sessions on THAT billing; a session on the login was not asked about
+        self.assertEqual([km._spend_still(self.live[sid]) for sid in key], [True, True, True])
+        self.assertEqual([km._spend_still(self.live[sid]) for sid in login], [False, False])
         for at in (25, 26, 27):
             self.cycle(at)
         self.assertEqual(self.be.sent, ["web", "docs", "build"], "nothing else is sent on the refused billing")
@@ -623,7 +740,7 @@ class ResumeProbe(_World):
             self.cycle(24)
         self.assertTrue(self.paused(), "the refusal is a new record: the pause re-engages")
         self.assertEqual((km._retry_pause_reason(), km._retry_pause_bills()), ("spend", "key"))
-        self.assertTrue(km._RETRY_PAUSE_STILL[0], "and it is marked: the limit is STILL in force")
+        self.assertEqual(km._RETRY_PAUSE_STILL[0], ("sdk", "key", ""), "and it is marked: on that billing the limit is STILL in force")
         self.assertIn("the monthly spend limit is still in force (key billing)", err.getvalue())
         self.assertNotIn("auto-engaged", err.getvalue())
         for at in (25, 26, 27):
@@ -644,39 +761,56 @@ class ResumeProbe(_World):
             self.answer(capped[0], 20.9, ok=False)
             self.cycle(20.95)
         self.assertTrue(self.paused(), "the refusal re-engages the pause")
-        self.assertTrue(km._RETRY_PAUSE_STILL[0], "marked still in force")
+        self.assertEqual(km._RETRY_PAUSE_STILL[0], ("sdk", "key", ""), "marked still in force")
         self.assertIn("retry-pause: re-engaged: the retry sent to web on Resume was refused, so the monthly spend limit "
                       "is still in force (key billing)", err.getvalue())
         for at in (22, 23):
             self.cycle(at)
         self.assertEqual(self.be.sent, ["web"])
 
-    def test_a_wave_retry_refused_does_not_end_the_press_and_is_marked_too(self):
-        # the probe is served, the press opens; one of the sessions it then retries is refused. That refusal re-engages
-        # the pause, marked still; the press is the person's act for every record parked at it, so once the served
-        # session's next answer lifts the pause the rest still get their one retry
-        capped = [self.refused_once(i) for i in range(5)]       # all five answer a retry already: only a press moves them
+    def test_the_first_refused_wave_retry_ends_the_press(self):
+        # the probe is served, the press opens, and the cap refuses every other session. The first refusal ends the
+        # press: what is out is out, and nothing more is sent, so a press over a cap that serves one session and
+        # refuses nine costs the retries already out (three at most), not nine and three engages
+        capped = [self.refused_once(i) for i in range(10)]      # all answer a retry already: only a press moves them
         self.cycle(0)
         self.press_resume(20)
         self.cycle(21)
         self.assertEqual(self.be.sent, ["web"])
-        self.answer(capped[0], 23)
+        self.answer(capped[0], 23)                               # the probe: served
         self.cycle(24)
-        self.assertEqual(self.be.sent, NAMES[:4])
-        self.answer(capped[1], 26, ok=False)                     # refused
-        self.answer(capped[2], 26)
-        self.answer(capped[3], 26)
-        self.cycle(27)
-        self.assertEqual((self.paused(), km._RETRY_PAUSE_STILL[0]), (True, True))
-        self.assertEqual(self.be.sent, NAMES[:4], "paused: nothing is sent")
-        self.serves(capped[0], 29)                               # the key account goes on serving: the pause lifts
+        self.assertEqual(self.be.sent, NAMES[:4], "the press opens: three out")
+        engages = 0
+        for k, at in enumerate(range(26, 86, 2)):                # every retry out is refused; the served probe goes on being served
+            for sid in capped[1:]:
+                if self.unanswered(sid):
+                    self.answer(sid, at - 0.5, ok=False)
+            self.serves(capped[0], at - 0.25)
+            before = self.paused()
+            self.cycle(at)
+            engages += (not before) and self.paused()
+        self.assertEqual(self.be.sent, NAMES[:4], "three refused, and the other six were never sent a retry")
+        self.assertEqual((engages, km._spend_press), (1, {}), "one engage, and the press is over")
+
+    def test_a_press_is_spent_by_the_next_write_of_the_pause(self):
+        # the probe is out and unanswered when a usage window fills and empties (an engage and a lift: two writes of
+        # the pause, neither the press's own). A day later the probe is served. The press is long spent: nothing follows.
+        capped = [self.refused_once(i) for i in range(4)]
+        self.cycle(0)
+        self.press_resume(20)
+        self.cycle(21)
+        self.assertEqual((self.be.sent, len(km._spend_press)), (["web"], 1))
+        km._usage = lambda: {"limited": {"fiveHour": True}}
         self.cycle(30)
-        self.assertEqual((self.paused(), self.be.sent), (False, NAMES[:5]), "the press still covers the last record")
-        self.answer(capped[4], 31)
-        for at in (32, 33, 34):
+        self.assertEqual(km._retry_pause_reason(), "limit")
+        km._usage = lambda: {"limited": None}
+        self.cycle(40)
+        self.assertEqual((self.paused(), km._spend_press), (False, {}), "the pause was written by something else: the press is spent")
+        self.answer(capped[0], 86_400)                           # the probe, answered a day later
+        for at in (86_401, 86_402, 86_403):
             self.serves(capped[0], at - 0.5)
             self.cycle(at)
-        self.assertEqual(self.be.sent, NAMES[:5], "and the refused one is the person's again: no second retry")
+        self.assertEqual(self.be.sent, ["web"], "a stale press opens nothing: the three are the person's still")
 
     def test_a_second_resume_probes_again(self):
         # day one: the probe (web) is refused. Day two: the cap is raised and the person presses Resume again; web's
@@ -789,8 +923,9 @@ class Stagger(_World):
         self.answer(key[0], 12)
         self.cycle(13)
         self.assertEqual(self.be.sent, NAMES[:3] + ["docs"], "a slot frees: the probe goes; the press was not spent on a full pass")
-        self.assertEqual(err.getvalue().count("auto-retry: 3 retries are already out: the Resume's probe on login billing "
-                                              "goes when one is answered"), 1, "said once, not once per pass\n" + err.getvalue())
+        self.assertEqual(err.getvalue().count("auto-retry: retries after the spend cap are waiting on 3 unanswered session(s): web, api, tests; "
+                                              "the Resume's probe on login billing goes when one is answered"), 1,
+                         "said once, not once per pass\n" + err.getvalue())
 
 
 class StopHolds(_World):
@@ -824,7 +959,68 @@ class StopHolds(_World):
         self.press_resume(42)
         self.cycle(43)
         self.assertEqual(self.be.sent, NAMES[:6])
-        self.assertEqual(km._spend_stopped, {})
+        self.assertNotIn("held", km._retry_pause_doc(), "the Resume lifted the hold in its own write")
+
+    def test_a_stop_holds_through_a_restart(self):
+        # deploy restarts are routine: a Stop that a restart undid sent the held sessions a retry nobody asked for.
+        # The hold is in the pause file, by record identity, and the next kernel reads it there
+        capped = self.evidence(6)
+        self.cycle(6)
+        self.assertEqual(self.be.sent, NAMES[:3])
+        self.press_stop(7)
+        self.cycle(7.5)
+        for sid in capped[:3]:
+            self.answer(sid, 8)
+        self.restart()                                           # the kernel forgets everything it held in memory
+        for at in range(9, 39, 2):
+            self.serves(SIDS[STREAM], at - 0.5)
+            self.cycle(at)
+        self.assertEqual((self.paused(), self.be.sent), (False, NAMES[:3]), "the pause cleared itself; the hold did not")
+        self.assertEqual(sorted(km._retry_pause_doc()["held"]), sorted(capped[3:]),
+                         "the three it had not reached, by session, carried by every write since")
+        self.restart()
+        self.press_resume(50)                                    # their Resume, after another restart: it lifts the hold
+        self.cycle(51)
+        self.assertEqual(self.be.sent, NAMES[:6])
+
+    def test_a_pass_that_reads_no_row_for_a_held_session_leaves_its_hold(self):
+        # one liveness read that misses a session (or a CLI between two lives) is not the session leaving its record
+        capped = self.evidence(4)
+        self.press_stop(1)
+        self.cycle(2)
+        km._set_retry_paused(False)                              # (the manual pause aside: the hold's own reading is under test)
+        row, entry = self.live.pop(capped[0]), [r for r in self.roster if r["sid"] == capped[0]]
+        self.roster = [r for r in self.roster if r["sid"] != capped[0]]
+        self.cycle(6)                                            # a pass with no row for web
+        self.live[capped[0]] = row
+        self.roster = entry + self.roster
+        for at in (7, 8, 9):
+            self.serves(SIDS[STREAM], at - 0.5)
+            self.cycle(at)
+        self.assertEqual(self.be.sent, [], "web is held still, with the other three")
+        self.assertEqual(sorted(km._retry_pause_doc()["held"]), sorted(capped))
+        # a held session SEEN to have left its record (the person wrote to it, and it was served) leaves the hold
+        self.append(capped[0], prompt_line(self.T + 10, "carry on"))
+        self.answer(capped[0], 11)
+        self.cycle(12)
+        self.assertEqual(sorted(km._retry_pause_doc()["held"]), sorted(capped[1:]))
+
+    def test_the_hold_is_written_without_touching_the_pause_and_rides_every_later_write(self):
+        km._set_retry_paused(True, reason="spend", bills="key")
+        before = km._retry_pause_doc()
+        seq = km._RETRY_PAUSE_SEQ[0]
+        self.assertTrue(km._spend_held_write({"s1": "rec-1"}))
+        self.assertEqual(km._retry_pause_doc(), dict(before, held={"s1": "rec-1"}), "the pause as it stood, and the hold")
+        self.assertEqual(km._RETRY_PAUSE_SEQ[0], seq, "no pause write: no frame, and a standing press is not spent by it")
+        km._set_retry_paused(False, lifted_at=self.T + 5)        # the lift
+        km._set_retry_paused(True, reason="limit")               # an engage of another kind
+        km._set_retry_paused(False)                              # its lift
+        km._set_retry_paused(True)                               # a second Stop at the door, before its pass
+        self.assertEqual(km._retry_pause_doc()["held"], {"s1": "rec-1"})
+        km._set_retry_paused(False, resumed=True)                # the person's Resume
+        self.assertNotIn("held", km._retry_pause_doc())
+        self.assertTrue(km._spend_held_write({}))
+        self.assertNotIn("held", km._retry_pause_doc())
 
     def test_a_stop_drops_a_resume_s_press(self):
         capped = self.evidence(4, streamer=False)
@@ -900,6 +1096,159 @@ class Restart(_World):
             self.serves(SIDS[STREAM], at - 0.5)
             self.cycle(at)
         self.assertEqual(self.be.sent, ["web"], "afterRetry is the transcript's own reading: a restart changes nothing")
+
+
+class RealBackendHandOver(unittest.TestCase):
+    """R8 through the REAL backend. "Already retried" rests on two readings: the transcript (a retry prompt after the
+    cap record) and, for a retry handed over and not yet recorded, the backend. The classes above fake the backend's
+    side; here the real SdkBackend and the real session loop (its feeder, its echo ledger) take the kernel's send, over a
+    stand-in SDK module whose client records what it was fed and writes nothing (the connect-loop harness of
+    tests/test_queued_sends_not_fused.py). The CLI holds the retry, the transcript does not show it, the backend's
+    queue is empty: what stands between the kernel and a second retry is the backend's own unlanded echo."""
+
+    SID = "99999999-aaaa-4bbb-8ccc-00000000aa01"
+    STREAMER = "99999999-aaaa-4bbb-8ccc-00000000aa02"
+
+    class _Client:
+        instances = []
+
+        def __init__(self, options=None, transport=None):
+            self.options, self.writes = options, []
+            self.frames = asyncio.Queue()                    # the CLI's stream: nothing is ever pushed, so no turn is answered
+            type(self).instances.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def query(self, prompt, session_id="default"):
+            async for turn in prompt:
+                self.writes.append(turn["message"]["content"][0]["text"])
+
+        async def interrupt(self):
+            pass
+
+        async def get_context_usage(self):
+            return {"percentage": 2, "model": "claude-x"}
+
+        async def get_server_info(self):
+            return {}
+
+        async def receive_messages(self):
+            while True:
+                yield await self.frames.get()
+
+    class _Options:
+        def __init__(self, **kw):
+            self.session_id = self.resume = None
+            for k, v in kw.items():
+                setattr(self, k, v)
+
+    def setUp(self):
+        self._Client.instances = []
+        fake = types.ModuleType("claude_agent_sdk")
+        fake.__spec__ = ModuleSpec("claude_agent_sdk", loader=None)
+        fake.ClaudeSDKClient, fake.ClaudeAgentOptions, fake.HookMatcher = self._Client, self._Options, (lambda **kw: types.SimpleNamespace(**kw))
+        for name in ("AssistantMessage", "ResultMessage", "SystemMessage", "TextBlock"):
+            setattr(fake, name, type(name, (), {}))
+        self._saved_sdk = sys.modules.get("claude_agent_sdk")
+        sys.modules["claude_agent_sdk"] = fake
+
+        async def _noop_refresh(self):
+            pass
+        self._saved_refresh = sb.SdkSession._do_refresh_usage
+        sb.SdkSession._do_refresh_usage = _noop_refresh
+        self.state = tempfile.mkdtemp()
+        os.makedirs(self.state, exist_ok=True)
+        open(os.path.join(self.state, "session-hosts"), "w").write("off")    # its own state root: the plain-child road, a fake client
+        self.cwd = os.path.join(self.state, "proj")
+        os.makedirs(self.cwd)
+        self.be = sb.SdkBackend(self.state, "/bin/true", lambda *a, **k: None, log=lambda m, **k: None)
+        reg = {"sid": self.SID, "name": "web", "mode": "acceptEdits", "alive": True, "cwd": self.cwd, "auth": "key"}
+        sb.write_reg(self.be.state_dir, self.SID, reg)
+        self.s = sb.SdkSession(self.be, dict(reg))
+        self.be.sessions[self.SID] = self.s
+        # the kernel's side: web sits on a spend-cap record, and a session on its billing was served a request made after it
+        self.T = int(time.time())
+        self.dir = Path(self.state)
+        self.paths = {self.SID: str(self.dir / "web.jsonl"), self.STREAMER: str(self.dir / "stream.jsonl")}
+        Path(self.paths[self.SID]).write_text(out_line(self.T - 120) + err_line(self.T - 90))
+        Path(self.paths[self.STREAMER]).write_text(out_line(self.T - 200) + tool_line(self.T - 10) + out_line(self.T - 9))
+        self.rows = [{"sid": self.SID, "name": "web", "path": self.paths[self.SID]},
+                     {"sid": self.STREAMER, "name": "stream", "path": self.paths[self.STREAMER]}]
+        saved = {n: getattr(km, n) for n in ("_alive_sessions", "_path_of", "_session_retry_suppressed", "_retry_suppress_unknown",
+                                             "_pending_ops", "_auth_key_present")}
+        saved_backend, saved_state = km.Sessions.__dict__["backend_for"], km.jd.STATE
+
+        def restore():
+            for n, v in saved.items():
+                setattr(km, n, v)
+            km.Sessions.backend_for, km.jd.STATE = saved_backend, saved_state
+            self._forget()
+        self.addCleanup(restore)
+        km.jd.STATE = self.dir
+        km._alive_sessions = lambda now, live: list(self.rows)
+        km._path_of = lambda sid, now=None: self.paths.get(sid)
+        km._session_retry_suppressed = lambda sid: False
+        km._retry_suppress_unknown = lambda: False
+        km._auth_key_present = lambda: True
+        km._pending_ops = {}
+        km.Sessions.backend_for = staticmethod(lambda sid: self.be)
+        self._forget()
+
+    def tearDown(self):
+        if self.s.thread.is_alive():
+            self.s.shutdown()
+        if self.s.thread.ident is not None:
+            self.s.thread.join(timeout=10)
+        sb.SdkSession._do_refresh_usage = self._saved_refresh
+        if self._saved_sdk is None:
+            sys.modules.pop("claude_agent_sdk", None)
+        else:
+            sys.modules["claude_agent_sdk"] = self._saved_sdk
+        shutil.rmtree(self.state, ignore_errors=True)
+
+    def _forget(self):
+        """What a kernel restart forgets."""
+        for name in ("_auto_retried", "_auto_retry_state", "_spend_press", "_api_err_cache", "_api_last_failed_cache"):
+            vars(km).get(name, {}).clear()
+        for name, empty in (("_spend_door", None), ("_spend_wait_said", None), ("_RETRY_PAUSE_STILL", None)):
+            vars(km).get(name, [None])[0] = empty
+
+    def _wait(self, pred, what, timeout=10.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if pred():
+                return
+            time.sleep(0.01)
+        self.fail("timed out waiting for " + what)
+
+    def _live(self):
+        """The live map as the kernel reads it: web's row is the real backend's own, the streamer's a row on the same billing."""
+        row = km._sdk_live_norm(self.be.live_sessions()[self.SID])
+        return {self.SID: row, self.STREAMER: dict(row)}
+
+    def test_a_retry_the_real_backend_holds_is_not_sent_twice(self):
+        self.s.start()
+        self._wait(lambda: self.s.client is not None, "the first connect")
+        client = self._Client.instances[0]
+        live = self._live()
+        self.assertTrue(live[self.SID]["connected"], "premise: the real row says a CLI serves it")
+        km._auto_retry_tick(self.T, live)
+        self._wait(lambda: client.writes == [km.RETRY_MSG], "the kernel's retry, fed to the CLI by the real feeder")
+        # handed over: the CLI has it, its transcript does not show it, and it has left the backend's queue
+        self.assertTrue(km._api_error(self.paths[self.SID])["spendLimit"], "web's transcript still ends on its cap record")
+        self._wait(lambda: self.be.pending_queued(self.SID) == [], "the feeder took it off the queue")
+        self.assertTrue(km._retry_handed_over(self.be, self.SID), "the backend's own unlanded echo says it is out")
+        self.assertEqual(km._spend_retries_out(self.rows, live, {self.SID: None}), ["web"], "and it holds a slot")
+        # the kernel restarts: everything it remembered about the retry is gone
+        for _ in range(3):
+            self._forget()
+            km._auto_retry_tick(self.T + 1, self._live())
+            time.sleep(0.15)                                 # every chance for a second feed to happen
+        self.assertEqual(client.writes, [km.RETRY_MSG], "one retry reached the CLI: no duplicate")
 
 
 class BillingSwitch(_World):
@@ -1058,42 +1407,54 @@ class Wiring(unittest.TestCase):
         tick = inspect.getsource(km._auto_retry_tick)
         self.assertIn("_spend_resume_pass(now, live_map, rows, capped)", tick, "inside the autoRetry job: no new job, no new pass")
 
-    def test_the_frame_carries_still_and_the_page_reads_it_into_the_card_s_one_line_decider(self):
-        # R9. The kernel's half: the flag rides the globalRetryPaused frame. The page's half: render.ts reads it off the
-        # frame and hands it to apiCardLine, which words the cap's card and the paused line (ui/webview/api-card-line.ts);
-        # the card is RENDERED with the flag set and cleared in ui/webview/apierror-line-browser.test.ts.
+    def test_still_rides_the_status_of_the_sessions_on_the_refused_billing_and_the_page_words_it(self):
+        # R9. The kernel's half: the mark is a billing, and each session's status says whether it is on that billing
+        # (the built status, the cold tab's, the chat build's signature, a comment thread's projection). The page's half:
+        # the card's one decider reads it off the status (ui/webview/api-card-line.ts); the card is RENDERED with it
+        # set and cleared in ui/webview/apierror-line-browser.test.ts.
         src = Path(BIN, "romp-kernel").read_text()
-        self.assertIn('"still": _RETRY_PAUSE_STILL[0],', src)
+        self.assertEqual(src.count('"spendStill": _spend_still(tm),'), 2, "the built status and the cold tab's")
+        self.assertIn("sig.append((_session_retry_suppressed(sid),) + tuple(_retry_gate_state(sid)) + (_spend_still(tm),))", src,
+                      "the chat build is rebuilt when it flips")
+        self.assertIn("spendStill", km._THREAD_LIVE_STATUS_KEYS)
+        self.assertNotIn('"still":', inspect.getsource(km._push_all) if hasattr(km, "_push_all") else "", "no pause-wide copy on the frame")
         self.assertIn('"reason": _retry_pause_reason()})', src)
+        key, login = {"backend": "sdk", "auth": "key", "authLive": "key"}, {"backend": "sdk", "auth": "login", "authLive": "login"}
+        other = dict(login, authLogin="login-b")
+        try:
+            for mark, want in ((None, (False, False, False)), (km._billing_key(key), (True, False, False)),
+                               (km._billing_key(other), (False, False, True))):
+                km._RETRY_PAUSE_STILL[0] = mark
+                self.assertEqual(tuple(km._spend_still(r) for r in (key, login, other)), want)
+        finally:
+            km._RETRY_PAUSE_STILL[0] = None
         ui = Path(os.path.dirname(HERE), "ui", "webview")
-        render = (ui / "render.ts").read_text()
-        self.assertIn("globalRetryStill = m.still === true;", render, "read off every frame: it clears with the first frame that carries none")
-        self.assertIn("reason: globalRetryReason, still: globalRetryStill }", render)
         line = (ui / "api-card-line.ts").read_text()
         self.assertIn('"spend limit still in force — raise it at claude.ai/settings/usage"', line)
-        self.assertIn('pause.paused && pause.reason === "spend" && pause.still', line)
-        self.assertIn("await pause(page, true, \"spend\", { still: true });", (ui / "apierror-line-browser.test.ts").read_text())
+        self.assertIn("if (st?.apiSpendLimit) return remedy(st.spendStill ? SPEND_STILL_REMEDY : SPEND_CAP_REMEDY);", line)
+        self.assertIn("spendStill: true", (ui / "apierror-line-browser.test.ts").read_text())
 
     def test_still_clears_with_the_next_write_of_the_pause(self):
         saved = km.jd.STATE
         td = tempfile.TemporaryDirectory()
+        bill = ("sdk", "key", "")
         try:
             km.jd.STATE = Path(td.name)
-            km._set_retry_paused(True, reason="spend", bills="key", still=True)
-            self.assertTrue(km._RETRY_PAUSE_STILL[0])
+            km._set_retry_paused(True, reason="spend", bills="key", still=bill)
+            self.assertEqual(km._RETRY_PAUSE_STILL[0], bill)
             self.assertEqual(set(json.loads((Path(td.name) / "retry-paused.json").read_text())), {"paused", "t", "reason", "bills"},
                              "memory only: the file's shape is unchanged")
             km._set_retry_paused(False)
-            self.assertFalse(km._RETRY_PAUSE_STILL[0], "a lift clears it")
-            km._set_retry_paused(True, reason="spend", bills="key", still=True)
+            self.assertIsNone(km._RETRY_PAUSE_STILL[0], "a lift clears it")
+            km._set_retry_paused(True, reason="spend", bills="key", still=bill)
             km._set_retry_paused(True, reason="limit")
-            self.assertFalse(km._RETRY_PAUSE_STILL[0], "and so does a pause of another kind")
-            km._set_retry_paused(True, reason="spend", bills="key", still=True)
+            self.assertIsNone(km._RETRY_PAUSE_STILL[0], "and so does a pause of another kind")
+            km._set_retry_paused(True, reason="spend", bills="key", still=bill)
             km._set_retry_paused(True)
-            self.assertFalse(km._RETRY_PAUSE_STILL[0], "and the person's Stop")
+            self.assertIsNone(km._RETRY_PAUSE_STILL[0], "and the person's Stop")
         finally:
             km.jd.STATE = saved
-            km._RETRY_PAUSE_STILL[0] = False
+            km._RETRY_PAUSE_STILL[0] = None
             td.cleanup()
 
 

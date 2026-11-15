@@ -6,7 +6,7 @@
 // read "retrying soon…" after the Resume frame, and a background transient error never counted down after a switch to it.
 // Here the page is driven by the frames the kernel sends (session frames, the globalRetryPaused frame), one tab active and
 // four built in the background, and every card is read off the DOM: its stamp, its line and its buttons, through the pause
-// engaging, the Resume frame, a pause that comes back marked `still`, and a switch to each tab. A comment thread's card,
+// engaging, the Resume frame, a refused retry on one billing (the status's spendStill), and a switch to each tab. A comment thread's card,
 // rendered into the popover under the thread's own session, is read the same way, from a status cut to the keys the
 // kernel really projects for a thread (_THREAD_LIVE_STATUS_KEYS, read out of kernel.py here), since a field the kernel
 // does not send is a field the card never sees. And the line is READ WHOLE at every width: the head's slot is one line
@@ -39,7 +39,7 @@ let pw: any = null;
 try { pw = requireCjs("playwright"); } catch { pw = null; }
 
 const sid = (n: number) => `aaaaaaaa-bbbb-4ccc-8ddd-${String(n).padStart(12, "0")}`;
-const WEB = sid(1), API = sid(2), TESTS = sid(3), DOCS = sid(4), BUILDS = sid(5);
+const WEB = sid(1), API = sid(2), TESTS = sid(3), DOCS = sid(4), BUILDS = sid(5), LINT = sid(6);
 const TID = "11111111-2222-4333-8444-555555555555", ANCHOR = "11111111-2222-4333-8444-666666666666";
 const PASSAGE = "Keep the retry cap at two minutes";
 const SPEND_TEXT = "API Error: 429 the monthly spend limit for this workspace was reached";   // invented wording
@@ -165,18 +165,24 @@ test("a card built for a background tab reads its own session: its stop's remedy
     assert.match(c[TESTS].line, /^retrying in 6m \d+s · 3 tries so far$/, "a background transient error counts down after the switch");
     assert.deepEqual(c[TESTS].buttons, ["Retry now", "Stop all auto-retries"]);
 
-    // the pause comes back marked `still` (a retry was refused): the cap's card says so, shown or hidden, and the mark
-    // goes with the frame that carries none
-    await pause(page, true, "spend", { still: true });
-    await settle(page);
-    c = await cards(page);
-    assert.equal(c[API].line, SPEND_STILL_REMEDY);
-    assert.equal(c[TESTS].line, "monthly spend limit still in force — raise it at claude.ai/settings/usage");
-    assert.deepEqual([c[DOCS].line, c[BUILDS].line], [AUTH_REMEDY, MODEL_LIMIT_REMEDY], "the mark is the spend cap's alone");
+    // a retry was refused on the billing `api` and `tests` are on: the pause comes back, and the kernel marks the sessions
+    // on THAT billing (the status's spendStill). Their cards say the limit is still in force, shown or hidden; `lint`,
+    // capped on another billing, was not asked about and keeps the plain line; the mark goes with the status that drops it
+    const line = (id: string, want: string) => page.waitForFunction(([s, w]: string[]) =>
+      (document.querySelector(`#content [data-session="${s}"] .api-countdown`) as HTMLElement | null)?.textContent === w, [id, want], { timeout: 5000 });
     await pause(page, true, "spend");
-    await settle(page);
+    await post(page, blocked(API, "api", 1, { apiSpendLimit: true, spendStill: true }, SPEND_TEXT, 429));
+    await post(page, blocked(TESTS, "tests", 2, { retryNextAt: next, retryTries: 3, spendStill: true }, "API Error: 529 the service is overloaded", 529));
+    await post(page, blocked(LINT, "lint", 5, { apiSpendLimit: true }, SPEND_TEXT, 429));
+    await line(API, SPEND_STILL_REMEDY);
+    await line(TESTS, "monthly spend limit still in force — raise it at claude.ai/settings/usage");
+    await line(LINT, SPEND_CAP_REMEDY);
     c = await cards(page);
-    assert.deepEqual([c[API].line, c[TESTS].line], [SPEND_CAP_REMEDY, PAUSED_SPEND]);
+    assert.deepEqual([c[DOCS].line, c[BUILDS].line], [AUTH_REMEDY, MODEL_LIMIT_REMEDY], "the mark is the spend cap's alone");
+    await post(page, blocked(API, "api", 1, { apiSpendLimit: true }, SPEND_TEXT, 429));
+    await post(page, blocked(TESTS, "tests", 2, { retryNextAt: next, retryTries: 3 }, "API Error: 529 the service is overloaded", 529));
+    await line(API, SPEND_CAP_REMEDY);
+    await line(TESTS, PAUSED_SPEND);
   });
 });
 
@@ -190,7 +196,7 @@ test("a comment thread's card reads the thread, not the tab it hangs on", async 
                  // the thread's build status as a tab's would read, cut to what the kernel sends for a thread
                  live: { status: asThreadStatus({ state: "blocked", sinceEpoch: null, apiTooLong: false, apiSpendLimit: true, apiModelLimit: false,
                                                   apiAuthErr: false, apiRefusal: false, apiNoRetry: false, retrySuppressed: false,
-                                                  retryNextAt: null, retryTries: null, model: "Opus 5", needsYou: false }), bgTasks: null } };
+                                                  retryNextAt: null, retryTries: null, spendStill: false, model: "Opus 5", needsYou: false }), bgTasks: null } };
     assert.ok(THREAD_KEYS.includes("state") && !THREAD_KEYS.includes("model"), "premise: the kernel's own key list was read: " + THREAD_KEYS.join(","));
     assert.equal((th.live.status as Record<string, unknown>).apiSpendLimit, true, "the kernel projects the stop's class onto a thread's status");
     await post(page, { type: "comments", id: WEB, threads: [th], caps: ["threadAsks"] });
@@ -203,11 +209,14 @@ test("a comment thread's card reads the thread, not the tab it hangs on", async 
       return { stamp: c.dataset.sid, line: c.textContent, buttons: Array.from(c.closest(".turn-apierror")!.querySelectorAll("button")).map((b) => b.textContent) };
     });
     assert.deepEqual(await read(), { stamp: TID, line: SPEND_CAP_REMEDY, buttons: ["Stop all auto-retries"] });
-    await pause(page, true, "spend", { still: true });
-    await settle(page);
+    // a retry was refused on the thread's billing: the pause is back, and the thread's own status says still
+    await pause(page, true, "spend");
+    await post(page, { type: "comments", id: WEB, threads: [{ ...th, live: { status: { ...th.live.status, ...asThreadStatus({ spendStill: true }) }, bgTasks: null } }], caps: ["threadAsks"] });
+    await page.waitForFunction((w: string) => (document.querySelector("#cmt-pop .api-countdown") as HTMLElement | null)?.textContent === w, SPEND_STILL_REMEDY, { timeout: 5000 });
     assert.deepEqual(await read(), { stamp: TID, line: SPEND_STILL_REMEDY, buttons: ["Resume all auto-retries"] });
     await pause(page, false);
-    await settle(page);
+    await post(page, { type: "comments", id: WEB, threads: [th], caps: ["threadAsks"] });
+    await page.waitForFunction((w: string) => (document.querySelector("#cmt-pop .api-countdown") as HTMLElement | null)?.textContent === w, SPEND_CAP_REMEDY, { timeout: 5000 });
     assert.deepEqual(await read(), { stamp: TID, line: SPEND_CAP_REMEDY, buttons: ["Stop all auto-retries"] });
   });
 });
@@ -231,7 +240,7 @@ test("the line is read whole at every width: a remedy on a line of its own in th
   const next = Math.floor(Date.now() / 1000) + 396;
   const classes: { name: string; status: object; text: string; code: number; paused?: object; line: string | RegExp; remedy: boolean }[] = [
     { name: "spend cap", status: { apiSpendLimit: true }, text: SPEND_TEXT, code: 429, paused: {}, line: SPEND_CAP_REMEDY, remedy: true },
-    { name: "still in force", status: { apiSpendLimit: true }, text: SPEND_TEXT, code: 429, paused: { still: true }, line: SPEND_STILL_REMEDY, remedy: true },
+    { name: "still in force", status: { apiSpendLimit: true, spendStill: true }, text: SPEND_TEXT, code: 429, paused: {}, line: SPEND_STILL_REMEDY, remedy: true },
     { name: "model limit", status: { apiModelLimit: true }, text: "API Error: this model's allowance is spent", code: 429, line: MODEL_LIMIT_REMEDY, remedy: true },
     { name: "dead credential", status: { apiAuthErr: true }, text: "Not logged in", code: 401, line: AUTH_REMEDY, remedy: true },
     { name: "refusal", status: { apiRefusal: true }, text: "The model's safeguards flagged this message", code: 400, line: REFUSAL_REMEDY, remedy: true },
