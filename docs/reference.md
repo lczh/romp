@@ -6245,7 +6245,9 @@ signal, from two things the kernel owns directly:
   pause writes `paused`, `t` (when it began, the auto-resume floor) and its
   `reason`: `limit`, `spend`, or none for a manual stop. A spend pause adds
   `bills`, the billing the capped session was on (`login` or `key`); only
-  fresh assistant output from a session on that billing lifts it. Un-pausing
+  fresh assistant output from a session on that billing lifts it (the
+  sessions it stopped are then retried, see "Retrying after a spend limit is
+  raised" below). Un-pausing
   a spend pause, by that lift or by the Resume button, records `liftedAt`
   (the time of the output record that lifted it, or of the Resume click) and
   `supersedes` (the floor of the pause it cleared; informational, nothing
@@ -6351,6 +6353,39 @@ nothing), a `kernel restarted` divider is inserted, and it takes none of the
 four slots. A read that fails (a non-2xx, no answer, or an answer without
 the signal's shape) shows one line saying so in place of the rows,
 never the previous numbers.
+
+### Retrying after a spend limit is raised
+
+A session stopped on a monthly spend limit is never retried while the limit
+stands: a retry cannot raise it. Once the kernel sees the limit lifted for a
+session, it sends that session one `retry`, once per error record. It sees
+that in one of three ways:
+
+- Another session on the same billing (the same login, or the API key) is
+  served a request it made after the record. An answer to a request that was
+  already in flight when the limit fell does not count, though the `spend`
+  pause itself lifts on any fresh answer. A record that itself answers such
+  a retry is retried again only when a session that had been refused on that
+  billing is served: a limit can serve one session's small request and refuse
+  another's large one, and the first session's answers would otherwise draw a
+  retry each.
+- The session's CLI comes up on a different billing after the record. Only
+  that session is retried, even while the pause on the billing it left holds.
+- You press `Resume all auto-retries`. That is a request, not evidence, so
+  one stopped session is retried as a probe. If it is served, the rest follow
+  by the first rule. If it is refused, the pause returns and the stopped
+  sessions' cards read `spend limit still in force`.
+
+At most three of these retries are unanswered at a time
+(`ROMP_BOOT_RESUME_CONCURRENCY`, the setting that paces CLI launches); the
+next is sent when the API answers one, with output or with a new error. A
+refusal is a new spend-limit record: the pause re-engages on it and nothing
+more is sent.
+
+Not retried this way: a session with no running CLI (its next message is its
+retry), a session you interrupted, a session holding a message of yours that
+was queued behind the limit (that message is delivered instead), a session
+covered by a usage-limit pause or a manual stop, and a Codex session.
 
 ## Where things live
 
