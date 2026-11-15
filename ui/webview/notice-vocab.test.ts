@@ -146,6 +146,6 @@ test("ONE duration format: durLabel (duration.ts) serves the footer, the work ti
   assert.match(read("ui", "webview", "strip.ts"), /import \{ durLabel \} from "\.\/duration";/);
   assert.doesNotMatch(RENDER, /function durLabel\(/, "render.ts no longer owns a private copy");
   assert.match(RENDER, /return durLabel\(\(Date\.now\(\) - sinceMs\) \/ 1000\);/, "elapsedMs rides it");
-  assert.match(RENDER, /`retrying in \$\{durLabel\(left\)\}`/);
+  assert.match(read("ui", "webview", "api-card-line.ts"), /`retrying in \$\{durLabel\(left\)\}`/, "the API card's countdown (its line's one decider, 2026-11-15)");
   assert.match(RENDER, /`next try in \$\{durLabel\(s\)\}`/);
 });

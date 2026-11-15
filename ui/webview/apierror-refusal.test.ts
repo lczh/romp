@@ -11,6 +11,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { apiCardLine, REFUSAL_REMEDY } from "./api-card-line";
 
 const R = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const F = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
@@ -36,10 +37,12 @@ test("the chat error card drops Retry on a refusal and names the real fix in pla
   // the refusal joins the no-Retry gate (the button cannot work — same contract as the other on-you classes)
   assert.match(apiErr, /const refusal = !!st\?\.apiRefusal;/);
   assert.match(apiErr, /const spendCap = !!st\?\.apiSpendLimit \|\| !!st\?\.apiModelLimit \|\| !!st\?\.apiAuthErr \|\| refusal;/);
-  // …and the countdown line says what happened + the fix, never "retrying soon…" — via the ONE shared
-  // remedy string, so this write and the tick's re-assert below cannot drift into different words
-  assert.match(R, /const REFUSAL_REMEDY = "the model's safeguards refused this prompt — rewrite it or drop this thread";/);
-  assert.match(apiErr, /if \(refusal\) countdown\.textContent = REFUSAL_REMEDY;/);
+  // …and the card's line says what happened + the fix, never "retrying soon…": the ONE decider every writer of
+  // the line calls (api-card-line.ts apiCardLine, 2026-11-15) answers the remedy first, so this write and the
+  // tick's re-assert below cannot drift into different words
+  assert.equal(REFUSAL_REMEDY, "the model's safeguards refused this prompt — rewrite it or drop this thread");
+  assert.equal(apiCardLine({ apiRefusal: true }, { paused: false, resumeAt: null, reason: "" }, undefined, Date.now()), REFUSAL_REMEDY);
+  assert.match(apiErr, /countdown\.textContent = apiCardLineFor\(activeId\);/);
   // no dead button either: a refusal (like every no-Retry class) appends nothing after the Retry arm. Anchored with no
   // wildcard (review find): the Retry push, its closing brace and the next comment are adjacent lines, so a re-added
   // `else if` arm under any label fails this pin
@@ -47,15 +50,22 @@ test("the chat error card drops Retry on a refusal and names the real fix in pla
 });
 
 test("the 1s countdown tick RE-ASSERTS the refusal remedy — it must never write \"retrying soon…\" over it", () => {
-  // apiRetryTick's countdown writer runs every second; without its own branch it fell through to the
-  // else arm (a refusal session is out of the retry set, so `at` is always undefined) and overwrote the
-  // remedy with "retrying soon…" one second after render — promising a retry the kernel never fires.
-  // The branch leads the ladder (the global pause is about auto-retry, which a refusal never gets), and
-  // WRITING each tick, rather than skipping, also heals the Stop/Resume-all handler's blanket rewrite.
+  // apiRetryTick's countdown writer runs every second; without a refusal answer of its own it fell through to
+  // the countdown arm (a refusal session is out of the retry set, so it has no retry time) and overwrote the
+  // remedy with "retrying soon…" one second after render — promising a retry the kernel never fires. The tick
+  // now writes every card through the same decider as the render (relabelApiCards → apiCardLine), whose first
+  // answer is the remedy: the global pause is about auto-retry, which a refusal never gets, so no pause state,
+  // no stale retry time and no per-thread stop words a refused card.
   const tick = R.slice(R.indexOf("function apiRetryTick"), R.indexOf("function renderTool"));
-  assert.match(tick, /if \(active\?\.status\.apiRefusal\) \{/);
-  assert.match(tick, /cd\.textContent = REFUSAL_REMEDY;\s*\} else if \(globalRetryPaused\) \{/,
-    "the remedy branch sits ABOVE the paused/suppressed/countdown chain");
+  assert.match(tick, /\n  relabelApiCards\(\);\n\}/);
+  const now = Date.now();
+  for (const pause of [{ paused: false, resumeAt: null, reason: "" }, { paused: true, resumeAt: null, reason: "" },
+                       { paused: true, resumeAt: null, reason: "spend" }, { paused: true, resumeAt: now / 1000 + 60, reason: "limit" }]) {
+    for (const next of [undefined, now + 9_000]) {
+      assert.equal(apiCardLine({ apiRefusal: true, retrySuppressed: true }, pause, next, now), REFUSAL_REMEDY,
+        "the remedy sits ABOVE the paused/suppressed/countdown chain");
+    }
+  }
 });
 
 test("the feed card badges a refusal and HIDES Retry (a useless click there)", () => {
