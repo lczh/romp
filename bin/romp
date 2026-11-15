@@ -46,6 +46,7 @@ EOF
     _romp_cmd "romp new -m <text> <name>"  -            "Start it AND deliver <text> as its first prompt (one command, idea to working)"
     _romp_cmd "romp new --model <id> <name>" -          "Model for the SDK session: a family alias (fable — follows the newest) or a full id (claude-fable-5 — a pin); re-asserted if <name> already runs"
     _romp_cmd "romp new --effort <level> <name>" -      "Reasoning effort for the SDK session (e.g. high, ultracode); re-asserted if <name> already runs"
+    _romp_cmd "romp new --speed <standard|fast> <name>" - "Speed the SDK session starts at, as its own pick: standard, or fast (Claude Code's fast mode); without it the machine's Always fast switch decides. If <name> already runs it is set only where nothing has to be typed into the conversation"
     _romp_cmd "romp new --env NAME=VALUE <name>" -      "Per-session env var for the SDK session (repeatable; toggles, never secrets); a re-run on a running <name> replaces the whole set"
     _romp_cmd "romp new --no-env <name>"   -            "Clear a running SDK session's per-session env (declares the empty set)"
     _romp_cmd "romp new --in <tag> <name>" -            "Put the new SDK or Codex session in a tag (repeatable; a new name creates the tag) — its tab lands in that group"
@@ -2877,6 +2878,7 @@ session_arg=""
 dir_arg=""
 model_arg=""
 effort_arg=""
+speed_arg=""
 env_args=()
 no_env=false
 in_args=()
@@ -2893,7 +2895,7 @@ case "${1:-}" in
                 --codex)   use_codex=true; shift ;;   # an OpenAI Codex session (docs/codex.md)
                 -d)        shift
                            if [[ $# -eq 0 || "$1" == -* ]]; then
-                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--speed standard|fast] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            dir_arg="$1"; shift ;;
                 -m|--message) shift
@@ -2902,7 +2904,7 @@ case "${1:-}" in
                            # last two-step on the idea-to-working path). Empty text is a usage
                            # error, not a silent no-op.
                            if [[ $# -eq 0 || -z "$1" ]]; then
-                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--speed standard|fast] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            msg_arg="$1"; shift ;;
                 --tag)     shift
@@ -2912,7 +2914,7 @@ case "${1:-}" in
                            # as the user's typed words. Rides POST /send's "tag" field — the
                            # kernel validates and appends the render-hint marker itself.
                            if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then
-                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--speed standard|fast] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            tag_arg="$1"; shift ;;
                 --model)   shift
@@ -2923,16 +2925,29 @@ case "${1:-}" in
                            # note here once said the CLI resolved "fable" to Opus 5 and so required
                            # full ids; that is not reproducible on any installed CLI.
                            if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then
-                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--speed standard|fast] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            model_arg="$1"; shift ;;
                 --effort)  shift
                            # per-spawn effort (e.g. high, ultracode) — ultracode is per-session
                            # by design, never a machine default, so /new is its sanctioned door.
                            if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then
-                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--speed standard|fast] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            effort_arg="$1"; shift ;;
+                --speed)   shift
+                           # the speed the session is CREATED with (the user 2026-11-15): standard, or fast
+                           # (Claude Code's fast mode), riding POST /new into the kernel, which writes it as
+                           # the session's own pick before the first launch. Nothing is typed into the
+                           # conversation, and without the flag the machine's Always fast switch decides, as
+                           # before. A value outside the two is refused here, before anything is created.
+                           if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--speed standard|fast] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                           fi
+                           if [[ "$1" != "standard" && "$1" != "fast" ]]; then
+                               echo "romp new: --speed expects standard or fast (got: $1)" >&2; exit 2
+                           fi
+                           speed_arg="$1"; shift ;;
                 --env)     shift
                            # per-session env var, repeatable — rides POST /new into the kernel's
                            # per-sid flag-settings payload, so two sessions in the SAME directory
@@ -2945,7 +2960,7 @@ case "${1:-}" in
                            # behind Claude Code's apiKeyHelper (romp holds no key, and a credential name is
                            # refused here), since this payload is copied into per-sid files and the registry.
                            if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then
-                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--speed standard|fast] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            if [[ "$1" != *=* || ! "${1%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
                                echo "romp new: --env expects NAME=VALUE with NAME matching [A-Za-z_][A-Za-z0-9_]* (got: $1)" >&2; exit 2
@@ -2966,7 +2981,7 @@ case "${1:-}" in
                            # `romp tag <name> --add` would. `--tag` was already the -m message
                            # label, hence the different word.
                            if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then
-                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--speed standard|fast] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            in_args+=("$1"); shift ;;
                 --no-inherit)
@@ -2976,13 +2991,13 @@ case "${1:-}" in
                            no_inherit=true; shift ;;
                 -*)        echo "romp new: unknown option: $1" >&2; exit 2 ;;
                 *)         if [[ -n "$session_arg" ]]; then
-                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--speed standard|fast] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            session_arg="$1"; shift ;;
             esac
         done
         if [[ -z "$session_arg" ]]; then
-            echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+            echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--speed standard|fast] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
         fi
         # The EFFECTIVE backend decides flag validity — the machine default (`romp engine`,
         # STATE/default-backend) counts exactly like an explicit --codex. Resolved HERE, before
@@ -2999,6 +3014,12 @@ case "${1:-}" in
             # naming which door made this spawn Codex.
             _why="--codex"; $use_codex || _why="this machine's \`romp engine codex\` default"
             echo "romp new: --model/--effort need an SDK session, and $_why makes this a Codex one — set them from the dashboard instead" >&2; exit 2
+        fi
+        if [[ -n "$speed_arg" && "$_be" == "codex" ]]; then
+            # fast mode is Claude Code's: a Codex session has no speed to pick, so the flag is refused
+            # by name rather than dropped, with the door that made this spawn Codex
+            _why="--codex"; $use_codex || _why="this machine's \`romp engine codex\` default"
+            echo "romp new: --speed needs an SDK session, and $_why makes this a Codex one — a Codex session has no fast mode" >&2; exit 2
         fi
         if [[ -n "$tag_arg" && -z "$msg_arg" ]]; then
             # a tag labels the -m text; without -m there is nothing to label
@@ -3064,20 +3085,21 @@ if [[ -n "$session_arg" ]]; then
     # kernel; --no-inherit withholds the parent. The parent is marked parentAuto: nobody typed it,
     # so a kernel that never ran the calling session (a scratch kernel on another port) creates the
     # session untagged and echoes parentIgnored instead of refusing with a 400 naming a sid the
-    # user never saw. --in tags ride as "tags"; argv[8] counts them so the env pairs still split
-    # cleanly behind them. Tags are the kernel's, not the harness's, so they ride for a Codex
-    # session exactly as for an SDK one.
+    # user never saw. --in tags ride as "tags"; argv[9] counts them so the env pairs still split
+    # cleanly behind them (argv[8] is --speed, sent as "speed" only when asked). Tags are the
+    # kernel's, not the harness's, so they ride for a Codex session exactly as for an SDK one.
     _parent=""; if ! $no_inherit; then _parent="${ROMP_SID:-}"; fi
     _payload="$(python3 -c 'import json,sys
 d = {"name": sys.argv[1], "dir": sys.argv[2], "backend": sys.argv[3]}
 sys.argv[4] and d.update(model=sys.argv[4])
 sys.argv[5] and d.update(effort=sys.argv[5])
 sys.argv[7] and d.update(parent=sys.argv[7], parentAuto=True)
-n = int(sys.argv[8]); tags = sys.argv[9:9 + n]
+sys.argv[8] and d.update(speed=sys.argv[8])
+n = int(sys.argv[9]); tags = sys.argv[10:10 + n]
 tags and d.update(tags=tags)
-env = dict(kv.split("=", 1) for kv in sys.argv[9 + n:])
+env = dict(kv.split("=", 1) for kv in sys.argv[10 + n:])
 (env or sys.argv[6]) and d.update(env=env)
-print(json.dumps(d))' "$session_arg" "$_dir" "$_be" "$model_arg" "$effort_arg" "$_noenv" "$_parent" "${#in_args[@]}" ${in_args[@]+"${in_args[@]}"} ${env_args[@]+"${env_args[@]}"})"
+print(json.dumps(d))' "$session_arg" "$_dir" "$_be" "$model_arg" "$effort_arg" "$_noenv" "$_parent" "$speed_arg" "${#in_args[@]}" ${in_args[@]+"${in_args[@]}"} ${env_args[@]+"${env_args[@]}"})"
     # No -f here: the kernel answers a bad /new payload with a 400 whose JSON body NAMES the
     # problem (reserved env names, bad session names — every validation refusal), and -f discards
     # exactly that body (exit 22), masking it as the connection-failure message below. Without -f
@@ -3110,9 +3132,11 @@ print(json.dumps(d))' "$session_arg" "$_dir" "$_be" "$model_arg" "$effort_arg" "
             echo "romp new: started \"$session_arg\" ($_kind session, working in $_dir)"
             echo "romp new: watch it on the dashboard: romp"
         fi
-        # --model/--effort/--env: report what the kernel APPLIED — it echoes them back (the same
+        # --model/--effort/--speed/--env: report what the kernel APPLIED — it echoes them back (the same
         # park-aware setters as the dashboard pickers, re-asserted even on an already-running
-        # session; env is born into the spawn and re-asserted through set_env). An ack missing an
+        # session; env is born into the spawn and re-asserted through set_env; speed is the session's
+        # own pick, written before the first launch, and on a running session taken only where
+        # nothing has to be typed into the conversation, else answered as `refused`). An ack missing an
         # asked key's echo means an older kernel dropped THAT ask — say so loudly instead of letting
         # this machine and the session quietly diverge. Per-asked-key, not all-or-nothing: a kernel
         # can echo model/effort while dropping env (the self-hosting window between merging this
@@ -3149,8 +3173,8 @@ print("\x1f".join([r.get("parentIgnored") or "", "existing" if r.get("existing")
                 fi
             fi
         fi
-        if [[ -n "$model_arg$effort_arg$_noenv$_tagask" || ${#env_args[@]} -gt 0 ]]; then
-            _applied="$(python3 -c 'import json,sys; r=json.loads(sys.argv[1]); parts=["%s %s" % (k, r[k]) for k in ("model","effort") if r.get(k)]; e=r.get("env"); e is None or parts.append("env " + (",".join("%s=%s" % kv for kv in sorted(e.items())) or "cleared")); t=r.get("tags"); t is None or not (t or sys.argv[2] != "0") or parts.append("tags " + (", ".join(t) or "none")); print(", ".join(parts))' "$_resp" "${#in_args[@]}" 2>/dev/null || true)"
+        if [[ -n "$model_arg$effort_arg$speed_arg$_noenv$_tagask" || ${#env_args[@]} -gt 0 ]]; then
+            _applied="$(python3 -c 'import json,sys; r=json.loads(sys.argv[1]); parts=["%s %s" % (k, r[k]) for k in ("model","effort","speed") if r.get(k)]; e=r.get("env"); e is None or parts.append("env " + (",".join("%s=%s" % kv for kv in sorted(e.items())) or "cleared")); t=r.get("tags"); t is None or not (t or sys.argv[2] != "0") or parts.append("tags " + (", ".join(t) or "none")); print(", ".join(parts))' "$_resp" "${#in_args[@]}" 2>/dev/null || true)"
             [[ -n "$_applied" ]] && echo "romp new: applied $_applied"
             # a `refused` echo is the kernel's ANSWER to --effort (a level the session's backend or its
             # Codex catalog does not offer, in the setter's own words): say it as a refusal with its
@@ -3160,19 +3184,22 @@ print("\x1f".join([r.get("parentIgnored") or "", "existing" if r.get("existing")
             # which ask the refusal answers: the one(s) the echo does not carry back (a refused --model since the
             # extra-models switch, 2026-09-22: a model the kernel no longer offers; before, only --effort could be
             # refused and the line named effort whatever was asked)
-            _refwhat=""; _modask="$model_arg"; _effask="$effort_arg"
+            _refwhat=""; _modask="$model_arg"; _effask="$effort_arg"; _spdask="$speed_arg"
             if [[ -n "$_refused" ]]; then
-                _refwhat="$(python3 -c 'import json,sys; r=json.loads(sys.argv[1]); print(", ".join("%s %s" % (k, a) for k, a in (("model", sys.argv[2]), ("effort", sys.argv[3])) if a and r.get(k) is None))' "$_resp" "$model_arg" "$effort_arg" 2>/dev/null || true)"
+                _refwhat="$(python3 -c 'import json,sys; r=json.loads(sys.argv[1]); print(", ".join("%s %s" % (k, a) for k, a in (("model", sys.argv[2]), ("effort", sys.argv[3]), ("speed", sys.argv[4])) if a and r.get(k) is None))' "$_resp" "$model_arg" "$effort_arg" "$speed_arg" 2>/dev/null || true)"
                 echo "romp new: ${_refwhat:-setting} refused: $_refused" >&2
                 [[ "$_refwhat" == *"model "* ]] && _modask=""     # answered, not dropped: out of the check below
                 [[ "$_refwhat" == *"effort "* ]] && _effask=""
+                [[ "$_refwhat" == *"speed "* ]] && _spdask=""     # (a running session whose speed only the typed /fast changes)
             fi
             _envask="${env_args[*]-}$_noenv"
             # the tags ask is named for what it was: --in, or the inheritance a parent implies
             _taglab=""; if [[ ${#in_args[@]} -gt 0 ]]; then _taglab="--in"; elif [[ -n "$_parent" ]]; then _taglab="the parent's tags"; fi
-            _dropped="$(python3 -c 'import json,sys; r=json.loads(sys.argv[1]); print("/".join(lab for k,lab,a in (("model","--model",sys.argv[2]),("effort","--effort",sys.argv[3]),("env","--env",sys.argv[4]),("tags",sys.argv[6],sys.argv[5])) if a and r.get(k) is None))' "$_resp" "$_modask" "$_effask" "$_envask" "$_tagask" "$_taglab" 2>/dev/null || echo "--model/--effort/--env/--in")"
+            _dropped="$(python3 -c 'import json,sys; r=json.loads(sys.argv[1]); print("/".join(lab for k,lab,a in (("model","--model",sys.argv[2]),("effort","--effort",sys.argv[3]),("speed","--speed",sys.argv[7]),("env","--env",sys.argv[4]),("tags",sys.argv[6],sys.argv[5])) if a and r.get(k) is None))' "$_resp" "$_modask" "$_effask" "$_envask" "$_tagask" "$_taglab" "$_spdask" 2>/dev/null || echo "--model/--effort/--speed/--env/--in")"
             if [[ -n "$_dropped" ]]; then
                 _hint="model/effort can be set from the dashboard"
+                # an older kernel started the session at the machine's speed: the Fast badge is where it is set
+                [[ "$_dropped" == *"--speed"* ]] && _hint="model/effort/speed can be set from the dashboard (speed: the session's Fast badge)"
                 if [[ -n "$_taglab" && "$_dropped" == "$_taglab" ]]; then
                     _hint="tag it once it is up: romp tag <tag> --add $session_arg"
                 elif [[ -n "$_taglab" && "$_dropped" == *"$_taglab"* ]]; then

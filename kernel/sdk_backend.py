@@ -6093,6 +6093,8 @@ def thinking_summaries_on(state_dir: Path) -> bool:
 # above is the precedent): absent, unreadable or anything but "on" reads off — off is the shipped default and the
 # opt-in must be provable.
 ALWAYS_FAST_STORE = "always-fast"       # every session runs fast mode whenever its model can (fast_effective)
+SPEED_PICKS = {"standard": "off", "fast": "on"}   # `romp new --speed` in set_fast's words (set_speed_pick): standard is the
+#                                                    session's own Slow, fast its own On
 RETRY_UPGRADE_STORE = "retry-upgrade"   # a session whose model fell back asks for its pick again on a cadence (retry_model_upgrades)
 
 
@@ -22453,7 +22455,7 @@ class SdkBackend:
                       "launch asks the CLI again" % (why, n, "" if n == 1 else "s"))
         return n
 
-    def set_fast(self, sid: str, value: str) -> bool:
+    def set_fast(self, sid: str, value: str, send: bool = True) -> bool:
         """Toggle fast mode ('on'|'off'). The CLI's /fast descriptor is marked supportsNonInteractive,
         so the SDK input stream DOES interpret the literal '/fast on|off' text (as it does /model —
         which romp still routes through the control channel for the registry's sake, see
@@ -22472,11 +22474,18 @@ class SdkBackend:
         - A connection made WITHOUT the flag can't take the send, but 'off' needs none (fast mode is
           already off there) and 'on' reconnects — the flag applies at the (re)connect, at once if the
           session is quiet, else the moment nothing it runs would be cut (request_reconnect, the /effort
-          machinery)."""
+          machinery).
+
+        `send=False` is the door that types nothing into a conversation (set_speed_pick, `romp new --speed`): the same
+        pick wherever it needs no literal send, and refused before anything is written where it would need one
+        (fast_pick_needs_send). A connection made with the flag whose CLI already runs at the asked speed records the
+        pick alone."""
         if value not in ("on", "off"):
             return False
         if not read_reg(self.state_dir, sid):
             return False
+        if not send and self.fast_pick_needs_send(sid, value):
+            return False                       # the change would have to be typed: refused, the registry untouched
         # liveFast mirrors the optimistic flip where the badge reads it while dormant / across a
         # restart; _adopt_fast_state re-asserts at the next connect. Locked RMW — see set_effort.
         self._update_reg(sid, fast=(value == "on"), fastOff=(value == "off"), fastRuleRefused="", liveFast=value)   # fastOff: an
@@ -22488,6 +22497,11 @@ class SdkBackend:
         s.fast_opt = (value == "on")
         s.fast_off = (value == "off")
         s.fast_rule_refused = ""
+        if s._fast_unlocked and not send:      # the CLI already runs at the asked speed (the gate above): the pick is
+            if value == "off":                 # recorded for every later launch and nothing is sent
+                s._sub_std_requalify()
+            self._wake_push()
+            return True
         if s._fast_unlocked:                   # opted in at connect → the CLI interprets the literal send
             if not self.send(sid, "/fast " + value):
                 return False
@@ -22508,6 +22522,43 @@ class SdkBackend:
         s.request_reconnect(why="fast mode")   # first opt-in: the flag applies at the relaunch, once nothing would be cut
         self._wake_push()
         return True
+
+    def fast_pick_needs_send(self, sid: str, value: str) -> bool:
+        """Whether set_fast(sid, value) would send the literal '/fast' text into this session's conversation now: its
+        connection is live and was made with the flag, and its CLI does not already run at that speed (a rate-limited
+        'cooldown' is fast mode on, resumed by the CLI itself; a state the CLI has not reported yet is not known to
+        match). A session with no live connection, or one made without the flag, takes the pick with nothing sent."""
+        s = self.sessions.get(sid)
+        if s is None or not s.thread.is_alive() or not getattr(s, "_fast_unlocked", False):
+            return False
+        cur = getattr(s, "fast", "") or ""
+        return not (cur == value or (value == "on" and cur == "cooldown"))
+
+    def set_speed_pick(self, sid: str, speed: str) -> str:
+        """The speed a session is created with (`romp new --speed standard|fast`, POST /new's `speed`; the user
+        2026-11-15, who wanted a session's speed chosen where it is created, with nothing typed into its conversation),
+        written as the session's OWN pick: 'standard' is the badge's Slow (the reg's fastOff, which the machine's Always
+        fast switch respects) and 'fast' its On (the reg's fast, which needs no switch), so fast_effective, the badge and
+        a comment thread's inheritance read it as they read a pick made on the badge. Returns "" when the pick was
+        taken, else the sentence saying why it was not, with nothing changed.
+
+        The kernel calls this between spawn and the first connect, when no session object exists: the pick is a
+        registry write the first launch reads, so that launch already runs at the asked speed, with no relaunch and
+        nothing sent. Asked again for a name that already runs, it goes through set_fast(send=False): recorded for the
+        next launch of a session that is not connected; on a connection made without the opt-in, nothing more for
+        standard and a relaunch once nothing would be cut for fast (the road an effort pick takes); recorded alone
+        where the CLI already runs at that speed; and refused where the change is the literal '/fast' send."""
+        value = SPEED_PICKS.get(speed)
+        if value is None:
+            return "a speed is %s" % " or ".join(sorted(SPEED_PICKS, reverse=True))
+        reg = read_reg(self.state_dir, sid)
+        if not reg:
+            return "the session has no registry row"
+        if self.set_fast(sid, value, send=False):
+            return ""
+        return ('"%s" is already running, and setting it to %s speed now would type /fast %s into its conversation, '
+                "which romp new never does; use the session's Fast badge on the dashboard"
+                % (reg.get("name") or sid[:8], speed, value))
 
     # bypassPermissions is the one mode that must not become the remembered default. Every other pick
     # here is a preference worth inheriting; this one removes the approval gate, and spawn() seeds a new
