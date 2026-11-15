@@ -95,7 +95,8 @@ test("makeSkeletonTab: the loaded-tab chrome minus what it does not know — no 
   // a cold tab has no rich tip (pinned below), so the Needs-you phrase rides the native title, prefixed when the
   // status needs you, in BOTH modes, from the one exported helper (needsYouPhrase, executed in tab-widgets.test.ts)
   assert.match(sk, /tab\.title = \(status && status\.needsYou \? needsYouPhrase\(/, "the cold tab prefixes the Needs-you phrase from the one helper when the status needs you");
-  assert.match(sk, /\+ "Not loaded yet, click to load";/, "…before the loaded-yet copy (the em-dash gone)");
+  assert.match(sk, /\+ \(skeletonTabs\.rested\.has\(id\) \? "Not up to date, click to load" : "Not loaded yet, click to load"\);/,
+    "…before the loaded-yet copy (the em-dash gone); a tab at rest was loaded here and went behind, and its title says that (2026-11-15)");
   assert.match(sk, /closeBtn\.dataset\.act = "close";\s*\n\s*closeBtn\.dataset\.id = id;/, "the ✕ is delegated too");
   assert.doesNotMatch(sk, /tab-ph-swirl/, "NO swirl: that means 'romp is generating this', a transient");
   assert.doesNotMatch(sk, /stale\.(events|status)/, "the stale session's events/status are never read");
@@ -113,7 +114,11 @@ test("makeSkeletonTab: the loaded-tab chrome minus what it does not know — no 
 test("statusOnly begins with the skeleton branch: store + scheduleRenderTabs (one frame for a burst), never renderTabs; a status for a session the page holds nothing of is HELD for its strip, never the no-base ask", () => {
   const body = RENDER.split("function statusOnly(msg: any) {")[1].split("\n}")[0];
   const first = body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("//"))[0];
-  assert.equal(first, 'if (onStatus(skeletonTabs, msg.id, msg.status) === "skeleton") { scheduleRenderTabs(); return; }');
+  // …and the copy the page still holds takes the status too (noteHeldStatus, 2026-11-15): the bookkeeping readers of
+  // `sessions` (a folded section's pip, the mention roster) read it for tabs that are not on screen
+  assert.equal(first, 'if (onStatus(skeletonTabs, msg.id, msg.status) === "skeleton") { noteHeldStatus(msg.id, msg.status); scheduleRenderTabs(); return; }');
+  assert.match(fn("noteHeldStatus"), /const held = sessions\.get\(id\);\s*\n\s*if \(held && status\) held\.status = status as Status;/,
+    "the status alone, and only of a copy that exists: its events stay behind liveSession");
   // The shim's FIFO carries a newer strip to the END of a burst, so a skeleton's statuses can land ahead of the strip that
   // names the set (a later chat column's open sends two strips, 2026-09-11): the status waits for the strip. The ask that
   // stood here loaded the whole board into a column opened as a view of one session, one ask per withheld tab.
@@ -449,4 +454,33 @@ test("the relay's reopen forgets that host's loaded record (2026-09-23): a resta
   assert.ok(i > 0, "the relay-up listener");
   const body = RENDER.slice(i, RENDER.indexOf("\n});", i));
   assert.match(body, /if \(h\) onHostSocketUp\(skeletonTabs, \(sid\) => hostOf\(sid\) === h\);/, "that host's ids alone, on the relay's own open event");
+});
+
+test("a rest frame is taken right behind statusOnly's skeleton branch: the tab becomes a skeleton, the tab on screen re-shows, one strip repaint", () => {
+  // 2026-11-15: the kernel stops rebuilding a tab no connected page is watching and takes it back with a status frame
+  // carrying `rest` (kernel.py _rest_unwatched). The frame is a status frame, so it is delivered in wire order with the
+  // tab's session frames (the shim's FIFO moves neither), and it lands on the page here.
+  assert.match(RENDER, /import \{ onRest \} from "\.\/skeleton-tabs";/);
+  const body = RENDER.split("function statusOnly(msg: any) {")[1].split("\n}")[0];
+  const code = body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("//"));
+  assert.deepEqual(code.slice(1, 7), [
+    'if (msg.rest === true && typeof msg.id === "string") {',
+    "onRest(skeletonTabs, msg.id, msg.status);",
+    "noteHeldStatus(msg.id, msg.status);",
+    "if (msg.id === activeId) showActive();",
+    "scheduleRenderTabs();",
+    "return;",
+  ], "a tab already a skeleton took the branch above (never loaded here: not at rest); the rest never falls through to the session's own status");
+  // showActive's skeleton branch is what a tab at rest on screen takes: the loader, and the ask (pinned above)
+  assert.match(fn("showActive"), /const skeleton = skeletonTabs\.ids\.has\(activeId\);/);
+});
+
+test("the section view reads a skeleton member from the kernel's status, never from the copy the page still holds", () => {
+  const sess = fn("snapSessionOf"), led = fn("snapLedgerOf");
+  assert.match(sess, /if \(!skeletonTabs\.ids\.has\(id\)\) return sessions\.get\(id\) \?\? null;/, "a loaded member: its session, as before");
+  assert.match(sess, /const st = skeletonTabs\.status\.get\(id\) as Status \| undefined;\s*\n\s*if \(!st\) return null;/, "no status yet: the loading row");
+  assert.match(sess, /status: st, events: \[\], resting: true \};/, "the kernel's status, no tail, marked resting");
+  assert.match(led, /if \(!skeletonTabs\.ids\.has\(id\)\) return ledgers\.get\(id\) \?\? null;/);
+  assert.match(led, /typeof st\.needsYou === "boolean" \? \{ needsInput: st\.needsYou \} : null;/, "needs-you rides the status; the stale ledger's lines are withheld");
+  assert.match(RENDER, /const next = snapshotModel\(head\.head, snapSessionOf, snapLedgerOf, snapModel, \(id\) => tabMeta\.get\(id\) \?\? null\);/);
 });

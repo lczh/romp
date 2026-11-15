@@ -59,13 +59,14 @@ import { prebuildPlan, type ViewState } from "./prebuild";
 import { historyMarks, historyBands, windowSpans, HIST_H, HIST_GAP } from "./glow-history";
 import { newSkeletonState, applyTabOrderSkeleton, onStatus, holdStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind } from "./skeleton-tabs";
 import { onHostSocketUp } from "./skeleton-tabs";   // the relay's reopen forgets what loaded on the dead relay socket (2026-09-23)
+import { onRest } from "./skeleton-tabs";   // a tab the kernel takes back because nobody is watching it (2026-11-15)
 import { reconcileTabOrder, adoptArrival } from "./tab-order";
 import { applyViewOrder, hearSharedOrder, readViewOrder, setViewOrderPublisher, writeViewOrder } from "./view-order";   // the read: a page with no federation manager arranges its own strip (applyTabOrder, frame-listener.ts paneArranges)
 import { planStrip, readTabGroups, writeTabGroups, setSectionCollapsed, sectionRef, isPinned, setPinned, prunePinned, reachableFrom, headWords,
          carrySectionToName, forgetSection, restoreSection,
          followAdoption, reorderTagOrder, homeSectionOf, neighborOfFolded, revealedTabs, phoneStandIns, hearSharedFolds, flowGroups,
          setFoldsPublisher, TABGROUPS_KEY, TABGROUPS_SHARED_KEY, TABGROUPS_EVENT, type TabSection, type StripItem, type PaintItem } from "./tab-groups";
-import { snapshotModel, snapshotHeading, rowWords, type SnapModel, type SnapRow } from "./tab-snapshot";
+import { snapshotModel, snapshotHeading, rowWords, type SnapModel, type SnapRow, type SnapSessionLike, type SnapLedgerLike } from "./tab-snapshot";
 import { rowStillOpen, installSnapshotEscape, reconcileRows } from "./tab-snapshot-view";
 import { tabStateClass, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
 import { composeTabWidgets, composeTabRing, applyTabBadgeMode, needsYouPhrase, ringSwitch, tabHotkey, miniChord, needsYouWidgetOn } from "./tab-widgets";   // the tab-title widgets (T379): the dot, the context bar and the hot-key keycap compose onto every tab from the registry, and the rings too, one class at a time; miniChord is the chord the strip signature reads; needsYouWidgetOn gates the keycap-room strip class
@@ -7337,7 +7338,9 @@ function makeSkeletonTab(id: string): HTMLElement {
   // a cold tab draws the badge (appendTabAfterWidgets) but registers no hover tip, so the Needs-you phrase would
   // otherwise live in the badge's aria-label alone in badge mode and nowhere in ring mode; carry it in the native
   // title too, when the status needs you, from the one helper the badge dot and the rich-tip row read.
-  tab.title = (status && status.needsYou ? needsYouPhrase(typeof status.needsYouCount === "number" ? status.needsYouCount : 0) + ". " : "") + "Not loaded yet, click to load";
+  // a tab at rest was loaded here and went behind (skeleton-tabs.ts onRest): the title says that, not that it never loaded
+  tab.title = (status && status.needsYou ? needsYouPhrase(typeof status.needsYouCount === "number" ? status.needsYouCount : 0) + ". " : "")
+    + (skeletonTabs.rested.has(id) ? "Not up to date, click to load" : "Not loaded yet, click to load");
   const closeBtn = el("span", "tab-close");
   closeBtn.textContent = "×";
   // a live session: its ✕ routes through the same End-session confirm as a loaded tab; a DEAD one (the kernel's
@@ -7683,7 +7686,7 @@ function renderTabs() {
       if (renderKind(skeletonTabs, id, !!s) === "skeleton") {                                              // makeSkeletonTab's reads:
         const m = tabMeta.get(id), kst = skeletonTabs.status.get(id) as Status | undefined;               // the kernel's list + its
         return ["k", m?.name || s?.name, (m?.color || s?.color)?.bg, (m?.color || s?.color)?.fg, id === peekId,   // status frames, never the
-                kst?.state, kst && tabStateClass(kst), kst?.needsYou === true, kst?.needsYou === true ? kst?.needsYouCount : null, !!kst?.faded, kst?.ctx, kst?.ctxColor, kst?.ctxTone, down, note, tabHotkey(id)];   // stale session's status; + the hot-key keycap's chord (T379); + the feed's needs-you verdict, the magenta ring's input (2026-09-13); a cold tab's TITLE carries the count in BOTH modes (makeSkeletonTab), so the count keys the sig whenever the status needs you, either mode, and a count move repaints the cold tab so its title never goes stale
+                kst?.state, kst && tabStateClass(kst), kst?.needsYou === true, kst?.needsYou === true ? kst?.needsYouCount : null, !!kst?.faded, kst?.ctx, kst?.ctxColor, kst?.ctxTone, down, note, tabHotkey(id), skeletonTabs.rested.has(id)];   // stale session's status; + whether the tab is at rest (its title says so, 2026-11-15); + the hot-key keycap's chord (T379); + the feed's needs-you verdict, the magenta ring's input (2026-09-13); a cold tab's TITLE carries the count in BOTH modes (makeSkeletonTab), so the count keys the sig whenever the status needs you, either mode, and a count move repaints the cold tab so its title never goes stale
       }
       if (!s) { const m = tabMeta.get(id); return ["p", m?.name, m?.color?.bg, m?.color?.fg, down, note]; }   // makePlaceholderTab's reads
       const st = s.status;
@@ -16525,6 +16528,25 @@ installSnapshotEscape(window, {
   layerOpen: () => paneLayerOpen() || !!openCommentKey,
   leave: leaveSnapshot,
 });
+/** What a row of the section view reads for `id`. A SKELETON member (skeleton-tabs.ts: withheld after a reconnect, or at
+ *  rest since its transcript moved with no page watching it, which is where most tabs of a busy board sit) is read from
+ *  the kernel's status frames, the strip's own source for it, never from the copy the page may still hold: that copy is
+ *  behind, and a row built from it showed a session that had since stopped on a question as quietly working. No status
+ *  yet reads as no session (the loading row). The ledger of such a member is behind too, so its now and note lines are
+ *  withheld; the one field the row needs from it, whether a card of the session is filed under needs-you, rides the
+ *  status (`needsYou`, the feed's verdict). */
+function snapSessionOf(id: string): SnapSessionLike | null {
+  if (!skeletonTabs.ids.has(id)) return sessions.get(id) ?? null;
+  const st = skeletonTabs.status.get(id) as Status | undefined;
+  if (!st) return null;
+  const m = tabMeta.get(id), held = sessions.get(id);
+  return { name: m?.name || held?.name, color: m?.color || held?.color || null, status: st, events: [], resting: true };
+}
+function snapLedgerOf(id: string): SnapLedgerLike | null {
+  if (!skeletonTabs.ids.has(id)) return ledgers.get(id) ?? null;
+  const st = skeletonTabs.status.get(id) as Status | undefined;
+  return st && typeof st.needsYou === "boolean" ? { needsInput: st.needsYou } : null;
+}
 /** Paint (or refresh) the view of `snapView`. False when that section is not on the strip any more: snapView
  *  is cleared and the caller shows the transcript; the section's absence is the event. */
 function renderSnapshot(): boolean {
@@ -16534,7 +16556,7 @@ function renderSnapshot(): boolean {
   const host = snapshotHost();
   if (!host) return false;
   const now = Date.now() / 1000;
-  const next = snapshotModel(head.head, (id) => sessions.get(id) ?? null, (id) => ledgers.get(id) ?? null, snapModel, (id) => tabMeta.get(id) ?? null);
+  const next = snapshotModel(head.head, snapSessionOf, snapLedgerOf, snapModel, (id) => tabMeta.get(id) ?? null);
   if (next === snapModel && host.childElementCount) {
     // nothing a row shows changed: the times tick in place, the DOM stands
     for (const w of host.querySelectorAll<HTMLElement>(".snap-when[data-t]")) {
@@ -23848,12 +23870,37 @@ function awaitKey(st: Status | undefined): string {
                          //   section field or a badge moving repaints the box; the kernel keys the same fields (_chat_build_sig)
 }
 
+// The copy of a skeleton tab the page still holds keeps the kernel's STATUS current (2026-11-15), never its events. The
+// bookkeeping readers of `sessions` read that status for tabs that are not on screen (a folded section's pip, the
+// mention roster, the retry tick's set), and a tab now rests for as long as nobody opens it: a status frozen at the
+// moment of the rest hid a session that had since stopped on a question behind its section's fold. Display paths
+// still read through liveSession, so nothing paints the copy's events as current, and the full that loads the tab
+// replaces the whole entry.
+function noteHeldStatus(id: string, status: unknown): void {
+  const held = sessions.get(id);
+  if (held && status) held.status = status as Status;
+}
+
 function statusOnly(msg: any) {
   // A SKELETON tab's status (2026-09-07): the kernel withholds its transcript and sends this instead, so the
   // chip stays honest. Store it and repaint the strip ONCE per animation frame (sixteen of these land in one
   // burst after a redial) — never the no-base repair below, which would ask for the full and defeat the
   // skeleton for every tab within a cycle.
-  if (onStatus(skeletonTabs, msg.id, msg.status) === "skeleton") { scheduleRenderTabs(); return; }
+  if (onStatus(skeletonTabs, msg.id, msg.status) === "skeleton") { noteHeldStatus(msg.id, msg.status); scheduleRenderTabs(); return; }
+  // A tab the kernel takes BACK (2026-11-15, skeleton-tabs.ts onRest): this page had loaded it, no connected page was
+  // watching it when its transcript moved, so the kernel stopped rebuilding it and this page's copy is behind from
+  // this frame on. It is a skeleton again: the strip draws it from the kernel's status, and a click loads it. If it
+  // is the tab ON SCREEN (a click that landed while this frame was on the wire), re-show: the loader replaces the
+  // copy that went behind and the ask goes out (showActive's skeleton branch), the road a strip that re-lists the
+  // tab we are on takes (noteSkeletonTabOrder). A tab that is a skeleton already took the branch above: it was never
+  // loaded here, so it is not at rest and the idle prefetch may still fetch it once.
+  if (msg.rest === true && typeof msg.id === "string") {
+    onRest(skeletonTabs, msg.id, msg.status);
+    noteHeldStatus(msg.id, msg.status);
+    if (msg.id === activeId) showActive();
+    scheduleRenderTabs();
+    return;
+  }
   const s = sessions.get(msg.id);
   if (!s) {
     // A status for a session this page holds NOTHING of, which the set does not list: a skeleton tab's whose strip has

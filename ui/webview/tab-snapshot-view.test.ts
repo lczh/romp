@@ -16,6 +16,9 @@ test("a row whose session left the strip mid-press opens nothing: a frame's row 
   assert.equal(rowStillOpen(frame, false, true, false), false, "its session gone, its meta lingering: nothing opens");
   assert.equal(rowStillOpen(frame, false, false, false), false, "session and meta gone: nothing opens");
   assert.equal(rowStillOpen(placeholder, false, true, false), true, "a placeholder row (no frame yet) with its meta: opens, the loading branch is its state");
+  // a resting row (a tab the page holds no current copy of, 2026-11-15) may hold no session at all: its meta is its tab
+  assert.equal(rowStillOpen({ loading: false, resting: true }, false, true, false), true, "a resting row with its meta: opens, and the click loads it");
+  assert.equal(rowStillOpen({ loading: false, resting: true }, false, false, false), false, "its tab gone from the strip: nothing opens");
   assert.equal(rowStillOpen(placeholder, false, false, false), false, "a placeholder whose meta left: nothing opens");
   assert.equal(rowStillOpen(placeholder, true, false, false), true, "a placeholder whose frame landed mid-press: the session is there, it opens");
   assert.equal(rowStillOpen(frame, true, true, true), false, "the user closed it (closingTabs): nothing opens, whatever the maps still hold");

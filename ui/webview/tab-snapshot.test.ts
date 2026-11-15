@@ -246,3 +246,25 @@ test("executed: the row's chip is the SHARED status chip's words (T322b): Needs 
   assert.notEqual(snapshotModel(sec, look(s4), look(ledgers), m3), m3, "the peer's colour changed and nothing else the row says: a new model (sameChip)");
   assert.equal(snapshotModel(sec, look(sessions), look(ledgers), m), m, "nothing changed: the same object");
 });
+
+test("executed: a resting member (a tab the page holds no current copy of) is a row from the kernel's status: its state and needs-you, no last message, a hover that says so", () => {
+  // 2026-11-15: a tab nobody is watching is no longer rebuilt, so the page's copy of it goes behind; render.ts hands
+  // the row the kernel's status frame (sent every cycle) with `resting`, and the feed's verdict from that status
+  const resting: SnapSessionLike = { name: "api", color: { bg: "#d53a3a", fg: "#ffffff" }, resting: true, events: [],
+                                     status: { state: "needsInput", sinceEpoch: ms(T0 - 50) } };
+  const r = snapshotRow("api", resting, { needsInput: true }, null);
+  assert.deepEqual([r.pip, r.needsYou, r.loading, r.resting], ["awaiting", true, false, true]);
+  assert.equal(r.chip?.text, "Needs you");
+  assert.equal(r.lastT, T0 - 50, "the state's start, from the status: the tail is not read");
+  assert.deepEqual([r.lastMsg, r.now, r.note], ["", "", ""], "what the page's stale copy said is not shown");
+  assert.equal(rowWords(r).title, "Not loaded here.\nClick to open this session.");
+  // a tail handed with a resting session is not read either (the copy is behind by definition)
+  const withTail = snapshotRow("api", { ...resting, events: [{ kind: "assistant", md: "an old reply", ts: iso(T0 - 9000) }] }, null, null);
+  assert.equal(withTail.lastMsg, "");
+  // the same member loaded is a different row: the model changes when a tab goes to rest or comes back
+  const loaded = snapshotRow("api", sessions.get("api"), ledgers.get("api"), null);
+  assert.equal(loaded.resting, false);
+  const a = snapshotModel({ name: "infra", color: "", ids: ["api"] }, () => sessions.get("api"), () => null, null);
+  const b = snapshotModel({ name: "infra", color: "", ids: ["api"] }, () => ({ ...sessions.get("api"), resting: true }), () => null, a);
+  assert.notEqual(a, b, "resting is part of what a row shows");
+});

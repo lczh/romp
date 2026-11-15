@@ -835,6 +835,17 @@ else the key when a helper is configured, else the login.
 A tab not yet loaded after a reconnect shows "Not loaded yet, click to load"
 as its hover tooltip, prefixed with what needs you when a card of it does, until its transcript arrives.
 
+A chat tab that no connected page is showing is not rebuilt while its session
+works. The tab keeps its name, its status, its context gauge and its needs-you
+mark, which the kernel sends every cycle without reading the transcript. Once
+the transcript has moved past the copy a page holds, that page's tab label
+dims slightly and its tooltip reads "Not up to date, click to load"; opening
+the tab shows the loader and loads the current transcript at once. In idle a
+page fetches only tabs it has never loaded, one at a time, so a tab that went
+out of date waits for the click. In the tag overview and the Outline pane, a
+session in that state shows its status and its goals but not its last message,
+and its jump links wait until the tab is opened.
+
 A Claude Code session's chat tab carries the same fact as a `Billing` row in its
 hover tooltip, one-auth machines included; Codex sessions, which bill no Claude
 account, show no row. The row has four readings. Unless one of the three cases below applies, it reads
@@ -4427,6 +4438,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   held as a skeleton by every connected chat client, with no Sessions pane connected, and with
   a live row to state its status from (a tab with no live row is built, not skipped); the
   same tab counts again on every later push until the page asks for it, 2026-09-14),
+  `rested` (one count per tab handed back to every chat client as a skeleton
+  instead of rebuilt: a tab no connected chat client names active or has asked
+  for, whose build signature moved past its cached build; the pushes after it
+  count under `coldSkipped`) and `restHeld` (per reason, the unwatched tabs that
+  were built after all: `asked` and `unserved` are a page's own ask and a page
+  being handed a tab it holds in no form; `noCap` is a chat client that never
+  said it can take a loaded tab back, a page loaded before this build or the
+  VS Code chat panel, and while one is connected every tab it holds is
+  rebuilt each cycle; `plainOutline` an Outline pane without provisional rows;
+  `noLiveRow`, `noClient`, `armed` and `watched` the remaining cases),
   `active_built` and `bg_built` (rebuilds of the watched tab
   against rebuilds of a background tab), `moved` (builds not cached because
   an input moved while they ran; the next cycle builds them again),

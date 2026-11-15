@@ -2070,6 +2070,7 @@ export class FederationManager {
       if (t.col) url += `&col=${encodeURIComponent(t.col)}`;
       if (t.skeleton) url += "&skeleton=1";
       if (t.provrows) url += "&provrows=1";
+      if (t.rest) url += "&rest=1";   // the chat page takes a loaded tab back as a skeleton when its copy goes behind (2026-11-15): stated to the remote too, or it rebuilds every tab this page ever loaded on every cycle
     }
     if (redial && (this.pageProto === 1 || this.pageProto === 2)) url += `&reconnect=1&proto=${this.pageProto}`;
     return url;

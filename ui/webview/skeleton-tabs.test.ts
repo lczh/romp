@@ -6,6 +6,7 @@ import * as assert from "node:assert/strict";
 import { onHostSocketUp } from "./skeleton-tabs";
 import { newSkeletonState, applyTabOrderSkeleton, onStatus, holdStatus, onFull, onDismiss, onSocketUp, nextPrefetch,
          renderKind, type SkeletonState } from "./skeleton-tabs";
+import { onRest } from "./skeleton-tabs";
 
 const A = "11111111-2222-3333-4444-aaaaaaaaaaaa";
 const B = "11111111-2222-3333-4444-bbbbbbbbbbbb";
@@ -198,4 +199,84 @@ test("a relay's reopen forgets what loaded for that host on the dead relay socke
   assert.ok(st.loaded.has(L1), "the local tab's stays: its socket did not move");
   applyTabOrderSkeleton(st, [R1, R2], [L1, R1, R2]);
   assert.deepEqual([...st.ids].sort(), [R1, R2].sort(), "the restarted kernel's list is adopted: the tabs are skeletons, so the page asks for their frames");
+});
+
+// ── a tab at REST (2026-11-15): the kernel takes back a tab this page had loaded, because its transcript moved while
+// no connected page was watching it (kernel.py _rest_unwatched; tests/test_unwatched_tabs.py drives the kernel half) ──
+
+test("a rest frame takes a loaded tab back: a skeleton again, drawn from the kernel's status, though its full arrived on this socket", () => {
+  const st = newSkeletonState();
+  applyTabOrderSkeleton(st, [B], [A, B, C]);
+  onFull(st, B);                                    // the page loaded B (its click, the prefetch)
+  assert.equal(renderKind(st, B, true), "loaded");
+  assert.equal(onRest(st, B, { state: "working", provisional: true }), true, "it was not a skeleton: the caller re-shows it when it is on screen");
+  assert.equal(renderKind(st, B, true), "skeleton", "the copy the page holds is behind: never painted as current");
+  assert.deepEqual(st.status.get(B), { state: "working", provisional: true }, "the chip reads the frame's status");
+  assert.equal(st.rested.has(B), true);
+  assert.equal(st.loaded.has(B), false, "its loaded record goes, so the kernel's own re-listing is taken");
+  // the kernel's next strip lists it, and the statuses that follow are stored like any skeleton's
+  assert.equal(applyTabOrderSkeleton(st, [B], [A, B, C]), false, "already held: nothing changes");
+  assert.equal(onStatus(st, B, { state: "ready", provisional: true }), "skeleton");
+  assert.deepEqual(st.status.get(B), { state: "ready", provisional: true });
+  // a tab that was never loaded here can be taken back too (the page holds nothing of it): the same skeleton
+  assert.equal(onRest(st, C, { state: "working" }), true);
+  assert.equal(renderKind(st, C, false), "skeleton");
+  assert.equal(onRest(st, C, { state: "ready" }), false, "a second frame for a tab already at rest only refreshes its status");
+  assert.deepEqual(st.status.get(C), { state: "ready" });
+});
+
+test("a tab at rest stays a skeleton until its full: a strip whose list lacks it, or whose order drops it for a moment, releases nothing", () => {
+  const st = newSkeletonState();
+  onFull(st, B); onFull(st, C);
+  onRest(st, B, { state: "working" });
+  // a merged strip re-presenting a host's list copied BEFORE the rest (the federated merge keeps a copy per host), an
+  // empty list, and an older kernel's keyless strip: none is the kernel releasing the tab, which it does only by a full
+  for (const list of [[], [C], undefined] as unknown[]) {
+    applyTabOrderSkeleton(st, list, [A, B, C]);
+    assert.equal(st.ids.has(B), true, "still a skeleton after " + JSON.stringify(list));
+    assert.equal(renderKind(st, B, true), "skeleton");
+  }
+  assert.equal(st.ids.has(C), false, "…while a list naming a tab loaded on this socket is still refused as a stale relay");
+  applyTabOrderSkeleton(st, [], [A, C]);            // the order omits B for one frame (a transient read failure): the pane keeps the tab
+  assert.equal(renderKind(st, B, true), "skeleton", "and it must not turn back into a loaded tab over a copy that is behind");
+  assert.equal(onFull(st, B), true, "the full is the release: it was held");
+  assert.equal(st.rested.has(B), false);
+  assert.equal(renderKind(st, B, true), "loaded");
+  applyTabOrderSkeleton(st, [], [A, B, C]);
+  assert.equal(st.ids.has(B), false, "nothing brings it back but a new rest frame");
+  // a tab torn down while at rest leaves no record behind
+  onRest(st, C, { state: "working" });
+  onDismiss(st, C);
+  assert.deepEqual([st.ids.has(C), st.rested.has(C), st.status.has(C)], [false, false, false]);
+  applyTabOrderSkeleton(st, [], [A, B]);
+  assert.equal(st.ids.has(C), false);
+});
+
+test("the idle prefetch never fetches a tab at rest: it fills a tab this page never held, once, and a tab that went behind waits for the click", () => {
+  const st = newSkeletonState();
+  applyTabOrderSkeleton(st, [B, C, D], [A, B, C, D]);
+  // the chain fills B, C and D, one per idle, each once
+  const fetched: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const next = nextPrefetch(st, A, none, false, all);
+    if (!next) break;
+    fetched.push(next);
+    onFull(st, next);
+  }
+  assert.deepEqual(fetched, [B, C, D], "one build per tab the page had never held");
+  // every one of them is working: each goes behind the moment it lands, and the kernel takes it back
+  for (let round = 0; round < 5; round++) {
+    for (const id of [B, C, D]) onRest(st, id, { state: "working" });
+    applyTabOrderSkeleton(st, [B, C, D], [A, B, C, D]);
+    assert.equal(nextPrefetch(st, A, none, false, all), null, "round " + round + ": nothing is fetched again in idle");
+  }
+  assert.deepEqual(held(st), [B, C, D]);
+  // a new socket changes nothing for them (their copies are still behind), while a tab never loaded is fetched as before
+  onSocketUp(st);
+  applyTabOrderSkeleton(st, [B, C, D], [A, B, C, D]);
+  assert.equal(nextPrefetch(st, A, none, false, all), null);
+  st.rested.delete(D);                              // D as a plain skeleton: withheld, never loaded here
+  assert.equal(nextPrefetch(st, A, none, false, all), D);
+  // the click is not the prefetch: a tab at rest on screen is asked for by showActive, and its ask in flight holds the chain
+  assert.equal(nextPrefetch(st, B, new Set([B]), false, all), null, "one in flight at a time, the click's included");
 });

@@ -392,8 +392,15 @@ class Collector(unittest.TestCase):
         # plain writer counts the build and attributes nothing
         self.assertEqual(snap["builds"]["chat"], {"cached": 1, "built": 1, "ms": 40.0, "active_built": 0, "bg_built": 0,
                                                   "moved": 0, "coldSkipped": 0, "baselineRaced": 0, "baselineRepaired": 0,
+                                                  "rested": 0, "restHeld": {},        # an unwatched tab handed back as a skeleton, and why one was built (2026-11-15)
                                                   "bg_miss": {k: 0 for k in km._PerfStats.CHAT_MISS},
                                                   "bySession": []})                   # the per-session timer (2026-09-14): no sid handed in, no row
+        # …and the two rest counters: one per tab rested, one per reason a tab nobody watches was built after all; the map is a copy
+        self.st.build_chat_rest(); self.st.build_chat_rest_held("noCap"); self.st.build_chat_rest_held("noCap"); self.st.build_chat_rest_held("asked")
+        snap2 = self.st.snapshot()
+        self.assertEqual((snap2["builds"]["chat"]["rested"], snap2["builds"]["chat"]["restHeld"]), (1, {"noCap": 2, "asked": 1}))
+        self.st.build_chat_rest_held("noCap")
+        self.assertEqual(snap2["builds"]["chat"]["restHeld"]["noCap"], 2, "the snapshot's map does not move with a later count")
         self.assertEqual(snap["builds"]["feed"]["built"], 1)
         self.assertEqual(snap["builds"]["timeline"], {"cached": 0, "built": 0, "ms": 0.0})
         self.assertEqual(snap["judge"]["passes"], 2)

@@ -550,7 +550,9 @@ class _PerfStats:
                                    it caused (one count per differing component, so the sum can
                                    exceed bg_built; cold = no cached build, nosig = no signature could
                                    be taken); see build_chat. chat also carries coldSkipped (the
-                                   cold-tab gate's skips, build_chat_cold_skip), baselineRaced and
+                                   cold-tab gate's skips, build_chat_cold_skip), rested and restHeld
+                                   (an unwatched tab handed back as a skeleton instead of rebuilt, and
+                                   the reasons one was rebuilt: build_chat_rest, 2026-11-15), baselineRaced and
                                    baselineRepaired (the delta baseline's detector pops and the cycle
                                    writes that took a mark off, build_chat_baseline_raced and
                                    _repaired; 2026-09-21): on the snapshot and glossed in the
@@ -692,6 +694,8 @@ class _PerfStats:
             self.gc_errors = 0                        # gc_event bodies that raised: counted, never propagated into the collector
             self.builds = {k: {"cached": 0, "built": 0, "ms": 0.0} for k in self.BUILDS}
             self.builds["chat"].update({"active_built": 0, "bg_built": 0, "moved": 0, "coldSkipped": 0,   # coldSkipped: see build_chat_cold_skip
+                                        "rested": 0, "restHeld": {},                    # an unwatched tab handed back as a skeleton, and
+                                        #                                                  why one was built instead: build_chat_rest / _rest_held
                                         "baselineRaced": 0, "baselineRepaired": 0,      # the chat delta baseline's detector and its repair
                                         #                                                  (2026-09-21): build_chat_baseline_raced / _repaired
                                         "bg_miss": {k: 0 for k in self.CHAT_MISS}})   # see build_chat
@@ -1195,9 +1199,29 @@ class _PerfStats:
     def build_chat_cold_skip(self):
         """A cold tab (no build since the boot) that every connected chat page holds as a skeleton was not built (the
         cold-tab gate in _push and _push_session_now, 2026-09-14): the user's ruling that tabs nobody is looking at are
-        built last, on the page's click or its idle prefetch, never in the boot's first refresh."""
+        built last, on the page's click or its idle prefetch, never in the boot's first refresh. Since 2026-11-15 a tab
+        that went back to rest (build_chat_rest) is such a tab too, and counts here on every push after the one that
+        rested it."""
         with self.lock:
             self.builds["chat"]["coldSkipped"] += 1
+
+    def build_chat_rest(self):
+        """A tab no connected page was watching was owed a build (its signature moved, or it had none) and was handed
+        back to every chat client as a skeleton instead (_rest_unwatched, 2026-11-15): one count per tab per rest. The
+        pushes after it count under coldSkipped until a page asks for the tab."""
+        with self.lock:
+            self.builds["chat"]["rested"] += 1
+
+    def build_chat_rest_held(self, why):
+        """An unwatched tab owed a build was built after all, by the reason (_rest_blocked's words, `noLiveRow`,
+        `plainOutline`): one count per tab per push. `asked` is a page's own ask being answered (a click
+        on a resting tab, the idle prefetch) and `unserved` a page being handed a tab it holds in no form: the builds
+        this design means to run. `noCap` rising means a chat client that cannot take a loaded tab back is connected
+        (an older bundle still open, a host that dials its own address), and while it is, every tab it holds is
+        rebuilt as before."""
+        with self.lock:
+            held = self.builds["chat"]["restHeld"]
+            held[why] = held.get(why, 0) + 1
 
     def build_chat_moved(self):
         """A chat build whose signature moved while it ran (the post-build signature differs from the
@@ -1333,6 +1357,7 @@ class _PerfStats:
             stages = dict(self.stages)
             builds = {k: dict(v) for k, v in self.builds.items()}
             builds["chat"]["bg_miss"] = dict(self.builds["chat"]["bg_miss"])   # the nested map: a copy too
+            builds["chat"]["restHeld"] = dict(self.builds["chat"]["restHeld"])   # …and the rest's reasons
             builds["chat"]["bySession"] = sorted(              # the per-session timer, sids only, the largest max first
                 ({"sid": sid, **row} for sid, row in self.chat_by_session.items()),
                 key=lambda r: -(r["max"] or 0.0))
@@ -13228,7 +13253,16 @@ def _auto_resume_session_retry(now, live_map):
         if not floor:
             continue
         path = s.get("path")
-        session = (_parse_cached(path) if path else None) or {"turns": []}
+        session = _parse_cached(path) if path else None
+        if session is None and path and _chat_ident(path) is not None:
+            # No parse at this version of the transcript (2026-11-15): every tab's chat build used to parse it earlier in
+            # the same cycle, and a tab nobody is watching is no longer built (_rest_unwatched), so a suppressed session
+            # the user re-engaged without opening its tab (a reply from a card, from the phone) read as not re-engaged
+            # and stayed suppressed until something parsed it. Read here, for a session under a floor alone (a handful
+            # at most, one assembly fold per appended version, the feed's own re-read's cost), and only a transcript
+            # the kernel can stat (a parse of a missing leaf stores nothing and would run every tick).
+            session = _parse(path, sid, now)
+        session = session or {"turns": []}
         if _last_human_msg_t(session["turns"]) <= floor:
             continue                                      # user hasn't re-engaged since the stop → still hands-off
         chip = _session_chip(sid, path, session, live_map.get(sid), now)
@@ -65563,6 +65597,119 @@ def _held_as_skeleton_by_all(sid, clients):
     return True
 
 
+# ── A tab nobody is watching goes back to REST (2026-11-15). The cold-tab gate above skips a tab no kernel life has built;
+# a WARM one, once its page had loaded it, was rebuilt on every cycle its transcript moved, watched or not. Measured on a
+# machine with 85 live sessions and one page connected: 386 chat builds in thirteen minutes, 364 of them for tabs no page
+# was showing, 702 of the pusher's 802 seconds, cycles of one to eight minutes, and the tab on screen waited for the cycle
+# to end before it showed a delivered message or a reply. The ruling the cold gate was built on already covers it: tabs
+# nobody is looking at are built last, on the page's click or its idle prefetch.
+# WATCHED is a fact each page reports, never a timer or a recency window: the tab a chat client names active (its
+# `activeTab` message, the `?active=` hint of its dial; each column of a split and each page has a socket and an active
+# of its own) and a tab it has asked for whole and not yet been answered (`askedFull`, a needFull: a click on a resting
+# tab, the idle prefetch). A tab that no connected chat client watches, whose signature has moved past its cached build
+# (or that has none), is not built: every client that holds it whole is handed it back as a skeleton, by the event that
+# its copy went behind. From then on it IS the cold gate's tab (no cached build, a skeleton to every client), so every
+# road that already serves one serves it: a light status per cycle, the Outline's provisional row, the per-session push's
+# gate, and the page's click or prefetch, whose needFull builds it at once on the page's own thread and answers with the
+# full. An unwatched tab whose signature holds is served from its cached build as before, and sends nothing.
+# The page learns of the rest from the status frame itself (`rest: true` beside the status, on the tab's status slot,
+# delivered in wire order with the tab's session frames): it stops showing its copy as current and draws the tab as a
+# skeleton. Only a client that said it can (`rest=1` at its dial: `restTabs`) is rested; a chat client that holds the tab
+# whole and did not say so keeps it built, as before, and /perf counts the reason (builds.chat.restHeld).
+# What is dropped with the base, per client, is what a needFull's reset drops (_client_reset_chat_sid) less the ask's
+# own mark; the watermark floor stays for the same reason it stays there. What is dropped for the kernel is what a tab
+# leaving the strip drops: the cached build, the shared delta baseline and the detector's mark, so the tab comes back as
+# a never-seeded one (a full for whoever asks, which seeds the baseline again), never a delta against a base from before
+# the rest.
+
+def _rest_blocker_locked(c, sid):
+    """Why client `c` keeps `sid` from going to rest, or None; the caller holds its slot lock. `asked`: it asked for the tab
+    whole and the answer is on its way. `watched`: it names the tab active (read again here, under the lock, beside the
+    caller's read of every client's active: a click can land between the two). `armed`: its redial's set is not resolved
+    and will not hold this tab as a skeleton (the whole push its strip sender owes it). `unserved`: it holds the tab in
+    no form, neither a base nor a chat frame on its slot (a page that dialed no diet and has not been sent the tab yet),
+    so there is no copy to take back and the tab is built for it, as a page that holds no set is served whole. `noCap`:
+    it holds the tab whole and never said it can take a loaded tab back (an older bundle, a host that dials its own
+    address)."""
+    if sid in (c.get("askedFull") or ()):
+        return "asked"
+    if _held_as_skeleton_by_all(sid, [c]):    # the cold gate's own read of one client (its slot lock is re-entrant)
+        return None
+    if str(c.get("active") or "") == sid:
+        return "watched"
+    if c.get("reconnect") or c.get("skeletonOnReady"):
+        return "armed"
+    if sid not in (c.get("echat") or {}) and ("chat", sid) not in (c.get("sent") or {}):
+        return "unserved"
+    if not c.get("restTabs"):
+        return "noCap"
+    return None
+
+
+def _rest_blocked(sid, clients):
+    """Why `sid` cannot go to rest for the chat clients in `clients`, or None: the first client's reason
+    (_rest_blocker_locked's word), or `noClient` with no chat client connected (the cold gate's own rule: an Outline
+    alone is served built rows). Reads only, each client under its own slot lock. The push loop asks this before it
+    derives the tab's status, so a tab that is built after all (a page's own ask, a client that cannot take it back)
+    pays for no status it will not send."""
+    if not clients:
+        return "noClient"
+    for c in clients:
+        with _client_lock(c):
+            why = _rest_blocker_locked(c, sid)
+        if why is not None:
+            return why
+    return None
+
+
+def _rest_unwatched(sid, clients, light):
+    """Hand `sid` back as a skeleton to every chat client in `clients` that holds it in another form, with `light` as its
+    status. Returns None when every client holds it as a skeleton afterwards, else the reason the tab is built as before
+    (_rest_blocked's word). Two passes, each client under its own slot lock: the first only reads (_rest_blocked), so a
+    tab one client keeps from resting changes nothing for the others; the second rests, and stops at a client whose
+    answer changed in between (a click, an ask), leaving the clients before it holding a skeleton of a tab the caller
+    then builds, which they are served as any skeleton holder is (a status frame). The frame carries `rest` and is
+    deduped as the plain status it stands for, so the cycles after it send that client nothing until the status moves."""
+    why = _rest_blocked(sid, clients)
+    if why is not None:
+        return why
+    plain = {"type": "status", "id": sid, "status": light}
+    sig = _dedup_sig(plain, json.dumps(plain))
+    for c in clients:
+        with _client_lock(c):
+            why = _rest_blocker_locked(c, sid)
+            if why is not None:
+                return why
+            if sid in (c.get("skeleton") or ()) or c.get("reconnect") or c.get("skeletonOnReady"):
+                continue                              # a skeleton already, or the resolve is about to make it one
+            c.get("echat", {}).pop(sid, None)         # the base, its view and its dedup slot: as a needFull's reset
+            c.get("echatView", {}).pop(sid, None)
+            c.get("sent", {}).pop(("chat", sid), None)
+            c.get("sent", {}).pop(("status", sid), None)   # …and any status slot, so the frame below always goes
+            c.get("fullRefused", set()).discard(sid)
+            c.get("heldTailFirst", {}).pop(sid, None)
+            sk = c.get("skeleton")
+            if sk is None:
+                sk = c["skeleton"] = set()
+            sk.add(sid)
+            order = c.setdefault("skeletonOrder", [])   # the strip carries the list from here on (_tab_order_frame)
+            if sid not in order:
+                order.append(sid)
+            _send_client(c, ("status", sid), dict(plain, rest=True), sig=sig)
+    return None
+
+
+def _rest_forget(sid):
+    """The kernel's half of a rest: the cached build, the shared delta baseline and the detector's mark go, one step under
+    _chat_baseline_lock, as for a tab that left the strip. No client holds a base for the sid any more, so there is nothing
+    a baseline could describe, and the tab's next whole frame establishes one (_seed_chat_baseline)."""
+    with _chat_baseline_lock:
+        _built_chat.pop(sid, None)
+        _prev_chat_events.pop(sid, None)
+        _prev_chat_ledger.pop(sid, None)
+        _chat_baseline_raced.pop(sid, None)
+
+
 def _held_in_some_form(c):
     """The sids client `c` holds in some form, read under its slot lock: a base (echat), a skeleton, or a chat frame on its
     slot with no base (a transcript-less tab's full records none). A needFull's repair push serves, beside the asked tab, every
@@ -71629,8 +71776,9 @@ def _push(targets, connect=False, live_map=None, only=None):
                 # plans/outline-pane-provisional-row.md); a page that declared no diet holds no set and is served whole, as today.
                 _tm = live_map.get(s["sid"])
                 _light = None
-                if (not is_active and s["sid"] not in _all_active and not _plain_outline
-                        and s["sid"] not in _built_chat and os.path.exists(s["path"])
+                _unwatched = (not is_active and s["sid"] not in _all_active   # no connected page names it active (the warm half
+                              and os.path.exists(s["path"]))                 #  below reads this too); a transcript-less tab builds
+                if (_unwatched and not _plain_outline and s["sid"] not in _built_chat
                         and _held_as_skeleton_by_all(s["sid"], _all_chat)):   # every CONNECTED chat client, as the floor reads
                     _light = _light_status(s["sid"], s["path"], _tm, now)   # no live row: no status to state, so build as before
                 if _light is not None:
@@ -71692,6 +71840,28 @@ def _push(targets, connect=False, live_map=None, only=None):
                 # of the skeleton-reconnect module pin the faces and the placement.
                 _seen = _prev_chat_events.get(s["sid"])
                 hit = _built_chat.get(s["sid"])
+                # THE WARM HALF OF THE GATE (2026-11-15; _rest_unwatched has the measurement and the rule): a tab no connected
+                # page watches whose build is owed (its signature moved past the cached build, or it has none) is not built.
+                # Every chat client that holds it whole is handed it back as a skeleton, the cached build and the baseline
+                # are forgotten, and from the next push on it is the cold gate's tab above. The event is the signature
+                # moving while nobody watches; an unwatched tab whose signature holds falls through to the cached serve
+                # below and sends nothing. A signature that could not be taken builds, as before; so does a tab with no
+                # live row (no status to state), one a client asked for whole, and one some client cannot take back.
+                if _unwatched and sig is not None and not (hit is not None and hit[0] == sig):
+                    _why = "plainOutline" if _plain_outline else _rest_blocked(s["sid"], _all_chat)
+                    if _why is None:
+                        _light = _light_status(s["sid"], s["path"], _tm, now)
+                        _why = "noLiveRow" if _light is None else _rest_unwatched(s["sid"], _all_chat, _light)
+                    if _why is None:
+                        _rest_forget(s["sid"])
+                        for c in chat_clients:               # the status, to a holder the rest did not just tell (a client it
+                            _send_light_status(c, s["sid"], _light)   # told dedups this frame against that one)
+                        _VIEW_STATS["chatRest"] += 1
+                        _PERF_STATS.build_chat_rest()
+                        if want_fleet:                       # the Outline's row, from the store alone, as for a cold skip
+                            _prov_rows.append(_provisional_row(s["sid"], s.get("name", ""), _light))
+                        continue
+                    _PERF_STATS.build_chat_rest_held(_why)   # built as before, and /perf says why
                 _claimed = False
                 if not (hit is not None and sig is not None and hit[0] == sig):
                     _ev = _chat_inflight_claim(s["sid"])            # single-flight (2026-09-14): another thread building this tab?
@@ -72901,6 +73071,7 @@ def _chat_inflight_release_all():
 # rebuild is justified only by a changed input; a rising build count on a quiet board is a bug signature.
 _VIEW_STATS = {"feedBuild": 0, "feedServe": 0, "tlBuild": 0, "tlServe": 0,
                "chatBuildActive": 0, "chatBuildBg": 0, "chatServeActive": 0, "chatServeBg": 0, "chatSkipCold": 0,
+               "chatRest": 0,                                     # an unwatched tab handed back as a skeleton (_rest_unwatched)
                "feedWaited": 0, "tlWaited": 0, "chatWaited": 0,   # served a build another thread had in flight (single-flight)
                # GET /feed.json's reads (_pure_feed), apart: a poller's builds under the pusher's numbers
                # would forge the bug signature above, or bury a pusher regression (review find, 2026-09-08)
@@ -73247,14 +73418,24 @@ def _chat_dots_off(now, live_map):
     two, low 9): the off frame's empty lists blanked the peers' dots, against the copy that the chat carries on. The same
     two signals _feed_session_entry derives, from the same helpers and none of the judges' stores: WORKING when the
     session's last turn is open (_session_working over the cached, live-merged parse), AWAITING when it is idle and
-    _session_awaiting names a wait. Cache-only parses, as the feed's: a cold session shows no dot until the warm; a
-    failing session is skipped, never the list."""
+    _session_awaiting names a wait. Cache-only parses, as the feed's; a failing session is skipped, never the list.
+    A session whose parse the cache does not hold at its transcript's version takes the live row's word (2026-11-15), as
+    the strip's status for a tab at rest does (_light_status): working when the row says so, else awaiting when
+    _session_awaiting names a wait. Until then every tab's chat build had parsed it earlier in the same push, and a
+    tab nobody watches is no longer built (_rest_unwatched), so without the row its dot went out the moment its
+    transcript moved. With no live row, as before: no dot until something parses it."""
     working, awaiting = [], []
     for s in _alive_sessions(now, live_map):
         try:
             ps = _parse_cached(s["path"]) if s.get("path") else None
             if ps is not None:
                 ps = _merge_live_atoms(ps, s["sid"])
+            elif s.get("path") and isinstance(live_map.get(s["sid"]), dict):
+                if (live_map[s["sid"]].get("state") or "") == "working":
+                    working.append(s["name"])
+                elif _session_awaiting(s["sid"], s["path"], True):
+                    awaiting.append(s["name"])
+                continue
             if ps is not None and _session_working(ps["turns"]):
                 working.append(s["name"])
             elif ps is not None and _session_awaiting(s["sid"], s["path"], True):
@@ -81146,7 +81327,7 @@ dropRedial();   // this dial is the attempt any scheduled redial was waiting to 
 if(returnAt)returnRedialed=true;   // a dial inside a return window (whatever path led here) → the return-fresh row says so
 connT=Date.now();closingT=0;var proto=location.protocol==="https:"?"wss://":"ws://";
 var active="";try{var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";}catch(e){}
-try{ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")+(COL?"&col="+encodeURIComponent(COL):"")+((SKEL||RESTART_DIET)?"&skeleton=1":"")+(APP==="fleet"?"&provrows=1":""));}catch(e){dialRefused();return;}   // skeleton=1: a later chat column, or the main pane on every dial of every page load (RESTART_DIET, its redials included: 2026-10-11), served as a view of the session its ?active= names (above). reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page (2026-09-10), the last until a caps frame answers: its onopen posts the bundle's ready again (below), so the kernel serves the socket whole and answers
+try{ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")+(COL?"&col="+encodeURIComponent(COL):"")+(APP==="chat"?"&rest=1":"")+((SKEL||RESTART_DIET)?"&skeleton=1":"")+(APP==="fleet"?"&provrows=1":""));}catch(e){dialRefused();return;}   // skeleton=1: a later chat column, or the main pane on every dial of every page load (RESTART_DIET, its redials included: 2026-10-11), served as a view of the session its ?active= names (above). reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page (2026-09-10), the last until a caps frame answers: its onopen posts the bundle's ready again (below), so the kernel serves the socket whole and answers
 // onopen: flush the queue; a RECONNECT (after a drop) also PROMPTS a reload — the fresh socket resyncs live via
 // the kernel's next push, and the banner offers a full reload for anything a live push doesn't cover. This
 // replaced the old silent location.reload() (the user 2026-07-05: don't foist a reload; let me click). Since T265
@@ -81311,7 +81492,7 @@ last.rev=d.rev;last.msg=m;return m;}
 window.__rompLocalSend=send;window.__rompApp=APP;
 window.__rompDiag=function(what,data){try{send({type:"clientDiag",surface:"reload-core",what:what,data:data});}catch(e){}};   // the reload core's breadcrumb door: this pane's socket, the serving kernel (the core itself names no send route)   // federation.ts (the multi-kernel manager) routes local sends + knows the app through these
 var SK="romp-vscode-state-%s"+(COL?":"+COL:"");   // persist webview state to localStorage so UI prefs survive a refresh — per chat column (split screen 2026-09-08)
-window.__rompDialTerms=function(){var a="";try{var st=JSON.parse(localStorage.getItem(SK)||"null");a=(st&&st.activeId)||"";}catch(e){}return{app:APP,iid:IID,active:a,col:COL,skeleton:((SKEL||RESTART_DIET)?1:0),provrows:(APP==="fleet"?1:0),proto:readyProto,delta:1};};   // the page's live dial terms for federation.ts to carry to each remote socket (2026-09-15): the terms the local /ws dial above states, read fresh so a remote redial reflects current state; the reader namespaces iid and strips active per host. The skeleton term is the page's diet itself, never gated on a socket's history (2026-10-10; the local dial since 2026-10-11): the local socket has opened before federation dials any remote, so a term gated on the local socket's first dial never reached a remote and every linked kernel built its whole board for the page; a remote's redial states reconnect=1 beside it, which the kernel serves as any redial
+window.__rompDialTerms=function(){var a="";try{var st=JSON.parse(localStorage.getItem(SK)||"null");a=(st&&st.activeId)||"";}catch(e){}return{app:APP,iid:IID,active:a,col:COL,skeleton:((SKEL||RESTART_DIET)?1:0),provrows:(APP==="fleet"?1:0),rest:(APP==="chat"?1:0),proto:readyProto,delta:1};};   // the page's live dial terms for federation.ts to carry to each remote socket (2026-09-15): the terms the local /ws dial above states, read fresh so a remote redial reflects current state; the reader namespaces iid and strips active per host. The skeleton term is the page's diet itself, never gated on a socket's history (2026-10-10; the local dial since 2026-10-11): the local socket has opened before federation dials any remote, so a term gated on the local socket's first dial never reached a remote and every linked kernel built its whole board for the page; a remote's redial states reconnect=1 beside it, which the kernel serves as any redial
 window.acquireVsCodeApi=function(){return{postMessage:function(m){if(window.__rompFed){window.__rompFed.outbound(m);}else{send(m);}},
 getState:function(){try{return JSON.parse(localStorage.getItem(SK)||"null");}catch(e){return null;}},
 setState:function(s){try{localStorage.setItem(SK,JSON.stringify(s));}catch(e){}}};};connect();
@@ -92831,6 +93012,7 @@ class Handler(BaseHTTPRequestHandler):
         active = (q.get("active") or [""])[0]   # the tab this client is looking at → _push builds it FIRST
         reconnect = (q.get("reconnect") or [""])[0] == "1"   # the shim's own statement: this page opened a socket before and its bundle has said ready, with no ready waiting in its queue
         skeleton = (q.get("skeleton") or [""])[0] == "1" and app == "chat"   # the shell's statement (the chat split, 2026-09-11): a later column, a VIEW of the one session its active hint names; a chat socket's alone (round two of PR 1661: the term is meaningless for a feed or a timeline client)
+        rest = (q.get("rest") or [""])[0] == "1" and app == "chat"   # the chat page's statement (2026-11-15): it takes a tab it has loaded back as a skeleton when the kernel says its copy went behind (_rest_unwatched), so a tab nobody watches need not be rebuilt for it
         provrows = (q.get("provrows") or [""])[0] == "1" and app == "fleet"   # the Outline's statement (plans/outline-pane-provisional-row.md): it renders a provisional row for a cold tab, so the cold-tab gate need not stand down for it
         col = (q.get("col") or [""])[0]         # which chat COLUMN of that dashboard (split screen, 2026-09-08) — for the logs;
         #                                         the columns arbitrate a dashboard-aimed focus among themselves (render.ts focusIsOurs)
@@ -92927,6 +93109,8 @@ class Handler(BaseHTTPRequestHandler):
             client["col"] = col
         if provrows:
             client["provRows"] = True
+        if rest:
+            client["restTabs"] = True
         lane = _ws_arm_lane(client)                # every op but a drive op runs on the client's lane, in order (_ws_arm_lane)
         _register_ws_client(client)
         _note_ws_open(client, reconnect=reconnect)   # the durable record of this open: app, wid, kind (page or relay), reconnect
