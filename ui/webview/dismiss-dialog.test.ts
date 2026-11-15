@@ -31,7 +31,7 @@ test("a spend cap shows neither Retry nor a Dismiss button: the raise-the-cap li
 test("the countdown reads the spend-cap message, never a fake retry countdown", () => {
   // the card's line has one decider for its render, the tick and the Stop/Resume-all flip (api-card-line.ts,
   // 2026-11-15); the render writes through it, and it answers the cap's line with the pause on or off
-  assert.match(apiErr, /countdown\.textContent = apiCardLineFor\(own\);/);
+  assert.match(apiErr, /paintApiCardLine\(countdown, line\);/);
   for (const paused of [true, false]) {
     assert.equal(apiCardLine({ apiSpendLimit: true }, { paused, resumeAt: null, reason: paused ? "spend" : "" }, undefined, Date.now()),
       "spend limit reached — raise it at claude.ai/settings/usage");

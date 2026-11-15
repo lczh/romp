@@ -46,7 +46,7 @@ test("a usage-limit pause counts down to the window reset instead of a mute labe
   const tick = RENDER.slice(RENDER.indexOf("function apiRetryTick("), RENDER.indexOf("function renderTool("));
   assert.match(tick, /\n  if \(!globalRetryPaused\) \{[\s\S]*\n  \}\n[\s\S]*\n  relabelApiCards\(\);\n\}/);
   // the live card ticks by the session stamped on it; a settled error is a note with no line (apiErrorNote)
-  assert.match(RENDER, /cd\.textContent = apiCardLineFor\(cd\.dataset\.sid \|\| null\);/);
+  assert.match(RENDER, /const says = apiCardSaysFor\(slot\.dataset\.sid \|\| null\);/);
 });
 
 // ── the cadence is the KERNEL's (the user 2026-07-29) ───────────────────────────────────────────────

@@ -139,7 +139,7 @@ import { dirStatusHint, nextDirActive, createDirPrompt, type DirStatus } from ".
 import { mediaSrc, kernelUrl, swirlOSrc, sessionReadUrl } from "./media";
 import { initStrip, fmtReset } from "./strip";
 import { durLabel } from "./duration";
-import { apiCardLine } from "./api-card-line";   // the live API card's line: one decider for its render, the tick and the Stop/Resume-all flip
+import { apiCardSays } from "./api-card-line";   // the live API card's line: one decider for its render, the tick and the Stop/Resume-all flip
 import { readLiveStatus, thinkingText, thinkingShort, thinkingTip, thoughtLabel, taskProgressText, turnThoughtTokens, tokensShort, type LiveStatus, type ThinkingLive } from "./live-status";   // what a session is doing this second (thinking, its subagents' progress), from the kernel's liveStatus frame (2026-10-08)
 import { apiErrorReason } from "./api-error-reason";
 import { chatMdExtensions, userMdHtml } from "./chat-md";
@@ -5756,14 +5756,18 @@ function citeKey(c: Citation): string {
   return c.itemId ? "g:" + c.itemId : "q:" + JSON.stringify([c.quote || "", c.src || "", c.ctx || "", c.shown || ""]);
 }
 
-// THE LIVE API CARD'S LINE has one decider, apiCardLine (api-card-line.ts): the card's render, the one-second tick
-// and the Stop/Resume-all flip all write it through apiCardLineFor, from the card's OWN session's status, the page's
+// THE LIVE API CARD'S LINE has one decider, apiCardSays (api-card-line.ts): the card's render, the one-second tick
+// and the Stop/Resume-all flip all write it through paintApiCardLine, from the card's OWN session's status, the page's
 // global pause and that session's next retry time, so the three can never disagree. Each had its own ladder before,
 // and the flip's had two answers for every card (the pause's words, or that a retry was coming), so a Resume press
 // rewrote a spend-capped card to promise a retry the kernel never sends (2026-11-15).
-function apiCardLineFor(sid: string | null): string {
-  return apiCardLine(apiCardStatus(sid), { paused: globalRetryPaused, resumeAt: globalRetryResumeAt, reason: globalRetryReason, still: globalRetryStill },
-                     sid ? apiRetryNext.get(sid) : undefined, Date.now());
+function apiCardSaysFor(sid: string | null): { line: string; remedy: boolean } {
+  const st = apiCardStatus(sid);
+  // the session's next automatic retry: the tick's own schedule for a tab, else the kernel's deadline off the status
+  // (a card painted before the first tick, and a comment thread, which the tick's schedule does not hold)
+  const next = sid ? apiRetryNext.get(sid) ?? (st?.retryNextAt ? st.retryNextAt * 1000 : undefined) : undefined;
+  return apiCardSays(st, { paused: globalRetryPaused, resumeAt: globalRetryResumeAt, reason: globalRetryReason, still: globalRetryStill },
+                     next, Date.now());
 }
 
 // The status a live API card reads: its OWN session's. A tab's from the session map; a comment thread's card, which
@@ -5776,12 +5780,26 @@ function apiCardStatus(sid: string | null): Status | undefined {
   return open && threadSidOf(open.th) === sid ? threadMetaStatus(open.th) : undefined;
 }
 
+// Write one card's line in its two places (which of them SHOWS is the sheet's: styles.css .api-line). The head's
+// one-line slot carries the line, with the whole of it as its tooltip, since the slot ellipsizes on a narrow pane. The
+// top of the card's body carries it too, where it wraps: a REMEDY, the sentence the person must read on a blocked
+// session (api-card-line.ts apiCardSays's `remedy`), shows there at every width, and a short form (a countdown) only on
+// a card too narrow for it in the head. A phone has no hover to read a clipped slot by.
+function paintApiCardLine(slot: HTMLElement, body: HTMLElement | null): void {
+  const says = apiCardSaysFor(slot.dataset.sid || null);
+  if (slot.textContent !== says.line) { slot.textContent = says.line; setTip(slot, says.line); }
+  slot.classList.toggle("api-line-remedy", says.remedy);
+  if (!body) return;
+  if (body.textContent !== says.line) body.textContent = says.line;
+  body.classList.toggle("api-line-remedy", says.remedy);
+}
+
 // Every live API card's line, re-read: each card by the session renderApiError stamped on it (data-sid), never by
 // whichever tab is active now (a card is built for a background tab too, and stays in the page while its view is
 // hidden). The tick calls this every second and the flip at once.
 function relabelApiCards(): void {
-  for (const cd of Array.from(document.querySelectorAll(".api-countdown")) as HTMLElement[]) {
-    cd.textContent = apiCardLineFor(cd.dataset.sid || null);
+  for (const slot of Array.from(document.querySelectorAll(".api-countdown")) as HTMLElement[]) {
+    paintApiCardLine(slot, slot.closest(".notice")?.querySelector(".api-line") as HTMLElement | null);
   }
 }
 
@@ -5800,9 +5818,9 @@ function relabelStopAll(): void {
 // button that pastes "retry" into the session to resume the stalled turn.
 function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLElement {
   // The card's line: the countdown to the next AUTO-retry, the pause's reason, or the fix for a stop nothing
-  // retries — apiCardLineFor decides, here and on every later write (the tick each second, the Stop/Resume-all
-  // flip), by the session stamped on the element. It is the head's META slot (counts and countdowns live
-  // there, never a clock).
+  // retries — apiCardSays decides, here and on every later write (the tick each second, the Stop/Resume-all
+  // flip), by the session stamped on the element. This is the head's META slot (counts and countdowns live
+  // there, never a clock); a remedy also gets its own line in the body (paintApiCardLine, below).
   // THE SESSION THIS CARD IS BUILT FOR is the one being rendered (renderingSid), never the active tab: the idle
   // prebuild builds background tabs while another tab is active, and the keyed paint never repaints an unchanged
   // card, so a card read from activeId wore the ACTIVE session's line and buttons for good (a background tab stopped
@@ -5811,7 +5829,6 @@ function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLEleme
   const own = renderingSid ?? activeId;
   const countdown = el("span", "notice-meta api-countdown");
   countdown.dataset.sid = own || "";
-  countdown.textContent = apiCardLineFor(own);
   // A SPEND-CAP block gets no Retry (the user 2026-07-16, mirroring the feed card's 2026-07-14 call):
   // retrying can't lift a billing cap. The card names the fix (raise the cap) with no dead button at all.
   const st = apiCardStatus(own);
@@ -5837,6 +5854,11 @@ function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLEleme
   if (st?.apiNoRetry) {
     return notice({ src: "API", glyph: "api", sev: "err", gist, body, open: true, key: "apierr:" + (ev.uuid || (activeId || "")), cls: "turn-apierror" });
   }
+  // the line's place in the body, above the error's words: where a sentence the person must read can wrap
+  // (paintApiCardLine fills it; the sheet shows it for a remedy, and for a countdown on a narrow card)
+  const line = el("div", "api-line");
+  body.insertBefore(line, body.firstChild);
+  paintApiCardLine(countdown, line);
   const acts: HTMLElement[] = [];
   // every action is a data-act word button on the button vocabulary; the document.body delegate acts
   // (apiRetryNow / stopAllRetries) and acknowledges at once — the tail rebuilds on every
@@ -5848,7 +5870,7 @@ function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLEleme
   const paused = globalRetryPaused;
   // Per-thread suppression (the user 2026-07-06): the user interrupted THIS thread's storm → its auto-retry is
   // held off until a successful turn re-arms it. Distinct from the global pause; "Retry now" + a message still work.
-  // (The line says which of these holds: apiCardLine's order is the stops nothing retries, each with its own
+  // (The line says which of these holds: apiCardSays's order is the stops nothing retries, each with its own
   // remedy, then the global pause, this thread's own stop, then the countdown.)
   const stop = noticeAct(paused ? "Resume all auto-retries" : "Stop all auto-retries", "stopAllRetries",
     paused ? "resume auto-retrying globally" : "stop the auto-retry loop for all errors globally");
@@ -5906,7 +5928,7 @@ function apiRetryTick(): void {
       }
     });
   }
-  // every live API card's line (apiCardLineFor): the wait until its next retry, or during a usage-limit pause the
+  // every live API card's line (paintApiCardLine): the wait until its next retry, or during a usage-limit pause the
   // reset-time countdown (the user 2026-07-13). Every second even while paused, so the paused line stays live; a
   // card nothing retries is handed its remedy again each time, by the same function that wrote it at render.
   relabelApiCards();

@@ -395,6 +395,36 @@ class FrameChip(unittest.TestCase):
         self.assertEqual(set(st) - set(km._THREAD_LIVE_STATUS_KEYS), set(), "a projection of the tab's status, no more")
         self.assertIsNotNone(th["live"]["bgTasks"], "the box's tracked tasks ride too")
 
+    def test_a_thread_stopped_on_an_api_error_carries_what_its_card_reads(self):
+        # the live API-error card in the popover is the chat's own, drawn for the THREAD: its line and its buttons read
+        # the stop's class off the thread's status. The projection carried none of it, so a thread stopped on a spend cap
+        # read as about to retry and offered Retry now (the review of PR 470, 2026-11-15). Invented error wording.
+        classes = {"apiSpendLimit": "API Error: 429 the monthly spend limit for this workspace was reached",
+                   "apiModelLimit": "You've reached your model limit. Run /usage-credits to continue or switch models with /model",
+                   "apiAuthErr": "Not logged in",
+                   "apiRefusal": "The model's safeguards flagged this message"}
+        flags = ("apiSpendLimit", "apiModelLimit", "apiAuthErr", "apiRefusal", "apiNoRetry", "retrySuppressed")
+        for flag, text in classes.items():
+            line = err_line(self.now - 380, "ce1", "cu1")
+            line["message"]["content"][0]["text"] = text
+            self._seed([line])
+            st = self._live_frame({"state": "waiting"})["live"]["status"]
+            self.assertEqual({k: st.get(k) for k in flags}, {k: k == flag for k in flags}, flag)
+            self.assertEqual(st["state"], "blocked")
+        # a transient error carries no class, and the thread the person stopped says so
+        self._seed([err_line(self.now - 380, "ce1", "cu1")])
+        st = self._live_frame({"state": "waiting"})["live"]["status"]
+        self.assertEqual({k: st.get(k) for k in flags}, {k: False for k in flags})
+        saved = km._session_retry_suppressed
+        km._session_retry_suppressed = lambda sid: sid == THREAD
+        try:
+            self.assertIs(self._live_frame({"state": "waiting"})["live"]["status"]["retrySuppressed"], True)
+        finally:
+            km._session_retry_suppressed = saved
+        for k in flags + ("retryNextAt", "retryTries"):
+            self.assertIn(k, km._THREAD_LIVE_STATUS_KEYS)
+            self.assertIn(k, st, "the tab's status carries it, so the projection has it to carry")
+
     def test_a_retrying_thread_carries_the_chats_live_retry_card(self):
         self._seed([aline(self.now - 380, "Checking the sync loop first.", "ca1", parent="cu1", stop="tool_use")])
         th = self._live_frame({"state": "retrying", "retryCount": 3,

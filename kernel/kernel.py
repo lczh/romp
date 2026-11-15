@@ -22236,7 +22236,14 @@ def _thread_events(tsid, cut_uuid, floor_t, now, live_map, tm=None, out=None):
 # (billing, notices, the needs-you verdicts) is a tab's, and would only grow the comments frame.
 _THREAD_LIVE_STATUS_KEYS = ("state", "sinceEpoch", "ctx", "ctxOver", "ctxColor", "ctxTone",
                             "awaitingWhy", "awaitingKind", "awaitingPeers", "awaitingCount", "awaitingItems",
-                            "awaitingTasks", "awaitingTaskIds", "bgServiceIds")
+                            "awaitingTasks", "awaitingTaskIds", "bgServiceIds",
+                            # what the live API-error card reads to word its line and choose its buttons (2026-11-15, the
+                            # review of PR 470): a thread's card is the chat's own, drawn for the THREAD, and without these
+                            # a thread stopped on a spend cap read as about to retry and offered Retry now. The page's
+                            # decider names the fields it reads (ui/webview/api-card-line.ts API_CARD_STATUS_KEYS, pinned
+                            # equal to this tail by apierror-line.test.ts)
+                            "apiSpendLimit", "apiModelLimit", "apiAuthErr", "apiRefusal", "apiNoRetry",
+                            "retrySuppressed", "retryNextAt", "retryTries")
 
 
 class _lend_thread_row(object):
