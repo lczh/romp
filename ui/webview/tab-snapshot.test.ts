@@ -247,24 +247,35 @@ test("executed: the row's chip is the SHARED status chip's words (T322b): Needs 
   assert.equal(snapshotModel(sec, look(sessions), look(ledgers), m), m, "nothing changed: the same object");
 });
 
-test("executed: a resting member (a tab the page holds no current copy of) is a row from the kernel's status: its state and needs-you, no last message, a hover that says so", () => {
-  // 2026-11-15: a tab nobody is watching is no longer rebuilt, so the page's copy of it goes behind; render.ts hands
-  // the row the kernel's status frame (sent every cycle) with `resting`, and the feed's verdict from that status
+test("executed: a skeleton member (a tab the page holds no copy of) is a row from the kernel's status: its state and needs-you, no last message, a hover that says so", () => {
+  // 2026-11-15: render.ts hands the row the kernel's status frame (sent every cycle) with `resting`, and the feed's verdict
+  // from that status
   const resting: SnapSessionLike = { name: "api", color: { bg: "#d53a3a", fg: "#ffffff" }, resting: true, events: [],
                                      status: { state: "needsInput", sinceEpoch: ms(T0 - 50) } };
   const r = snapshotRow("api", resting, { needsInput: true }, null);
-  assert.deepEqual([r.pip, r.needsYou, r.loading, r.resting], ["awaiting", true, false, true]);
+  assert.deepEqual([r.pip, r.needsYou, r.loading, r.resting, r.behind], ["awaiting", true, false, true, false]);
   assert.equal(r.chip?.text, "Needs you");
-  assert.equal(r.lastT, T0 - 50, "the state's start, from the status: the tail is not read");
-  assert.deepEqual([r.lastMsg, r.now, r.note], ["", "", ""], "what the page's stale copy said is not shown");
+  assert.equal(r.lastT, T0 - 50, "the state's start, from the status: there is no tail");
+  assert.deepEqual([r.lastMsg, r.now, r.note], ["", "", ""]);
   assert.equal(rowWords(r).title, "Not loaded here.\nClick to open this session.");
-  // a tail handed with a resting session is not read either (the copy is behind by definition)
-  const withTail = snapshotRow("api", { ...resting, events: [{ kind: "assistant", md: "an old reply", ts: iso(T0 - 9000) }] }, null, null);
-  assert.equal(withTail.lastMsg, "");
-  // the same member loaded is a different row: the model changes when a tab goes to rest or comes back
-  const loaded = snapshotRow("api", sessions.get("api"), ledgers.get("api"), null);
-  assert.equal(loaded.resting, false);
-  const a = snapshotModel({ name: "infra", color: "", ids: ["api"] }, () => sessions.get("api"), () => null, null);
-  const b = snapshotModel({ name: "infra", color: "", ids: ["api"] }, () => ({ ...sessions.get("api"), resting: true }), () => null, a);
-  assert.notEqual(a, b, "resting is part of what a row shows");
+});
+
+test("executed: a member at rest (a copy the page holds, behind) keeps its last message, said to be the one loaded here, with the kernel's state and time", () => {
+  // 2026-11-15: a tab nobody is watching is no longer rebuilt, so the page's copy of it goes behind while its status,
+  // which the kernel still sends every cycle, stays current (render.ts lays it over the copy's)
+  const copy = sessions.get("web")!;                // last event at T0 - 20; its status said working since T0 - 30
+  const behind: SnapSessionLike = { ...copy, behind: true, status: { state: "needsInput", sinceEpoch: ms(T0 - 5) } };
+  const r = snapshotRow("web", behind, { needsInput: true }, null);
+  assert.deepEqual([r.pip, r.needsYou, r.resting, r.behind, r.loading], ["awaiting", true, false, true, false], "the state is the kernel's: it stopped on a question since");
+  assert.equal(r.lastMsg, "Adding the list page now: the route and the template.", "the copy's last message is still offered");
+  assert.equal(rowWords(r).title, "Last message loaded here: Adding the list page now: the route and the template.\nIt has written more since. Click to open it and catch up.");
+  assert.equal(r.lastT, T0 - 5, "the later of the copy's newest event and the state's start");
+  assert.equal(snapshotRow("web", { ...behind, status: { state: "working", sinceEpoch: ms(T0 - 900) } }, null, null).lastT, T0 - 20,
+    "…which is the copy's own event when the state began before it");
+  assert.deepEqual([r.now, r.note], ["", ""], "a ledger that is not current is not handed in: no now line, no note");
+  // behind is part of what a row shows: the model changes when a tab goes to rest or comes back
+  const a = snapshotModel({ name: "infra", color: "", ids: ["web"] }, () => copy, () => null, null);
+  const b = snapshotModel({ name: "infra", color: "", ids: ["web"] }, () => ({ ...copy, behind: true }), () => null, a);
+  assert.notEqual(a, b);
+  assert.equal(rowWords(snapshotRow("web", copy, null, null)).title, "Last message: Adding the list page now: the route and the template.\nClick to open this session.", "a current copy's words are unchanged");
 });

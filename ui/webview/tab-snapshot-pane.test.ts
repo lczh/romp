@@ -799,10 +799,10 @@ test("executed: the guide describes the fold rule and the view", () => {
   assert.match(REF, prose("the **Needs you** chip follows the feed, one refresh behind it at most"));
 });
 
-test("executed: a member at rest is painted from the kernel's status, not from the copy the page holds: the row turns to Needs you though the held session says working, and a full puts the session's own row back", () => {
-  // 2026-11-15: a tab nobody is watching is no longer rebuilt, so on a busy board most members of a section are at rest
-  // and the page's copy of each is behind. The row a stale copy painted showed a session that had since stopped on a
-  // question as quietly working.
+test("executed: a member at rest is painted from the copy the page holds with the kernel's status over it: the row turns to Needs you, keeps its last message as the one loaded here, and a full puts the session's own row back", () => {
+  // 2026-11-15: a tab nobody is watching is no longer rebuilt, so on a busy board most members of a section are at rest.
+  // The page keeps each copy; render.ts lays every status frame over the copy's status (noteHeldStatus), which is what
+  // this test does by hand, and marks the row behind.
   const { H, api, content } = world();
   api.set({ snapView: "infra" });
   api.renderSnapshot();
@@ -810,23 +810,31 @@ test("executed: a member at rest is painted from the kernel's status, not from t
   const row = (id: string) => rowsOf(host).find((n) => n.dataset.id === id)!.children[0];
   assert.ok(row("web").querySelector(".snap-pip")!.has("working"));
   assert.equal(row("web").querySelector(".snap-now")!.textContent, "Add the notes list page");
-  // the kernel takes web back: its transcript moved while this page was on another tab
+  // the kernel takes web back: its transcript moved while this page was on another tab. The copy stays; its status is the frame's
   onFull(H.skeletonTabs, "web");
-  onRest(H.skeletonTabs, "web", { state: "needsInput", sinceEpoch: (T0 - 5) * 1000, needsYou: true, provisional: true });
+  assert.equal(onRest(H.skeletonTabs, "web", { state: "needsInput" }, true), "behind");
+  const web = H.sessions.get("web");
+  web.status = { ...web.status, state: "needsInput", sinceEpoch: (T0 - 5) * 1000, needsYou: true, provisional: true };
   api.renderSnapshot();
   assert.ok(row("web").querySelector(".snap-pip")!.has("awaiting"), "the pip is the kernel's word for it now");
   assert.equal(row("web").querySelector(".chip")!.text(), "Needs you");
   assert.equal(row("web").querySelector(".snap-now")!.textContent, "", "what the stale ledger said it was doing is withheld");
-  assert.equal(row("web").title, "Not loaded here.\nClick to open this session.", "nor is the stale copy's last message offered");
-  assert.equal(row("web").querySelector(".snap-when")!.dataset.t, String(T0 - 5), "the time is the state's start, from the status");
-  // a status that says nothing needs you: the row is quiet again, still without a build
-  H.skeletonTabs.status.set("web", { state: "working", sinceEpoch: (T0 - 2) * 1000, needsYou: false, provisional: true });
-  api.renderSnapshot();
-  assert.ok(row("web").querySelector(".snap-pip")!.has("working"));
-  assert.equal(row("web").querySelector(".chip"), null);
-  // the click's full arrives: the session's own row again
+  assert.equal(row("web").title, "Last message loaded here: Adding the list page.\nIt has written more since. Click to open it and catch up.");
+  assert.equal(row("web").querySelector(".snap-when")!.dataset.t, String(T0 - 5), "the time is the state's start, later than the copy's last event");
+  // a tab the page holds NO copy of (a skeleton) is a row from the kernel's status alone
+  H.skeletonTabs.ids.add("tests"); H.skeletonTabs.order.push("tests");
+  H.skeletonTabs.status.set("tests", { state: "working", sinceEpoch: (T0 - 2) * 1000, needsYou: false });
+  api.set({ snapView: "qa" }); api.renderSnapshot();
+  const qa = content.byId("tab-snapshot")!;
+  const tests = rowsOf(qa).find((n) => n.dataset.id === "tests")!.children[0];
+  assert.ok(tests.querySelector(".snap-pip")!.has("working"));
+  assert.equal(tests.title, "Not loaded here.\nClick to open this session.");
+  // the click's full arrives for web: the session's own row again
+  api.set({ snapView: "infra" });
   onFull(H.skeletonTabs, "web");
+  web.status = { state: "working", sinceEpoch: (T0 - 30) * 1000 };
   api.renderSnapshot();
-  assert.equal(row("web").querySelector(".snap-now")!.textContent, "Add the notes list page");
-  assert.match(row("web").title, /^Last message: Adding the list page\./);
+  const again = rowsOf(content.byId("tab-snapshot")!).find((n) => n.dataset.id === "web")!.children[0];
+  assert.equal(again.querySelector(".snap-now")!.textContent, "Add the notes list page");
+  assert.match(again.title, /^Last message: Adding the list page\./);
 });

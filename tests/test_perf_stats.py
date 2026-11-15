@@ -393,6 +393,7 @@ class Collector(unittest.TestCase):
         self.assertEqual(snap["builds"]["chat"], {"cached": 1, "built": 1, "ms": 40.0, "active_built": 0, "bg_built": 0,
                                                   "moved": 0, "coldSkipped": 0, "baselineRaced": 0, "baselineRepaired": 0,
                                                   "rested": 0, "restHeld": {},        # an unwatched tab handed back as a skeleton, and why one was built (2026-11-15)
+                                                  "watchedTabs": km._watched_tabs(),  # how many of a page's last shown tabs count as watched
                                                   "bg_miss": {k: 0 for k in km._PerfStats.CHAT_MISS},
                                                   "bySession": []})                   # the per-session timer (2026-09-14): no sid handed in, no row
         # …and the two rest counters: one per tab rested, one per reason a tab nobody watches was built after all; the map is a copy

@@ -95,8 +95,7 @@ test("makeSkeletonTab: the loaded-tab chrome minus what it does not know — no 
   // a cold tab has no rich tip (pinned below), so the Needs-you phrase rides the native title, prefixed when the
   // status needs you, in BOTH modes, from the one exported helper (needsYouPhrase, executed in tab-widgets.test.ts)
   assert.match(sk, /tab\.title = \(status && status\.needsYou \? needsYouPhrase\(/, "the cold tab prefixes the Needs-you phrase from the one helper when the status needs you");
-  assert.match(sk, /\+ \(skeletonTabs\.rested\.has\(id\) \? "Not up to date, click to load" : "Not loaded yet, click to load"\);/,
-    "…before the loaded-yet copy (the em-dash gone); a tab at rest was loaded here and went behind, and its title says that (2026-11-15)");
+  assert.match(sk, /\+ "Not loaded yet, click to load";/, "…before the loaded-yet copy (the em-dash gone)");
   assert.match(sk, /closeBtn\.dataset\.act = "close";\s*\n\s*closeBtn\.dataset\.id = id;/, "the ✕ is delegated too");
   assert.doesNotMatch(sk, /tab-ph-swirl/, "NO swirl: that means 'romp is generating this', a transient");
   assert.doesNotMatch(sk, /stale\.(events|status)/, "the stale session's events/status are never read");
@@ -210,14 +209,15 @@ test("run: render.ts's paneHidden() over window stand-ins says hidden when the p
 test("requestFullSession(id, why): every ask names its why, from the fixed vocabulary", () => {
   // reattach retired with the detached client (T386 stage 2); resync (a delta whose base fingerprint disagreed) and stale-full (the
   // asked full was older than what the page holds, asked once more) joined with the delta base check (chat-resync.ts, 2026-09-23)
-  assert.match(RENDER, /type NeedFullWhy = "gap" \| "nobase" \| "skeleton-click" \| "prefetch" \| "skeleton-delta" \| "resync" \| "stale-full";/);
+  // rest-open (2026-11-15): a tab at rest is shown from the copy the page holds, and its full is asked for (catchUp)
+  assert.match(RENDER, /type NeedFullWhy = "gap" \| "nobase" \| "skeleton-click" \| "prefetch" \| "skeleton-delta" \| "resync" \| "stale-full" \| "rest-open";/);
   assert.match(RENDER, /function requestFullSession\(id: string, why: NeedFullWhy\): void \{\s*\n\s*if \(!id\) return;\s*\n\s*if \(awaitingFull\.has\(id\)\) \{[\s\S]*?\n\s*return;\s*\n\s*\}\s*\n\s*awaitingFull\.add\(id\);\s*\n\s*const ask[\s\S]{0,500}?vscodeApi\?\.postMessage\(ask\);/);   // the latched branch's row is pinned in needfull-latch-hygiene.test.ts (2026-09-19)
   const calls = [...RENDER.matchAll(/requestFullSession\(([^()]*?)\)/g)].map((m) => m[1]).filter((a) => !a.startsWith("id: string"));
   assert.ok(calls.length >= 9, "the gap ×6 (three plus the round-two guards), no-base ×2 (chatTail and update; statusOnly holds a status for its strip instead, 2026-09-11), skeleton-delta ×2, skeleton-click and prefetch sites (the reattach site and a missing chatMore's gap retired with the detached client, T386 stage 2)");
-  for (const c of calls) assert.match(c, /, "(gap|nobase|skeleton-click|prefetch|skeleton-delta|resync|stale-full)"$/, `call site without a why: requestFullSession(${c})`);
+  for (const c of calls) assert.match(c, /, "(gap|nobase|skeleton-click|prefetch|skeleton-delta|resync|stale-full|rest-open)"$/, `call site without a why: requestFullSession(${c})`);
   const why = (w: string) => RENDER.split(`, "${w}")`).length - 1;
   assert.equal(why("gap"), 6); assert.equal(why("nobase"), 2); assert.equal(why("skeleton-delta"), 2); assert.equal(why("reattach"), 0);   // no detached client, no re-attach (T386 stage 2)   // gap ×6: the index tail's, the uuid tail's, a missing chatHead's, plus (round two) upsert's full-frame-desync refusal, the numeric-from history-truncation refusal, and regionsAbsorbTail's short-store re-base (an anchor gone from the transcript; chatMore is retired); nobase ×2: chatTail and update (statusOnly holds a status for its strip instead)
-  assert.equal(why("skeleton-click"), 1); assert.equal(why("prefetch"), 1);
+  assert.equal(why("skeleton-click"), 1); assert.equal(why("prefetch"), 1); assert.equal(why("rest-open"), 1);
   assert.equal(why("resync"), 2, "chatTail's base check: the ask, and the latched ask while one is out"); assert.equal(why("stale-full"), 1, "upsert's one re-ask for an older answer");
 });
 
@@ -456,31 +456,70 @@ test("the relay's reopen forgets that host's loaded record (2026-09-23): a resta
   assert.match(body, /if \(h\) onHostSocketUp\(skeletonTabs, \(sid\) => hostOf\(sid\) === h\);/, "that host's ids alone, on the relay's own open event");
 });
 
-test("a rest frame is taken right behind statusOnly's skeleton branch: the tab becomes a skeleton, the tab on screen re-shows, one strip repaint", () => {
+test("a rest frame marks the copy behind and hides nothing: the tab on screen asks for its full and says it is catching up; a tab with no copy is a skeleton", () => {
   // 2026-11-15: the kernel stops rebuilding a tab no connected page is watching and takes it back with a status frame
   // carrying `rest` (kernel.py _rest_unwatched). The frame is a status frame, so it is delivered in wire order with the
-  // tab's session frames (the shim's FIFO moves neither), and it lands on the page here.
+  // tab's session frames (the shim's FIFO moves neither), and it lands on the page here. The page keeps its copy on show
+  // (the review of the first cut: the loader in its place lasted as long as a large session takes to build).
   assert.match(RENDER, /import \{ onRest \} from "\.\/skeleton-tabs";/);
   const body = RENDER.split("function statusOnly(msg: any) {")[1].split("\n}")[0];
   const code = body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("//"));
-  assert.deepEqual(code.slice(1, 7), [
+  assert.deepEqual(code.slice(1, 13), [
     'if (msg.rest === true && typeof msg.id === "string") {',
-    "onRest(skeletonTabs, msg.id, msg.status);",
+    "const how = onRest(skeletonTabs, msg.id, msg.status, sessions.has(msg.id));",
     "noteHeldStatus(msg.id, msg.status);",
-    "if (msg.id === activeId) showActive();",
+    'if (msg.id === activeId) { if (how === "behind") catchUp(msg.id); else showActive(); }',
     "scheduleRenderTabs();",
     "return;",
-  ], "a tab already a skeleton took the branch above (never loaded here: not at rest); the rest never falls through to the session's own status");
-  // showActive's skeleton branch is what a tab at rest on screen takes: the loader, and the ask (pinned above)
-  assert.match(fn("showActive"), /const skeleton = skeletonTabs\.ids\.has\(activeId\);/);
+    "}",
+    "if (skeletonTabs.rested.has(msg.id)) {",
+    "noteHeldStatus(msg.id, msg.status);",
+    "scheduleRenderTabs();",
+    "if (msg.id === activeId) updateStatusline();",
+    "return;",
+  ], "the rest, then every status after it while the tab rests: laid over the copy's, never replacing it (the short status carries no billing)");
+  // a tab at rest that is shown: the copy paints at once (liveSession hands it over: it is no skeleton), the ask goes
+  const show = fn("showActive");
+  assert.match(show, /skeletonLoading = null;[^\n]*\n\s*if \(activeId && skeletonTabs\.rested\.has\(activeId\)\) catchUp\(activeId\);/,
+    "in the branch that shows a real view, never the loader's");
+  const cu = fn("catchUp");
+  assert.match(cu, /if \(!skeletonTabs\.rested\.has\(id\)\) return;\s*\n\s*requestFullSession\(id, "rest-open"\);\s*\n\s*updateStatusline\(\);/);
+  assert.match(RENDER, /"stale-full" \| "rest-open";/, "the ask's reason is its own");
+  // the line above the message box says so, in the loading line's dress, ahead of the session's own chips
+  const sl = fn("updateStatusline");
+  assert.match(sl, /if \(activeId && skeletonTabs\.rested\.has\(activeId\)\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*const cu = openingLine\(CATCHING_UP\);\s*\n\s*cu\.classList\.add\("catching-up-line"\);\s*\n\s*cu\.title = CATCHING_UP_TITLE;\s*\n\s*sl\.appendChild\(cu\);/);
+  assert.match(RENDER, /const CATCHING_UP = "Catching up";/);
+  assert.match(CSS, /\.catching-up-line \{ margin-right: 10px; white-space: nowrap; \}/);
+  // …and the strip draws a tab at rest as the loaded tab it is: the skeleton tab's title and signature are a skeleton's alone
+  assert.doesNotMatch(fn("makeSkeletonTab"), /rested/);
 });
 
-test("the section view reads a skeleton member from the kernel's status, never from the copy the page still holds", () => {
+test("the section view reads a skeleton member from the kernel's status and a member at rest from its copy, marked behind", () => {
   const sess = fn("snapSessionOf"), led = fn("snapLedgerOf");
+  assert.match(sess, /if \(skeletonTabs\.rested\.has\(id\)\) \{ const held = sessions\.get\(id\); return held \? \{ \.\.\.held, behind: true \} : null; \}/,
+    "at rest: the copy the page holds, its status the kernel's, said to be behind");
   assert.match(sess, /if \(!skeletonTabs\.ids\.has\(id\)\) return sessions\.get\(id\) \?\? null;/, "a loaded member: its session, as before");
-  assert.match(sess, /const st = skeletonTabs\.status\.get\(id\) as Status \| undefined;\s*\n\s*if \(!st\) return null;/, "no status yet: the loading row");
-  assert.match(sess, /status: st, events: \[\], resting: true \};/, "the kernel's status, no tail, marked resting");
-  assert.match(led, /if \(!skeletonTabs\.ids\.has\(id\)\) return ledgers\.get\(id\) \?\? null;/);
-  assert.match(led, /typeof st\.needsYou === "boolean" \? \{ needsInput: st\.needsYou \} : null;/, "needs-you rides the status; the stale ledger's lines are withheld");
+  assert.match(sess, /const st = skeletonTabs\.status\.get\(id\) as Status \| undefined;\s*\n\s*if \(!st\) return null;/, "a skeleton with no status yet: the loading row");
+  assert.match(sess, /status: st, events: \[\], resting: true \};/, "a skeleton: the kernel's status, no tail");
+  assert.match(led, /typeof st\.needsYou === "boolean" \? \{ needsInput: st\.needsYou \} : null;/, "needs-you rides the status; a ledger that is not current gives no lines");
   assert.match(RENDER, /const next = snapshotModel\(head\.head, snapSessionOf, snapLedgerOf, snapModel, \(id\) => tabMeta\.get\(id\) \?\? null\);/);
+});
+
+test("a tab at rest keeps its rich hover, and the hover says which of its rows are the page's own copy", () => {
+  // the tab is a loaded tab on the strip (never a skeleton, whose builder has no tip), so the tip is the session's; its
+  // field rows read the status the kernel keeps current, its Summary and Recent the ledger as of the tab's last full
+  const tip = fn("showTabTip");
+  assert.match(tip, /if \(tabBehind\(s\.id\) && \(lg\?\.summary \|\| recentItems\.length\)\) \{/, "only when a row from the copy is shown");
+  assert.match(tip, /const r = el\("div", "tab-tip-row tab-tip-behind"\);\s*\n\s*const k = el\("span", "tab-tip-k"\); const v = el\("span", "tab-tip-v"\); v\.textContent = TIP_BEHIND_NOTE;/);
+  assert.match(RENDER, /const TIP_BEHIND_NOTE = "Summary and Recent are from when this tab was last open here\.";/);
+  assert.ok(tip.indexOf("tab-tip-behind") > tip.indexOf("tab-tip-recent"), "under the rows it speaks of");
+});
+
+test("a confirm that lists a session's open cards from a copy that is behind says so, and the clear confirm asks even with none listed", () => {
+  // the review of the first cut: the End, restart and clear confirms read ledgers.get(id)?.tree, frozen at the rest
+  assert.match(fn("tabBehind"), /return !!id && \(skeletonTabs\.ids\.has\(id\) \|\| skeletonTabs\.rested\.has\(id\)\);/);
+  assert.match(RENDER, /withBehindNote\(endConfirmDetail\(openTopTitles\(ledgers\.get\(id\)\?\.tree\),\s*\n\s*END_SESSION_STANDING\), tabBehind\(id\)\),/, "the End confirm");
+  assert.match(RENDER, /confirm: \(title, detail, buttons, cb\) => showConfirm\(title, withBehindNote\(detail, tabBehind\(id\)\), buttons, cb\),/, "the restart row's");
+  assert.match(fn("clearDetailBehind"), /if \(!clearing \|\| !tabBehind\(sid\)\) return detail;\s*\n\s*return detail \? withBehindNote\(detail, true\) : CLEAR_BEHIND_DETAIL;/, "the clear's, which asks with nothing listed");
+  assert.match(RENDER, /const asks = clearDetailBehind\(sid, detail, text\);\s*\n\s*if \(asks\) \{\s*\n\s*showConfirm\("Clear this conversation\?", asks,/);
 });

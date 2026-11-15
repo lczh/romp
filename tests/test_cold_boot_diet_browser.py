@@ -778,7 +778,7 @@ class ColdBootDiet(unittest.TestCase):
         self.assertEqual(g["rows"], 2, "its two goals render: %r" % g)
         self.assertEqual((g["nav"], g["acts"]), (0, 0), "no pointer class and no jump action on its mark, text or time: %r" % g)
         self.assertEqual(g["nameUnderline"], "dashed", "the light mark under the name: %r" % g)
-        self.assertIn("its transcript has not been loaded since the restart", g["title"] or "", "the head says why: %r" % g["title"])
+        self.assertIn("its transcript is not loaded right now", g["title"] or "", "the head says why: %r" % g["title"])
         self.assertIsNotNone(sel, "the built session shows a section too")
         self.assertFalse(sel["prov"]); self.assertEqual(sel["rows"], 2)
         self.assertGreaterEqual(sel["acts"], 2, "the built row's mark and text jump: %r" % sel)

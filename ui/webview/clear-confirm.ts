@@ -47,6 +47,17 @@ export function clearConfirmDetail(titles: string[]): string | null {
     + ". Undo on the feed restores the cards, but the agent will no longer remember the work behind them.";
 }
 
+// A LIST THAT MAY BE BEHIND SAYS SO (2026-11-15). The open cards these confirms name come from the page's copy of the
+// session's board, and a tab nobody had open is not kept up to date (the kernel stops rebuilding it): a card opened since
+// would be missing from the warning, silently. So when the tab is behind, the confirm adds one sentence; and the clear
+// confirm, which asks nothing when no card is open, asks all the same, since what is open is not known here yet.
+export const BEHIND_NOTE = "This tab is not up to date here, so a card opened since it was last open may be missing from this list.";
+export const CLEAR_BEHIND_DETAIL = "This tab is still catching up, so the cards open on its board are not known here yet. "
+  + "Clearing drops them with the conversation. Undo on the feed restores the cards, but the agent will no longer remember the work behind them.";
+export function withBehindNote(detail: string, behind: boolean): string {
+  return behind ? detail + " " + BEHIND_NOTE : detail;
+}
+
 // The END confirm's detail (the user 2026-08-15, who ended a session holding an open task and got no
 // warning before its card left the working surfaces): same open-top population as the /clear gate,
 // framed for ending — the cards aren't destroyed (the goal store keeps them; revive brings them back),

@@ -23,6 +23,7 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -160,6 +161,17 @@ class _Base(unittest.TestCase):
         km._PERF_STATS.reset()
 
 
+    def _warm_second(self, joining, *others):
+        """A page that joins a warm kernel: its own connect push hands it every tab whole."""
+        km._clients[:] = list(others) + [joining]
+        km._push([joining], connect=True)
+        joining["_frames"].clear()
+        for c in others:
+            c["_frames"].clear()
+        del self.built[:]
+        km._PERF_STATS.reset()
+
+
 class UnwatchedTabs(_Base):
     def test_01_an_unwatched_tab_whose_transcript_moves_is_not_built_and_its_status_still_updates(self):
         c = self._client(active=S1)
@@ -292,16 +304,6 @@ class UnwatchedTabs(_Base):
         self.assertEqual(self.built, [S2])
         self.assertEqual(self._frames(new, "status"), [])
         self.assertIn(S2, new["echat"])
-
-    def _warm_second(self, joining, *others):
-        """A page that joins a warm kernel: its own connect push hands it every tab whole."""
-        km._clients[:] = list(others) + [joining]
-        km._push([joining], connect=True)
-        joining["_frames"].clear()
-        for c in others:
-            c["_frames"].clear()
-        del self.built[:]
-        km._PERF_STATS.reset()
 
     def test_08_a_prefetch_ask_builds_the_tab_once_and_the_kernel_never_builds_it_again_unasked(self):
         c = self._client(active=S1)
@@ -504,9 +506,356 @@ class UnwatchedTabs(_Base):
             self.assertEqual(len(got), 1, path)
             self.assertEqual(bool(got[0].get("restTabs")), expect, path)
         self.assertIn('(APP==="chat"?"&rest=1":"")', SRC, "the pane shim's dial carries the term for the chat app only")
+        # …and the phone's chat page is the desktop's: one page, served with the phone's layout inside it, on the one shim, so
+        # both say it; no other document of the kernel's dials the chat socket (the shell's own socket is app=shell)
+        page = inspect.getsource(km._chat_page)
+        self.assertIn('_shim("chat", v)', page); self.assertIn("_CHAT_MOBILE_JS", page)
+        self.assertIn("&rest=1", km._shim("chat"))
+        self.assertEqual(SRC.count('new WebSocket(proto+location.host+"/ws?app=%s'), 1, "the shim is the one page-side dialer of a pane's socket")
         self.assertIn('rest:(APP==="chat"?1:0)', SRC, "…and the dial terms a linked machine's relay is dialed with")
         fed = open(os.path.join(os.path.dirname(HERE), "ui", "webview", "federation.ts")).read()
         self.assertIn('if (t.rest) url += "&rest=1";', fed, "the relay's dial states it to the remote kernel")
+
+
+class TheLastFewTabsAPageShowed(_Base):
+    """What a page watches is the last few tabs it showed, not its active tab alone (the same day's second cut). With one
+    watched tab per page, a flip between two sessions took the one left to rest at its next move, and the flip back met the
+    loader and a build on demand, seconds on a large transcript. Each chat client keeps the last ROMP_WATCHED_TABS (four by
+    default) distinct tabs its page activated; all of them go on being built, and a tab leaves the set only when a newer
+    activation displaces it or the socket ends."""
+
+    def setUp(self):
+        super().setUp()
+        self._env = mock.patch.dict(os.environ, {"ROMP_WATCHED_TABS": "2"})   # two, so three sessions can show a displacement
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        super().tearDown()
+
+    def _show(self, c, sid):
+        """The page activates a tab: the message its click sends."""
+        km.Handler._dispatch_ws(_Self(), {"type": "activeTab", "id": sid}, c)
+
+    def _cycle(self, clients, *moved):
+        """Every named session writes, then one pusher cycle. Returns what was built, in order."""
+        del self.built[:]
+        for sid in moved:
+            self._move(sid)
+        km._push(list(clients))
+        return list(self.built)
+
+    def test_30_flipping_between_two_tabs_rests_neither_and_sends_no_skeleton(self):
+        c = self._client()
+        self._warm(c)
+        self._show(c, S1)                                    # A
+        self._show(c, S2)                                    # A -> B
+        self.assertEqual(sorted(self._cycle([c], S1, S2, S3)), [S1, S2], "both are among the last two the page showed: both built; "
+                         "tests, never shown, is not")
+        self._show(c, S1)                                    # B -> A
+        self.assertEqual(sorted(self._cycle([c], S1, S2)), [S1, S2])
+        self._show(c, S2)                                    # and again
+        self.assertEqual(sorted(self._cycle([c], S1, S2)), [S1, S2])
+        self.assertEqual(self._frames(c, "status", S1) + self._frames(c, "status", S2), [], "no status frame: neither went to rest")
+        self.assertEqual([f for f in self._frames(c, "tabOrder") if S1 in (f.get("skeleton") or []) or S2 in (f.get("skeleton") or [])], [],
+                         "no strip ever lists either as a skeleton")
+        self.assertEqual(len(self._frames(c, "chatTail", S1)), 3, "the tab the page left keeps taking its changes as deltas")
+        self.assertEqual(len(self._frames(c, "chatTail", S2)), 3)
+        self.assertEqual(self._frames(c, "session"), [], "and no full frame: a flip paints from the copy the page holds")
+        self.assertIn(S1, c["echat"]); self.assertIn(S2, c["echat"])
+        self.assertEqual(c["recent"], (S1, S2), "the last two it showed, newest last")
+        self.assertEqual(self._chat()["rested"], 1, "tests alone went to rest")
+        self.assertEqual([f.get("rest") for f in self._frames(c, "status", S3)], [True])
+
+    def test_31_the_activation_past_the_count_rests_the_oldest(self):
+        c = self._client()
+        self._warm(c)
+        self._show(c, S1); self._show(c, S2)
+        self.assertEqual(sorted(self._cycle([c], S1, S2, S3)), [S1, S2], "tests was never shown: it rests")
+        self.assertEqual([f.get("rest") for f in self._frames(c, "status", S3)], [True])
+        c["_frames"].clear()
+        self._show(c, S3)                                    # the third distinct tab: web, the oldest, is displaced
+        self.assertEqual(c["recent"], (S2, S3))
+        km.Handler._dispatch_ws(_Self(), {"type": "needFull", "id": S3, "why": "skeleton-click"}, c)   # the page's ask for the tab it opened
+        self.assertEqual(sorted(self._cycle([c], S1, S2, S3)), [S2, S3], "web is not built: nobody is showing it, nor showed it among the last two")
+        self.assertEqual([f.get("rest") for f in self._frames(c, "status", S1)], [True], "it is taken back at its next move")
+        self.assertEqual(self._frames(c, "status", S2), [], "api, the one before, stays")
+        # showing a tab already in the set moves it to the newest place and displaces nothing
+        self._show(c, S2)
+        self.assertEqual(c["recent"], (S3, S2))
+        self.assertEqual(sorted(self._cycle([c], S2, S3)), [S2, S3])
+
+    def test_32_two_pages_keep_separate_sets(self):
+        a, b = self._client(), self._client()                # a laptop and a phone
+        self._warm(a, b)
+        self._show(a, S1); self._show(a, S2)                 # the laptop works web and api
+        self._show(b, S3)                                    # the phone is on tests
+        self.assertEqual((a["recent"], b["recent"]), ((S1, S2), (S3,)))
+        self.assertEqual(sorted(self._cycle([a, b], S1, S2, S3)), [S1, S2, S3], "each page's set keeps its tabs built for both")
+        self.assertEqual(self._frames(a, "status") + self._frames(b, "status"), [])
+        self._show(b, S1); self._show(b, S2)                 # the phone moves on: ITS third and fourth tabs displace tests
+        self.assertEqual((a["recent"], b["recent"]), ((S1, S2), (S1, S2)), "the laptop's set is its own activations alone")
+        self.assertEqual(sorted(self._cycle([a, b], S1, S2, S3)), [S1, S2], "no page showed tests among its last two")
+        for c in (a, b):
+            self.assertEqual([f.get("rest") for f in self._frames(c, "status", S3)], [True])
+
+    def test_33_a_page_disconnecting_takes_its_set_with_it(self):
+        a, b = self._client(), self._client()
+        self._warm(a, b)
+        self._show(a, S1)
+        self._show(b, S2); self._show(b, S3)
+        self.assertEqual(sorted(self._cycle([a, b], S1, S2, S3)), [S1, S2, S3])
+        km._clients[:] = [a]                                 # the phone's socket ended: its record, and its set, are gone
+        a["_frames"].clear()
+        self.assertEqual(self._cycle([a], S1, S2, S3), [S1], "only what the page still connected watches")
+        self.assertEqual(sorted(f["id"] for f in self._frames(a, "status") if f.get("rest")), [S2, S3])
+        # a socket that dials again starts its set from the tab its dial names
+        got = []
+        real_reg, real_recv = km._register_ws_client, km._ws_recv
+        km._register_ws_client = lambda c: (got.append(c), km._clients.append(c))
+        km._ws_recv = lambda rfile: (0x8, b"", True)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                km.Handler._ws(_fake_self("/ws?app=chat&delta=1&iid=page-9&rest=1&active=%s" % S3))
+        finally:
+            km._register_ws_client, km._ws_recv = real_reg, real_recv
+            for c in got:
+                if c in km._clients:
+                    km._clients.remove(c)
+        self.assertEqual((got[0].get("active"), got[0].get("recent")), (S3, (S3,)))
+
+    def test_34_an_activation_that_names_no_tab_displaces_nothing(self):
+        c = self._client()
+        self._warm(c)
+        self._show(c, S1); self._show(c, S2)
+        for none in (None, ""):                              # a page showing no tab; a relay whose page moved to another machine's tab
+            self._show(c, none)
+            self.assertEqual(c["recent"], (S1, S2))
+        self.assertFalse(c.get("active"))
+        self.assertEqual(sorted(self._cycle([c], S1, S2, S3)), [S1, S2], "the tabs it last showed stay watched; the rest may rest")
+        self.assertEqual([f.get("rest") for f in self._frames(c, "status", S3)], [True], "it has named tabs: it is not taken to watch all it holds")
+
+    def test_35_the_count_is_a_constant_with_an_environment_override_and_perf_reports_it(self):
+        self.assertEqual(km.WATCHED_TABS, 4)
+        self.assertEqual(km._watched_tabs(), 2, "this class's override")
+        self.assertEqual(self._chat()["watchedTabs"], 2, "/perf says the count in force")
+        for raw, want in (("8", 8), ("1", 1), ("", 4), ("0", 4), ("-3", 4), ("four", 4)):
+            with mock.patch.dict(os.environ, {"ROMP_WATCHED_TABS": raw}):
+                self.assertEqual(km._watched_tabs(), want, raw)
+        with mock.patch.dict(os.environ, {"ROMP_WATCHED_TABS": "1"}):   # one: the page's active tab alone, the first cut's rule
+            c = self._client()
+            self._warm(c)
+            self._show(c, S1); self._show(c, S2)
+            self.assertEqual(c["recent"], (S2,))
+            self.assertEqual(self._cycle([c], S1, S2), [S2])
+            self.assertEqual([f.get("rest") for f in self._frames(c, "status", S1)], [True])
+        doc = open(os.path.join(os.path.dirname(HERE), "docs", "reference.md"), encoding="utf-8").read()
+        self.assertIn("`ROMP_WATCHED_TABS`", doc); self.assertIn("`watchedTabs`", doc)
+
+
+class AfterTheReview(_Base):
+    """The findings of the independent review of the first cut, and the cases it did not exercise."""
+
+    def test_40_a_socket_that_never_said_ready_and_holds_nothing_keeps_no_tab_built(self):
+        # a bare chat socket (a monitor, a lab's stand-in) names no tab and holds nothing. Read as a page that has not said
+        # what it shows, it kept every tab built for as long as it stayed open
+        c = self._client(active=S1)
+        self._warm(c)
+        bare = {"app": "chat", "alive": True, "sent": {}, "send": lambda s: None, "handshake": False}   # as _new_ws_client makes it
+        km._clients[:] = [c, bare]
+        self._move(S2)
+        km._push([c, bare])
+        self.assertEqual(self.built, [], "nobody watches api, and the bare socket is owed nothing until it says ready")
+        self.assertEqual([f.get("rest") for f in self._frames(c, "status", S2)], [True])
+        self.assertNotIn(S2, bare.get("skeleton") or (), "nothing is taken from it or given to it")
+        # the same socket with the dial's hint watches that tab, as any page's does
+        bare["active"] = S3
+        self._move(S3)
+        km._push([c, bare])
+        self.assertEqual(self.built, [S3])
+        # …and a page past its ready that names no tab but holds none of this tab is handed it (unserved), not read as watching
+        self.assertEqual(km._rest_blocker_locked({"app": "chat", "sent": {}}, S2), "unserved")
+        self.assertEqual(km._rest_blocker_locked({"app": "chat", "sent": {}, "echat": {S2: ("u", 1)}}, S2), "unreported", "one that HOLDS it is")
+
+    def test_41_a_client_that_cannot_take_a_tab_back_is_said_once_in_the_problem_center_by_its_kind(self):
+        said = []
+        real = km._sdk_problem
+        km._sdk_problem = said.append
+        try:
+            old = self._client(active=S1, restTabs=False)
+            self._warm(old)
+            for _ in range(3):
+                self._move(S2); self._move(S3)
+                km._push([old])
+            self.assertEqual(len(said), 1, "one line for the socket, however many tabs and cycles: %r" % said)
+            self.assertIn("a chat page loaded before this build", said[0])
+            self.assertIn("rebuilds every tab it holds on each refresh until that page is reloaded or closed", said[0])
+            ext = self._client(active=S1, restTabs=False, ext=True)          # the VS Code extension host's dial (client=ext)
+            relay = self._client(active=S1, restTabs=False, kind="relay")    # a linked machine's page from before this build
+            for c in (ext, relay):
+                self._warm_second(c)
+                km._clients[:] = [c]
+                self._move(S2)
+                km._push([c])
+            self.assertEqual(len(said), 3)
+            self.assertIn("the VS Code chat panel", said[1]); self.assertIn("until that panel is closed", said[1])
+            self.assertIn("a chat page on a linked machine loaded before this build", said[2])
+        finally:
+            km._sdk_problem = real
+        got = []
+        real_reg, real_recv = km._register_ws_client, km._ws_recv
+        km._register_ws_client = lambda c: (got.append(c), km._clients.append(c))
+        km._ws_recv = lambda rfile: (0x8, b"", True)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                km.Handler._ws(_fake_self("/ws?app=chat&wid=w1&client=ext&delta=1"))
+        finally:
+            km._register_ws_client, km._ws_recv = real_reg, real_recv
+            for c in got:
+                if c in km._clients:
+                    km._clients.remove(c)
+        self.assertIs(got[0].get("ext"), True, "the handshake remembers the extension host's dial")
+
+    def test_42_the_machines_billing_reads_are_taken_once_per_push_for_every_resting_tab(self):
+        calls = {"both": 0, "acct": 0, "login": 0}
+        saved = (km._auth_both, km._claude_account_label, km._claude_login_display)
+        km._auth_both = lambda: calls.__setitem__("both", calls["both"] + 1) or False
+        km._claude_account_label = lambda: calls.__setitem__("acct", calls["acct"] + 1) or "dev@example.com"
+        km._claude_login_display = lambda: calls.__setitem__("login", calls["login"] + 1) or "dev@example.com · Example Org"
+        try:
+            km._live_scope.auth = {}                         # a push's scope, as the pusher's cycle and a connect push open it
+            rows = [{"authLabel": ""}, {"authLabel": "Work"}] * 40   # eighty resting tabs' rows
+            km._light_billing(rows[0])
+            first = dict(calls)                              # the push's one take (the availability read takes the account's label once more, itself once a push)
+            got = [km._light_billing(r) for r in rows]
+            self.assertEqual(calls, first, "eighty more tabs, not one more read")
+            self.assertEqual(calls["both"], 1)
+            self.assertEqual((got[0]["authLabel"], got[1]["authLabel"]), ("dev@example.com · Example Org", "Work"),
+                             "a row with a label of its own keeps it; the rest show the machine's login")
+            self.assertEqual({g["authAcct"] for g in got}, {"dev@example.com"})
+            km._live_scope.auth = None                       # outside a push (the per-session push): read fresh
+            km._light_billing(rows[0]); km._light_billing(rows[0])
+            self.assertEqual(calls["both"], 3, "two more calls, two more reads")
+        finally:
+            km._live_scope.auth = None
+            km._auth_both, km._claude_account_label, km._claude_login_display = saved
+        self.assertIn("**_light_billing(tm)}", inspect.getsource(km._light_status), "the short status takes its machine half from there")
+
+    def test_43_a_click_on_a_second_tab_does_not_wait_for_the_build_the_first_click_asked_for(self):
+        # a needFull's build ran on the socket's lane, so the lane stood still for its length: seconds for a large tab at
+        # rest, and a click on another tab meanwhile waited behind it
+        c = self._client(active=S1)
+        self._warm(c)
+        self._move(S2); self._move(S3)
+        km._push([c])                                        # api and tests at rest
+        c["_frames"].clear()
+        import threading
+        gate, started = threading.Event(), threading.Event()
+        real = km.build_session
+
+        def slow(sid, now, live_map=None, **kw):
+            if sid == S2:                                    # the first tab is large: its build takes as long as the test lets it
+                started.set()
+                gate.wait(20)
+            return real(sid, now, live_map, **kw)
+        km.build_session = slow
+        lane = km._ws_arm_lane(c)
+        try:
+            put = lambda msg: km._lane_put(lane, msg["type"], lambda: km.Handler._dispatch_ws(_Self(), msg, c))
+            put({"type": "activeTab", "id": S2}); put({"type": "needFull", "id": S2, "why": "rest-open"})
+            self.assertTrue(started.wait(10), "the first click's build is under way")
+            put({"type": "activeTab", "id": S3}); put({"type": "needFull", "id": S3, "why": "rest-open"})   # the reader moved on
+            deadline = time.time() + 10
+            while time.time() < deadline and not self._frames(c, "session", S3):
+                time.sleep(0.02)
+            self.assertEqual(len(self._frames(c, "session", S3)), 1, "the second tab's full is out while the first is still building")
+            self.assertEqual(self._frames(c, "session", S2), [], "…which it still is")
+            self.assertEqual(c.get("active"), S3, "the lane took the second click's activeTab: no build holds it")
+            gate.set()
+            deadline = time.time() + 10
+            while time.time() < deadline and not self._frames(c, "session", S2):
+                time.sleep(0.02)
+            self.assertEqual(len(self._frames(c, "session", S2)), 1, "the first ask is still answered: the page keeps it latched until then")
+        finally:
+            gate.set()
+            km._lane_close(c)
+            c.pop("lane", None); c.pop("closing", None)
+            deadline = time.time() + 5
+            while time.time() < deadline and (c.get("repairs") or {}).get("running"):
+                time.sleep(0.02)
+
+    def test_44_an_ask_for_a_tab_the_page_moved_away_from_waits_behind_the_one_it_shows_now(self):
+        c = self._client(active=S1)
+        self._warm(c)
+        order = []
+        handler = type("H", (), {"_push_one": lambda self, client, only=None: order.append(sorted(only)[0])})()
+        c["lane"] = {}                                       # a socket with a lane: its asks go to its repairs
+        c["repairs"] = {"pending": [], "running": 1, "building": {S1}}   # one thread is building web already
+        try:
+            c["active"] = S3
+            km._repair_ask(handler, c, S2)                   # an ask for a tab the page is not showing: it waits
+            self.assertEqual((c["repairs"]["pending"], c["repairs"]["running"]), ([S2], 1), "no second thread for it")
+            km._repair_ask(handler, c, S2)
+            self.assertEqual(c["repairs"]["pending"], [S2], "asked twice, built once")
+            km._repair_ask(handler, c, S3)                   # the tab on screen: a second thread, and it goes first
+            deadline = time.time() + 5
+            while time.time() < deadline and len(order) < 2:
+                time.sleep(0.02)
+            self.assertEqual(order, [S3, S2], "the tab the page shows now, then the one it left: none is dropped")
+        finally:
+            c.pop("lane", None)
+
+    def test_45_a_session_that_dies_while_its_tab_rests_is_built_once_for_its_last_word(self):
+        c = self._client(active=S1)
+        self._warm(c)
+        self._move(S2)
+        km._push([c])                                        # at rest, its status from the live row
+        c["_frames"].clear()
+        self.live.pop(S2)                                    # the session ended in place: no live row to state a status from
+        for _ in range(3):
+            km._push([c])
+        self.assertEqual(self.built, [S2], "the kernel cannot state its status without a build: built, once")
+        st = self._frames(c, "status", S2)
+        self.assertEqual(len(st), 1, "the page's chip gets the built status: %r" % st)
+        self.assertNotIn("provisional", st[0]["status"])
+        self.assertEqual(self._frames(c, "session", S2) + self._frames(c, "chatTail", S2), [], "and still no chat frame it did not ask for")
+        # a crash that takes the tab off the strip forgets it whole: the cached build, the baseline, the settling mark
+        km._chat_rest_retried.add(S2)
+        real = km._chat_tab_sessions
+        km._chat_tab_sessions = lambda now, live_map: [r for r in real(now, live_map) if r["sid"] != S2]
+        try:
+            km._push([c])
+        finally:
+            km._chat_tab_sessions = real
+        self.assertNotIn(S2, km._built_chat); self.assertNotIn(S2, km._chat_rest_retried)
+        self.assertNotIn(S2, c.get("skeleton") or ())
+
+    def test_46_the_needs_you_mark_and_count_and_held_mail_reach_a_resting_tab_without_a_build(self):
+        # the ring a tab wears when a card of its session needs you is the feed's verdict, a membership read: a question the
+        # agent stopped on, a held message from a peer waiting for approval. It rides the short status every cycle
+        c = self._client(active=S1)
+        self._warm(c)
+        self._move(S2)
+        km._push([c])
+        verdict = {"needs": False, "count": 0}
+        saved = (km._feed_needs_input_of, km._feed_needs_input_count_of)
+        km._feed_needs_input_of = lambda sid: verdict["needs"] if sid == S2 else False
+        km._feed_needs_input_count_of = lambda sid: verdict["count"] if sid == S2 else 0
+        try:
+            km._push([c])
+            c["_frames"].clear()
+            for needs, count, want in ((True, 1, (True, 1)),     # a peer's message is held for approval: one thing needs you
+                                       (True, 3, (True, 3)),     # two more questions since
+                                       (False, 0, (False, 0))):  # all answered
+                verdict.update(needs=needs, count=count)
+                self._move(S2)
+                km._push([c])
+                st = self._frames(c, "status", S2)[-1]["status"]
+                self.assertEqual((st["needsYou"], st["needsYouCount"]), want)
+            self.assertEqual(self.built, [], "three changes of the mark, no build")
+            self.assertEqual(len(self._frames(c, "status", S2)), 3, "one status frame per change")
+        finally:
+            km._feed_needs_input_of, km._feed_needs_input_count_of = saved
 
 
 class WhatNeverReadABackgroundBuild(_Base):

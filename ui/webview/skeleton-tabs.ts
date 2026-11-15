@@ -15,22 +15,25 @@
 // skeleton id must never do is DISPLAY that stale copy as current — so render.ts asks this set before every
 // active-tab display path (`liveSession`) and before drawing a tab (`renderKind`).
 //
-// A tab at REST (2026-11-15). A reconnect is no longer the only way into the set: the kernel stops rebuilding a tab no
-// connected page is watching, and when such a tab's transcript moves it takes the tab BACK from every page that had
-// loaded it, with a `status` frame that carries `rest: true` (kernel.py _rest_unwatched). From that frame on this
-// page's copy is behind, so the tab is a skeleton again: drawn from the kernel's status frames, loaded on the click.
-// `rested` records which skeletons came that way, for two rules of their own. They stay skeletons until their FULL
-// arrives, whatever a strip's list says (the federated merge can re-present a list copied before the rest, and the
-// loaded-on-this-socket filter below would otherwise refuse the kernel's own re-listing). And the idle prefetch
-// leaves them to the click (nextPrefetch): a session that is working goes behind again as soon as it is fetched, so
-// fetching it in idle would rebuild every tab nobody is watching, over and over, which is what the kernel stopped.
+// A tab at REST (2026-11-15). The kernel stops rebuilding a tab no connected page is watching, and when such a tab's
+// transcript moves it takes the tab BACK from every page that had loaded it, with a `status` frame that carries
+// `rest: true` (kernel.py _rest_unwatched): it will send this page no chat frame for the tab until the page asks.
+// The page KEEPS the copy it holds and does not hide it (the review of the first cut: the copy used to paint at once,
+// and a loader in its place for the ten seconds a large session takes to build traded one slowness for another).
+// `rested` records that the copy is BEHIND. A rested tab is not a skeleton: the strip draws it as the loaded tab it is,
+// from the copy and the kernel's status frames laid over it, and opening it shows the copy at once, says it is
+// catching up, and asks for the full, which replaces the copy in place (render.ts). Two rules follow for this module.
+// A strip's `skeleton` list names a rested tab (the kernel holds it as one), and it is never adopted from there while
+// the page holds its copy. And the idle prefetch never asks for it: a session that is working goes behind again as
+// soon as it is fetched, so fetching it in idle would rebuild every tab nobody is watching, over and over, which is
+// what the kernel stopped. A tab the page holds NO copy of when the frame lands is a skeleton like any other.
 
 export interface SkeletonState {
   ids: Set<string>;            // the tabs this page holds no CURRENT copy of (the kernel is withholding them)
   order: string[];             // the kernel's list order — ascending transcript size, the prefetch order
   status: Map<string, any>;    // the last kernel-sent status per skeleton id (the chip reads ONLY this)
   loaded: Set<string>;         // ids whose full `session` frame arrived on THIS socket (see applyTabOrderSkeleton)
-  rested: Set<string>;         // skeleton ids the kernel took back after this page had loaded them (see onRest)
+  rested: Set<string>;         // ids whose copy the page holds and the kernel took back: behind, shown, never in `ids` (see onRest)
 }
 
 export function newSkeletonState(): SkeletonState {
@@ -64,17 +67,12 @@ export function applyTabOrderSkeleton(st: SkeletonState, skeleton: unknown, orde
     for (const id of skeleton) {
       // …so a listed skeleton the order lacks (a session that ended before it loaded) is never adopted — the idle
       // prefetch would otherwise ask the kernel for a session it can no longer send (review find 2026-09-07)
-      if (typeof id === "string" && id && keep.has(id) && !seen.has(id) && !st.loaded.has(id)) { seen.add(id); next.push(id); }
+      // …nor a tab at rest (2026-11-15): the kernel lists it, and the page shows the copy it holds (see the header)
+      if (typeof id === "string" && id && keep.has(id) && !seen.has(id) && !st.loaded.has(id) && !st.rested.has(id)) { seen.add(id); next.push(id); }
     }
   } else {
     next = beforeOrder.filter((id) => keep.has(id) && before.has(id));
   }
-  // …and a tab at rest stays in the set until its full arrives or the tab is torn down (onRest, onFull, onDismiss): a
-  // list that lacks it is a copy from before the rest, never the kernel releasing it, since the kernel releases a tab
-  // only by sending its full. Kept even when this frame's order omits the id: the pane keeps a live tab the order
-  // drops for a moment (a transient read failure, render.ts applyTabOrder), and that tab must not turn back into a
-  // loaded one over a copy that is behind.
-  for (const id of st.rested) if (!next.includes(id)) next.push(id);
   st.ids = new Set(next);
   st.order = next;
   for (const id of Array.from(st.status.keys())) if (!st.ids.has(id)) st.status.delete(id);
@@ -105,21 +103,23 @@ export function holdStatus(st: SkeletonState, id: string, status: unknown): void
   st.status.set(id, status);
 }
 
-/** A {type:"status"} frame that carries `rest: true` (2026-11-15): the kernel took back a tab this page had loaded,
- *  because its transcript moved while no connected page was watching it, and will send it no chat frame until a page
- *  asks. The id joins the set (at the end of the order: the prefetch never reaches it), its status is stored for the
- *  chip, and its loaded record goes, so the kernel's own re-listing on the next strip is taken. Returns whether the id
- *  was NOT a skeleton before, so the caller re-shows the tab when it is the one on screen. Status frames are delivered
- *  in wire order with the session frames (the shim's FIFO moves neither), so this frame is never older than a full
- *  this page has already applied. */
-export function onRest(st: SkeletonState, id: string, status: unknown): boolean {
-  st.rested.add(id);
+/** A {type:"status"} frame that carries `rest: true` (2026-11-15): the kernel took back a tab it had sent this page
+ *  whole, because its transcript moved while no connected page was watching it, and will send it no chat frame until
+ *  the page asks. `held` says whether the page holds the tab's copy. Held: the copy is behind from this frame on, and
+ *  the id joins `rested` and nothing else (it stays a loaded tab; a strip's list naming it is not adopted). Not held
+ *  (the frame outran the session's, or the page dropped it): the id is a skeleton like any other, to be fetched in
+ *  idle or on its click. Returns "behind" or "skeleton" accordingly. Status frames are delivered in wire order with
+ *  the session frames (the shim's FIFO moves neither), so this frame is never older than a full the page has applied. */
+export function onRest(st: SkeletonState, id: string, status: unknown, held: boolean): "behind" | "skeleton" {
+  if (held) {
+    st.rested.add(id);
+    if (st.ids.delete(id)) { st.order = st.order.filter((x) => x !== id); st.status.delete(id); }
+    return "behind";
+  }
   st.loaded.delete(id);
   st.status.set(id, status);
-  if (st.ids.has(id)) return false;
-  st.ids.add(id);
-  st.order = st.order.filter((x) => x !== id).concat(id);
-  return true;
+  if (!st.ids.has(id)) { st.ids.add(id); st.order = st.order.filter((x) => x !== id).concat(id); }
+  return "skeleton";
 }
 
 /** A full `session` frame landed (upsert): the id is loaded, its skeleton entry and stored status go.
@@ -127,7 +127,7 @@ export function onRest(st: SkeletonState, id: string, status: unknown): boolean 
  *  append to the hidden one. Also records the id as loaded on this socket (see applyTabOrderSkeleton). */
 export function onFull(st: SkeletonState, id: string): boolean {
   st.loaded.add(id);
-  st.rested.delete(id);   // the full is the answer: the copy is current again
+  st.rested.delete(id);   // the full is the answer: the copy the page holds is current again
   const held = st.ids.delete(id);
   if (!held) return false;
   st.order = st.order.filter((x) => x !== id);
@@ -170,10 +170,10 @@ export function onHostSocketUp(st: SkeletonState, admits: (id: string) => boolea
  *  when nothing is left. Otherwise the first id of the kernel's order still held, not the active tab (its own
  *  click path asks), and in the current view (a view-hidden tab loads on click instead).
  *
- *  Never a tab at REST (`rested`, 2026-11-15): this page loaded it once and the kernel took it back when it moved
- *  with nobody watching. The prefetch fetches a tab the page has never held, once; a tab that went behind after
- *  loading waits for the click. That is the bound on what the chain can make the kernel build: at most one build
- *  per tab per page load, one in flight at a time, and none for a tab it has already filled.
+ *  Never a tab at REST (`rested`, 2026-11-15): it is not in the set at all (the page shows the copy it holds), and the
+ *  check below stands for a caller that put it there. The prefetch fetches a tab the page has never held, once; a tab
+ *  that went behind after loading is brought up to date when it is opened. That is the bound on what the chain can
+ *  make the kernel build: at most one build per tab per page load, one in flight at a time.
  *
  *  `reachable` (2026-10-11): whether the socket that would answer an ask for this id is open (a linked machine's relay;
  *  this page's own kernel always is). An unreachable id is neither fetched nor counted as in flight: before, a relay that

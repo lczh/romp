@@ -88,6 +88,7 @@ function page() {
     const composerRestingPlaceholder = () => ${JSON.stringify(RESTING)};
     const liveSession = () => undefined, registerOptimistic = () => {}, previewKind = () => null;
     const isClearCmd = () => false, isNewCmd = () => false, clearConfirmDetail = () => null, openTopTitles = () => [], ledgers = new Map();
+    const clearDetailBehind = (sid, detail) => detail;   // no tab in this world is at rest
     const openMcpPanel = () => {}, showConfirm = () => { throw new Error("no dialog in this world"); }, endReloadHoldIfIdle = () => {};
     const vscodeApi = { postMessage: () => { throw new Error("a send leaves by flushStaged or the question's path in this world"); } };
     const pendingRewind = new Map(), reconcileRewind = () => {}, appendActive = () => {};
