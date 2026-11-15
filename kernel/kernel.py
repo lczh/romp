@@ -20182,6 +20182,22 @@ def _env_error(env, auth=""):
     return ""
 
 
+_SPEED_PICKS = ("standard", "fast")   # POST /new's "speed" (`romp new --speed`): the backend's SPEED_PICKS, which loads
+#                                       lazily inside _sdk(), so the door keeps its own copy (tests/test_new_session_speed.py
+#                                       pins the two together, as ValidatorLockstep pins _env_error)
+_SPEED_NEEDS_SDK = "a speed pick needs a Claude Code session: %s has no fast mode"
+
+
+def _speed_error(speed):
+    """Why POST /new's "speed" is not a speed -- "" when it is. Validated at the door, before anything is created: a
+    value outside the two refuses the WHOLE request (fail loudly), never a session started at a speed nobody asked
+    for. Absent and null mean "not asked", as for env; every other value comes through here, so falsy junk (false, 0,
+    "") is a 400 and not a quiet "not asked"."""
+    if isinstance(speed, str) and speed in _SPEED_PICKS:
+        return ""
+    return 'speed must be "standard" or "fast" (got %r)' % (speed,)
+
+
 def _apply_new_session_prefs(sid, body):
     """POST /new's optional per-spawn "model"/"effort" (the user 2026-08-14) and "env": applied through the SAME
     park-aware setters as the dashboard's setModel/setEffort ops, and echoed back so the caller can be
@@ -20199,15 +20215,25 @@ def _apply_new_session_prefs(sid, body):
     the backstop for direct callers. A level the backend REFUSES (a Codex model whose catalog does not
     offer it, an SDK level outside its list) is echoed as `refused`, the setter's own sentence, never as
     `effort`: the setter's verdict used to be dropped here, so `romp new --effort` printed the level as
-    applied and exited 0 while nothing changed."""
+    applied and exited 0 while nothing changed.
+
+    "speed" (`romp new --speed standard|fast`, the user 2026-11-15, who wanted a session's speed chosen where it is
+    created) is the one pref that does NOT go through a park-aware setter: _set_fast_or_park parks a "/fast" chip in
+    the session's queue whenever a turn is open or the account is held, and its drain may send the literal text,
+    while this door types nothing into a conversation. It is the session's own pick, written by the backend's
+    set_speed_pick: on a fresh spawn a registry write the first connect reads (no session object exists yet, so the
+    first launch already runs at that speed); on a name that already runs, taken only where nothing has to be sent
+    and otherwise echoed as `refused` in the backend's own sentence, which names the Fast badge."""
     out = {}
     m = str((body or {}).get("model") or "").strip()
     e = str((body or {}).get("effort") or "").strip()
     ev = (body or {}).get("env")
     ev = ev if isinstance(ev, dict) else None
+    sp = (body or {}).get("speed")
+    sp = sp if isinstance(sp, str) and sp in _SPEED_PICKS else ""   # the door refused anything else (_speed_error)
     # an EXPLICIT {} is asked (the clear-all declaration — set_env replaces, so {} clears);
     # only an absent/non-dict env is "not asked".
-    if not (m or e) and ev is None:
+    if not (m or e or sp) and ev is None:
         return out
     try:
         be = Sessions.backend_for(str(sid))
@@ -20236,6 +20262,14 @@ def _apply_new_session_prefs(sid, body):
             # caller is loud, and stderr says so once, as the typed route does, with the door named
             out["refused"] = " ".join(x for x in (out.get("refused"), _effort_refusal(be, e)) if x)   # after a model refusal, both
             sys.stderr.write("effort %r for %s refused by %s (POST /new)\n" % (e, sid, type(be).__name__))
+    if sp:
+        _pick = getattr(be, "set_speed_pick", None)   # the door refused a Codex target; this is the direct caller's backstop
+        why = _pick(str(sid), sp) if _pick is not None else _SPEED_NEEDS_SDK % "this session's backend"
+        if why:
+            out["refused"] = " ".join(x for x in (out.get("refused"), "Couldn't set speed '%s': %s." % (sp, why)) if x)
+            sys.stderr.write("speed %r for %s refused (POST /new): %s\n" % (sp, sid, why))
+        else:
+            out["speed"] = sp
     if ev is not None and hasattr(be, "set_env"):
         _set_env_or_park(be, str(sid), dict(ev))
         out["env"] = dict(ev)
@@ -90244,7 +90278,9 @@ class Handler(BaseHTTPRequestHandler):
                 # plus optional "model"/"effort" (full ids/levels, applied park-aware and echoed back;
                 # also applied on the existing:true open, so a re-brief re-asserts them — see
                 # _apply_new_session_prefs) and optional "env" (a NAME→value map of per-session env
-                # vars, the user 2026-08-17: born into the SDK spawn, re-asserted the same way).
+                # vars, the user 2026-08-17: born into the SDK spawn, re-asserted the same way) and
+                # "speed" ("standard" or "fast": the session's own fast-mode pick, written before the
+                # first connect and typed into no conversation).
                 # Same validation and the same no-silent-fallback rule as the WS op: when the SDK
                 # backend is unavailable, say so (ok:false + reason), never a session of a backend the
                 # caller did not ask for. An already-live name is a success (idempotent open), not an error.
@@ -90271,6 +90307,16 @@ class Handler(BaseHTTPRequestHandler):
                     eerr = _env_error(env_req, str((b or {}).get("auth") or ""))
                     if eerr:
                         return self._send(400, json.dumps({"ok": False, "error": eerr}),
+                                          "application/json")
+                # `speed` (`romp new --speed standard|fast`, the user 2026-11-15): the speed the session is
+                # created with, written as its own fast-mode pick before the first connect
+                # (_apply_new_session_prefs). Validated HERE like env: a value outside the two refuses the
+                # WHOLE request, so nothing is created at a speed nobody asked for.
+                speed_req = (b or {}).get("speed")
+                if speed_req is not None:
+                    serr = _speed_error(speed_req)
+                    if serr:
+                        return self._send(400, json.dumps({"ok": False, "error": serr}),
                                           "application/json")
                 # `parent` + `tags` (tab groups on tags, the user 2026-09-04): the new session inherits
                 # its parent's tag memberships (`romp new` sends its own ROMP_SID as parent) and joins
@@ -90318,6 +90364,17 @@ class Handler(BaseHTTPRequestHandler):
                             return self._send(200, json.dumps({"ok": False, "error":
                                 'per-session env needs a Claude Code session — "%s" runs on the Codex backend, '
                                 "which takes no per-session environment" % nm}), "application/json")
+                    if speed_req is not None:
+                        # fast mode is Claude Code's: a live Codex session has no speed to pick, and the ask
+                        # is refused whole, before any other pref is re-asserted, rather than dropped
+                        try:
+                            _spbe = Sessions.backend_for(live[nm])
+                        except Exception:
+                            _spbe = None
+                        if not hasattr(_spbe, "set_speed_pick"):
+                            return self._send(200, json.dumps({"ok": False, "error":
+                                _SPEED_NEEDS_SDK % ('"%s" runs on the Codex backend, which' % nm)}),
+                                "application/json")
                     extra = _apply_new_session_prefs(live[nm], b)
                     # the idempotent open never INHERITS (no creation event — the ruling), but an
                     # explicit --in re-asserts like model/effort/env do, and the echo tells the truth
@@ -90363,6 +90420,10 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(200, json.dumps({"ok": False, "error":
                             "per-session env needs a Claude Code session — a Codex session runs on the "
                             "shared app-server and takes no per-session environment"}), "application/json")
+                    if speed_req is not None:
+                        # no Codex session is created at a speed it cannot run at: refused before the create
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            _SPEED_NEEDS_SDK % "a Codex session"}), "application/json")
                     # parent/tags ride the create like the SDK arm's (the tag store is backend-
                     # agnostic), so the echo below carries the same `tags` the CLI checks
                     sid, extra = _create_codex_session(nm, cwd, parent=psid, tags=tags_req)
