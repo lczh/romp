@@ -8,6 +8,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { chipStops } from "./status-chip";
+import { apiCardLine, SUPPRESSED_LINE } from "./api-card-line";
 
 const R = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 
@@ -31,8 +32,12 @@ test("the auto-retry tick SKIPS a thread the user interrupted (retrySuppressed),
 });
 
 test("a suppressed thread's card says WHY it isn't retrying (distinct from the global pause)", () => {
-  // initial render on the card
-  assert.match(R, /else if \(suppressed\) countdown\.textContent = "auto-retry stopped for this session — send a message to resume"/);
-  // and the live countdown tick keeps that message instead of a fake "retrying in Ns"
-  assert.match(R, /if \(active\?\.status\.retrySuppressed\) \{\s*\n\s*cd\.textContent = "auto-retry stopped for this session/);
+  // the card's line has one decider for its render, the tick and the Stop/Resume-all flip (api-card-line.ts,
+  // 2026-11-15), so the live tick keeps this message instead of a fake "retrying in Ns", and so does a Resume
+  const off = { paused: false, resumeAt: null, reason: "" }, now = Date.now();
+  assert.equal(SUPPRESSED_LINE, "auto-retry stopped for this session — send a message to resume");
+  assert.equal(apiCardLine({ retrySuppressed: true }, off, undefined, now), SUPPRESSED_LINE);
+  assert.equal(apiCardLine({ retrySuppressed: true }, off, now + 7_000, now), SUPPRESSED_LINE, "a retry time left on the books is no countdown");
+  assert.equal(apiCardLine({ retrySuppressed: true }, { paused: true, resumeAt: null, reason: "" }, undefined, now),
+    "auto-retry off (global)", "distinct from the global pause, whose line leads while it holds");
 });

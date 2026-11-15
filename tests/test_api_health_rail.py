@@ -498,7 +498,7 @@ class Wiring(unittest.TestCase):
         self.assertIn('_set_retry_paused(True, reason="limit")', inspect.getsource(km._auto_pause_on_limit))
 
     def test_the_global_retry_paused_frame_still_carries_the_reason(self):
-        # the chat card's paused line reads `reason` off the globalRetryPaused frame (render.ts retryPausedText
+        # the chat card's paused line reads `reason` off the globalRetryPaused frame (api-card-line.ts retryPausedText
         # checks spend first and otherwise renders the resumeAt countdown, so a latched "limit" reason draws the
         # countdown exactly as an unlabeled limit pause did); the latch changes the file, not the frame
         src = Path(BIN, "romp-kernel").read_text()

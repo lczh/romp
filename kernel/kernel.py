@@ -12654,8 +12654,21 @@ _RETRY_PAUSE_SEQ = [0]
 _retry_pause_read_fault_said = [""]   # the writer's read fault said this episode (its errno text); a clean read or the
 #                                       file's absence ends it, with one line, so a fault that spans cycles is not a line a pass
 
+_RETRY_PAUSE_STILL = [None]           # the billing (_billing_key) the standing SPEND pause came back for, when it came back on the
+#                                       answer to a retry romp sent after the cap looked lifted, or on the person's Resume
+#                                       (_auto_pause_on_spend_limit's `still`, _spend_retry_refused): on THAT billing the cap is
+#                                       STILL in force, which its sessions' cards say in place of "reached" so a Resume that
+#                                       changed nothing is answered (the status's spendStill, _spend_still); a session capped on
+#                                       another billing was not asked about and keeps the plain line. It CLEARS with the next
+#                                       write of the pause, whatever that write is (the lift, a Resume or Stop press, an engage
+#                                       of another kind: the one writer below sets it every time). Memory only, so a restarted
+#                                       kernel words a standing pause as plainly reached, also true
+_RETRY_PAUSE_LOCK = threading.Lock()  # the pause file's read-modify-write, for its two writers (_set_retry_paused and the
+#                                       Stop's hold, _spend_held_write): the door writes from a socket thread, the engages, the
+#                                       lifts and the hold from the jobs thread
 
-def _set_retry_paused(paused, reason="", bills="", lifted_at=None):
+
+def _set_retry_paused(paused, reason="", bills="", lifted_at=None, still=None, resumed=False, stop=False):
     # Record WHEN a pause began: the auto-resume floor. Only a successful response AFTER this instant proves
     # the API recovered (an old success from before the outage doesn't). No `t` when un-pausing.
     # `reason` (the user 2026-07-14): "spend" when a monthly spend cap auto-engaged the pause, so the card
@@ -12667,9 +12680,10 @@ def _set_retry_paused(paused, reason="", bills="", lifted_at=None):
     # `liftedAt` / `supersedes`: un-pausing a SPEND pause, by the lift rule or by the user's Resume, records
     # the time of the EVIDENCE that lifted it and the floor (`t`) of the pause it cleared. That is the spend
     # engage's stand-down rule (_spend_capped_session): a spendLimit record older than liftedAt was already
-    # outranked by the evidence that lifted the pause, and romp never clears such a record on its own (a spend
-    # cap is on-you: _fire_api_retry sends no retry; only a human prompt to the capped session clears
-    # _api_error), so re-engaging on it put the pause back the cycle after every lift, alternating at the
+    # outranked by the evidence that lifted the pause, and the record outlives the lift (a spend cap is on-you:
+    # the ladder sends it no retry; the one retry after the cap lifts, _spend_resume_pass, reaches only a
+    # session with a live CLI and no held input, and until it or a human prompt lands the record stands), so
+    # re-engaging on it put the pause back the cycle after every lift, alternating at the
     # streaming session's output cadence and settling ON once it idled. The memory rides every later write,
     # paused or not, until a newer spend ruling replaces it: a limit pause that engages and lifts in between
     # must not forget it. A limit or manual pause's un-pause records nothing (its evidence, the usage report
@@ -12697,40 +12711,104 @@ def _set_retry_paused(paused, reason="", bills="", lifted_at=None):
     # span of the fault (a clock); the one caller with a pressed button to release, the setGlobalRetryPaused
     # door, moves the seq itself. The stderr line is once per fault episode (keyed by its errno text), and
     # the clean read that ends the episode says so once.
+    # `stop` / `held`: the person's Stop, for the sessions stopped on a spend cap (_spend_resume_pass). The door's own
+    # write of a Stop (`stop`) records its instant as `stop`, so the press is on file before any pass has looked: a
+    # kernel that dies inside that half second still has it. The next jobs pass turns the marker into `held`, the
+    # sessions parked at that pass, each held since that instant (_spend_held_write). Both ride every later write like
+    # liftedAt, so the hold outlives the manual pause clearing itself and a kernel restart; the person's own Resume
+    # (`resumed`, the same door) is what drops them.
     p = jd.STATE / "retry-paused.json"
-    try:
-        prev = json.loads(p.read_text())
-        if not isinstance(prev, dict):
+    with _RETRY_PAUSE_LOCK:
+        try:
+            prev = json.loads(p.read_text())
+            if not isinstance(prev, dict):
+                prev = {}
+        except FileNotFoundError:
             prev = {}
-    except FileNotFoundError:
-        prev = {}
-    except OSError as e:
-        why = _errno_text(e)
-        if _retry_pause_read_fault_said[0] != why:
-            _retry_pause_read_fault_said[0] = why
-            sys.stderr.write("retry-pause: the pause file could not be read (%s); nothing changed\n" % why)
-        return False
-    except Exception:
-        prev = {}
-    if _retry_pause_read_fault_said[0]:
-        _retry_pause_read_fault_said[0] = ""
-        sys.stderr.write("retry-pause: the pause file reads again; this write lands\n")
-    d = {"paused": bool(paused)}
-    if paused:
-        d["t"] = time.time()
-        if reason:
-            d["reason"] = reason
-        if bills:
-            d["bills"] = bills
-    elif prev.get("paused") and prev.get("reason") == "spend":
-        d["liftedAt"] = float(lifted_at) if lifted_at else time.time()
-        d["supersedes"] = float(prev.get("t") or 0)
-    if "liftedAt" not in d and prev.get("liftedAt"):
-        d["liftedAt"] = prev["liftedAt"]
-        d["supersedes"] = prev.get("supersedes", 0)
-    _RETRY_PAUSE_SEQ[0] += 1
-    _atomic_write(p, json.dumps(d))
+        except OSError as e:
+            why = _errno_text(e)
+            if _retry_pause_read_fault_said[0] != why:
+                _retry_pause_read_fault_said[0] = why
+                sys.stderr.write("retry-pause: the pause file could not be read (%s); nothing changed\n" % why)
+            return False
+        except Exception:
+            prev = {}
+        if _retry_pause_read_fault_said[0]:
+            _retry_pause_read_fault_said[0] = ""
+            sys.stderr.write("retry-pause: the pause file reads again; this write lands\n")
+        d = {"paused": bool(paused)}
+        if paused:
+            d["t"] = time.time()
+            if reason:
+                d["reason"] = reason
+            if bills:
+                d["bills"] = bills
+        elif prev.get("paused") and prev.get("reason") == "spend":
+            d["liftedAt"] = float(lifted_at) if lifted_at else time.time()
+            d["supersedes"] = float(prev.get("t") or 0)
+        if "liftedAt" not in d and prev.get("liftedAt"):
+            d["liftedAt"] = prev["liftedAt"]
+            d["supersedes"] = prev.get("supersedes", 0)
+        if not resumed:
+            for k in ("held", "stop"):
+                if prev.get(k):
+                    d[k] = prev[k]
+        if stop and paused:
+            d["stop"] = d["t"]
+        _RETRY_PAUSE_SEQ[0] += 1
+        _atomic_write(p, json.dumps(d))
+        _RETRY_PAUSE_STILL[0] = (still or None) if paused else None
     _mark_views_dirty()   # the queued bubble renders this hold; every writer publishes the flip (review 2026-09-05)
+    return True
+
+
+def _retry_pause_doc():
+    """The pause file as it stands, one read for a caller that wants several of its fields (the retry after a spend
+    cap lifts, _spend_resume_pass): {} when it is absent or holds no JSON object, None when it EXISTS and could not
+    be read this instant (the writer's own distinction: its contents stand, unread, a Stop's hold among them)."""
+    try:
+        d = json.loads((jd.STATE / "retry-paused.json").read_text())
+        return d if isinstance(d, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+    except Exception:
+        return {}
+
+
+def _spend_held_write(held, seen):
+    """Write the Stop's hold ({sid: the Stop's instant}; empty drops it) into the pause file and take the door's
+    marker off it (`stop`: the pass that calls this has turned the press into the hold), touching nothing else: the
+    pause as it stands, its floor, its memory of the last spend lift. The file is the hold's home so that a kernel
+    restart keeps it (deploy restarts are routine, and a Stop that a restart undid sent retries nobody asked for).
+    `seen` is the file as the pass read it: a press that landed since (the door writes from another thread) moved the
+    marker or the hold, and then nothing is written, so a Resume is never answered with a hold computed before it;
+    the next pass reads the file again. Returns whether the file now says `held`; an unreadable file is left alone
+    (the writer's own rule) and the caller tries again next pass. No seq, no dirty mark: nothing a client draws
+    reads the hold."""
+    p = jd.STATE / "retry-paused.json"
+    with _RETRY_PAUSE_LOCK:
+        try:
+            prev = json.loads(p.read_text())
+            if not isinstance(prev, dict):
+                prev = {}
+        except FileNotFoundError:
+            prev = {}
+        except OSError:
+            return False
+        except Exception:
+            prev = {}
+        if (prev.get("stop"), prev.get("held")) != (seen.get("stop"), seen.get("held")):
+            return False
+        d = dict(prev)
+        d.pop("held", None)
+        d.pop("stop", None)
+        if held:
+            d["held"] = dict(held)
+        if d != prev:
+            d.setdefault("paused", False)
+            _atomic_write(p, json.dumps(d))
     return True
 
 
@@ -12958,13 +13036,21 @@ def _auto_pause_on_spend_limit(now, live_map):
     holds exactly as long as the cap does. reason='spend' → the card shows 'raise your cap', not a reset
     countdown. Idempotent.
 
-    Stand-down: the capped session's record outlives the lift. A spend cap is on-you, so romp sends it no
-    retry and only a human prompt to that session clears _api_error; the lift reads another session's output
-    on the same billing and leaves the record standing. Engaging on it again the next cycle put the pause
-    back after every lift (alternating at the streaming session's output cadence, then stuck ON once it
-    idled, gating the judges and the idle-queue drives until someone prompted the capped session). So the
+    Stand-down: the capped session's record outlives the lift. A spend cap is on-you, so the ladder sends it
+    no retry; the lift reads another session's output on the same billing and leaves the record standing
+    until the one retry after the cap lifts (_spend_resume_pass) or a human prompt lands in that session.
+    Engaging on it again the next cycle put the pause back after every lift (alternating at the streaming
+    session's output cadence, then stuck ON once it idled, gating the judges and the idle-queue drives until
+    someone prompted the capped session). So the
     engage reads the last spend lift's instant off the pause file (_retry_pause_lifted_at) and skips records
-    older than it; a NEW spendLimit record, written after the lift, engages with a new floor."""
+    older than it; a NEW spendLimit record, written after the lift, engages with a new floor.
+
+    A record that answers the retry romp sent after the cap looked lifted, or on the person's Resume
+    (_spend_resume_pass; the record's own afterRetry says so), is such a new record, and it says more than a
+    first refusal does: the cap is STILL in force on that session's billing. The engage says so on stderr and
+    marks the pause `still` for that billing, which the cards of its sessions word (the status's spendStill),
+    so a Resume that changed nothing is answered. Such a record is never retried again on evidence, so it
+    engages once: nothing romp does writes another."""
     if _retry_paused_on():
         return
     capped = _spend_capped_session(now, live_map, after=_retry_pause_lifted_at())
@@ -12974,9 +13060,16 @@ def _auto_pause_on_spend_limit(now, live_map):
         # re-engage it here the next cycle (the pause file flapped every cycle in a login-plus-key install
         # while one session streamed past the other's cap)
         live = live_map if isinstance(live_map, dict) else {}
-        bills = _bills_side(live.get(str(capped.get("sid") or "")))
-        if not _set_retry_paused(True, reason="spend", bills=bills):
+        row = live.get(str(capped.get("sid") or ""))
+        bills = _bills_side(row)
+        still = _billing_key(row) if (_api_error(capped.get("path") or "") or {}).get("afterRetry") else None
+        if not _set_retry_paused(True, reason="spend", bills=bills, still=still):
             return                                       # refused (the pause file could not be read): the writer said so
+        if still:
+            sys.stderr.write("retry-pause: re-engaged: the retry sent after the spend limit looked lifted was refused, so "
+                             "the monthly spend limit is still in force (%s billing); auto-retry + judges paused until "
+                             "the cap is raised (claude.ai/settings/usage)\n" % bills)
+            return
         sys.stderr.write("retry-pause: auto-engaged: monthly spend limit reached (%s billing); auto-retry + judges "
                          "paused until the cap is raised (claude.ai/settings/usage)\n" % bills)
         # no inline push: _set_retry_paused marked the views dirty and woke the pusher, whose next cycle
@@ -13036,16 +13129,18 @@ def _auto_resume_retry(now, live_map):
       END refreshes the report (get_usage rides turn ends; _usage_poll_tick every 15 min), which is how a
       served account reaches this edge. A still-limited account whose reading was stale re-engages through
       its next error record and the refreshed report, with a new floor.
-    - spend: fresh ASSISTANT output (_api_last_output_t, never the mtime a prompt moves too) from a live
+    - spend: fresh ASSISTANT output (_api_last_output_t, never the mtime a prompt moves too; a record the
+      MODEL wrote in that conversation, never one the CLI writes itself or a subagent's: _api_error_pass) from a live
       session on the SAME billing the capped session was on (_retry_pause_bills, recorded at the engage;
       the capped session itself qualifies once it serves). A cap is on one account, and in a login-plus-key
       install a session on the other account streams straight through it: the old mtime rule counted that,
       _auto_pause_on_spend_limit re-engaged the pause the next cycle while the capped session sat on its
       record, and the file flipped every cycle. A file with no billing recorded takes any session's fresh
-      output. The lift leaves the capped session's record standing (nothing but a human prompt clears a
-      spend record), so the un-pause records the lifting output's own time as liftedAt (the evidence, not
-      the cycle's clock, so a record written between the two counts as new) and the engage stands down on
-      records older than it: one lift, no re-engage, until a NEW record.
+      output. The lift leaves the capped session's record standing (the pause's lift writes nothing into
+      a session; its one retry follows from the same evidence, _spend_resume_pass, for a session with a
+      live CLI, and a human prompt clears any other), so the un-pause records the lifting output's own
+      time as liftedAt (the evidence, not the cycle's clock, so a record written between the two counts as
+      new) and the engage stands down on records older than it: one lift, no re-engage, until a NEW record.
     - manual: any live session, not blocked on an API error, whose transcript mtime passed the pause floor
       (the user's own words above, unchanged).
 
@@ -22306,7 +22401,14 @@ def _thread_events(tsid, cut_uuid, floor_t, now, live_map, tm=None, out=None):
 # (billing, notices, the needs-you verdicts) is a tab's, and would only grow the comments frame.
 _THREAD_LIVE_STATUS_KEYS = ("state", "sinceEpoch", "ctx", "ctxOver", "ctxColor", "ctxTone",
                             "awaitingWhy", "awaitingKind", "awaitingPeers", "awaitingCount", "awaitingItems",
-                            "awaitingTasks", "awaitingTaskIds", "bgServiceIds")
+                            "awaitingTasks", "awaitingTaskIds", "bgServiceIds",
+                            # what the live API-error card reads to word its line and choose its buttons (2026-11-15, the
+                            # review of PR 470): a thread's card is the chat's own, drawn for the THREAD, and without these
+                            # a thread stopped on a spend cap read as about to retry and offered Retry now. The page's
+                            # decider names the fields it reads (ui/webview/api-card-line.ts API_CARD_STATUS_KEYS, pinned
+                            # equal to this tail by apierror-line.test.ts)
+                            "apiSpendLimit", "apiModelLimit", "apiAuthErr", "apiRefusal", "apiNoRetry",
+                            "retrySuppressed", "retryNextAt", "retryTries", "spendStill")
 
 
 class _lend_thread_row(object):
@@ -25124,12 +25226,23 @@ def _backend_compacting(be, sid):
     return callable(fn) and fn(sid) is True
 
 
-def _fire_api_retry(sid, be, manual=False):
+def _fire_api_retry(sid, be, manual=False, served=None):
     """Inject a "retry" into an API-error-blocked session, behind every retry gate — the ONE retry
     decision, shared by the apiRetry route (a client's ask: the dashboard's countdown tick or the manual
     Retry-now button) and the kernel's own _auto_retry_tick (the unattended driver, 2026-08-11). Every
     gate below was already kernel state; a client ask contributes nothing but the asking, so the kernel
     asking itself is the same decision on the same state.
+
+    `served` (2026-11-15) is the third asker, the retry after a spend cap lifts (_spend_resume_pass): the key
+    of the spend-cap record its caller ruled on (the uuid `_rk` below), on evidence that the cap no longer
+    stands for this session, or on the person's Resume (its probe, or what the probe opened). It is the
+    automatic road with two gates read differently, because its caller already ruled on them: the global
+    pause (it passes a spend pause recorded on another billing, never one that covers the session) and the
+    on-you skip for a spend cap (the caller's ruling is that the retry is due). It sends only for that very
+    record, so a record that moved between the ruling and this read takes the ordinary road on the next
+    pass, and it does not wait out the backoff ladder, which paces repeated attempts into an outage and has
+    nothing to pace in one retry per record. A thread the person stopped, an unreadable stop ledger, a retry
+    still queued and the one retry per record all hold it as they hold every automatic retry.
 
     The GATE block is for the AUTO path only: a global pause or a thread the user interrupted must not
     relapse into the storm, nor may a thread whose stop the kernel cannot currently READ (the suppression
@@ -25138,7 +25251,8 @@ def _fire_api_retry(sid, be, manual=False):
     ALWAYS fires so the button is never a dead no-op on a suppressed/paused thread (the user 2026-07-06).
     It fires ONE retry without clearing the suppression, so it doesn't re-arm the auto-loop the user turned off."""
     if not manual and (_retry_paused_on() or _session_retry_suppressed(sid)):
-        return
+        if served is None or _session_retry_suppressed(sid):
+            return
     if not manual and _retry_suppress_unknown():
         _jobs_gate_owe("suppressUnknown")                 # (the jobs pass's gate, shadow: the ledger's next read is the event)
         return                                            # unknown is not "not stopped": fail safe, said once
@@ -25177,6 +25291,8 @@ def _fire_api_retry(sid, be, manual=False):
     if not manual:
         if _rk is None:
             return                                        # not api-blocked right now → nothing to retry
+        if served is not None and _rk != served:
+            return                                        # the record the caller ruled on is gone: the next pass rules again
         # ON-YOU classes are never auto-retried (server-side twin of the client tick's skip, and the
         # kernel driver's own guard): a retry cannot compact a too-long prompt, raise a spend cap, refill
         # a model allowance, or mend a credential — the card names the real fix. A safeguards REFUSAL is
@@ -25189,15 +25305,18 @@ def _fire_api_retry(sid, be, manual=False):
         # A notice NOTHING retries joins them (noRetry, 2026-09-22, the review of the restart-cut fix): the
         # Codex turn a kernel restart cut. Retried, a bare "retry" reached the thread about a second after
         # boot, telling the model nothing of the cut; picking the work back up is the person's call.
-        if _rerr and (_rerr.get("tooLong") or _rerr.get("spendLimit")
+        # A spend cap is retried on ONE road: `served`, once per record, when its caller saw the cap lift for this
+        # session or the person asked (the docstring); never by the ladder, which cannot raise a cap.
+        if _rerr and (_rerr.get("tooLong") or (_rerr.get("spendLimit") and served is None)
                       or _rerr.get("modelLimit") or _rerr.get("authErr")
                       or _rerr.get("refusal") or _rerr.get("noRetry")):
             return
         if _auto_retried.get(sid) == _rk:
             return                                        # this episode already got its retry
-        if time.time() < _retry_gate_state(sid)[1]:
-            _jobs_gate_due(math.ceil(_retry_gate_state(sid)[1]))   # (the jobs pass's gate, shadow: the next rung is the due)
-            return                                        # backing off: this outage's next rung isn't due
+        if served is None:                                # (the ladder paces attempts into an outage: not the cap's one retry)
+            if time.time() < _retry_gate_state(sid)[1]:
+                _jobs_gate_due(math.ceil(_retry_gate_state(sid)[1]))   # (the jobs pass's gate, shadow: the next rung is the due)
+                return                                    # backing off: this outage's next rung isn't due
     if _rk is not None:
         if len(_auto_retried) > 256:
             _auto_retried.clear()
@@ -25228,20 +25347,351 @@ def _auto_retry_tick(now, live_map):
     client tick stays as the countdown display and a redundant asker (harmless: the decision in
     _fire_api_retry is idempotent against double-asking, and an older kernel still needs the client).
     Dormant sessions are skipped — a dead CLI's api-error is settled history, and reviving a session is
-    the nudge machinery's call, not a retry's."""
-    for s in _alive_sessions(now, live_map):
+    the nudge machinery's call, not a retry's.
+
+    A session stopped on a SPEND CAP is not this ladder's (a retry cannot raise a cap): it is handed to
+    _spend_resume_pass, which sends its one retry once the cap is seen lifted for it."""
+    rows = list(_alive_sessions(now, live_map))
+    capped = []
+    for s in rows:
         sid = s["sid"]
         try:
             if live_map.get(sid) is None:
                 continue                                  # dormant CLI → nothing live to retry into
-            if not _api_error(s["path"]):
+            aerr = _api_error(s["path"])
+            if not aerr:
                 continue                                  # (mtime-cached) not api-blocked → nothing to do
+            if aerr.get("spendLimit"):
+                capped.append((s, aerr))                  # the cap's own road, ruled on below over the whole pass
+                continue
             be = Sessions.backend_for(sid)
             if be is not None:
                 _fire_api_retry(sid, be)
         except Exception:
             _jobs_gate_owe("fault")                       # (the jobs pass's gate, shadow: retried next pass, a fault leaves no record)
             sys.stderr.write("auto-retry (session %s): %s\n" % (sid or "?", traceback.format_exc()))
+    _spend_resume_pass(now, live_map, rows, capped)
+
+
+# ── The retry after a spend cap lifts (2026-11-15) ────────────────────────────────────────────────────────────────────
+# A session stopped on a monthly spend cap is never retried while the cap stands, and until this nothing retried it
+# after the cap LIFTED either: the pause cleared (on another session's output, or the person's Resume) and every capped
+# session stayed on its record until someone typed into it, one session at a time. With dozens of sessions that was
+# dozens of prompts, for a fact the kernel can read: the cap no longer stands for that session.
+#
+# PARKED: a session with a live CLI whose transcript ends on a spend-cap record (_api_error). Not a session with no
+# live CLI (its next message is its retry), a thread the person stopped, a session mid-compaction, one with input of
+# the person's own held for it or being handed to it (that input is its retry, _limit_hold), one a global pause
+# covers, or a Codex session (its rows carry no billing to compare).
+#
+# A parked session gets ONE retry (RETRY_MSG, through the one retry decision) when one of these holds for the record
+# it sits on. Each is an event a transcript, a live row or the person's press records, none a clock:
+#   - EVIDENCE: another session on the same billing (the side and, for a login, which login) was served a request it
+#     made after the record (_api_error_pass's req_t). When the request was MADE, not when its answer landed: requests
+#     already in flight when a cap falls are still answered, their answers stamped after the first refusals, and the
+#     pause's own lift may lift on such a straggler; nothing is retried on it.
+#   - its own CLI came up on another billing after the record (its live row's authSwitchedAt, the floor
+#     _spend_record_stands reads): the record describes an account the session left.
+#   - the person's "Resume all auto-retries" (below).
+# THE LOOP-BREAKER is strict. A cap record that answers romp's own retry of a cap record (afterRetry) is the person's:
+# evidence never retries it again, whatever other sessions do. A cap refuses per request (a small one fits under a cap
+# a large one would exceed), so a session the cap never stopped may stream beside one that is refused every time;
+# its answers earn the refused session one retry, and the refusal of that retry earns nothing. A standing cap
+# therefore costs each parked session at most one failed request, however many sessions serve around it and however
+# many are rescued by hand, and the pause re-engages at most once per such refusal. Only the person's Resume, their
+# own message (a new prompt: the next record answers them, not romp) or their moving the session to another billing
+# sends that session a retry again.
+#
+# THE PERSON'S "RESUME ALL AUTO-RETRIES" is a request, not evidence. It is taken as a snapshot of the records parked
+# at the press, by identity (_spend_press), and earns ONE session per capped billing a retry as a probe. A probe served
+# opens the snapshot: every record in it on that billing gets its one retry, the ones that answer a retry included,
+# since the press is the person's own act. A retry of the press REFUSED, the probe's or one it opened, is a NEW record
+# in that session, known by its identity (never by its stamp, which shares a second with the press often enough): the
+# pause re-engages marked `still` for that billing, the snapshot for that billing is dropped, and nothing else is
+# sent, so a press over a standing cap costs the retries already out and no more. A press is spent by the next write
+# of the pause that is not its own (an engage, a Stop, another press: the pause's write count, _RETRY_PAUSE_SEQ) and by
+# a restart, so a probe answered a day later opens nothing.
+# "STOP ALL AUTO-RETRIES" drops every snapshot and HOLDS the sessions parked at that moment until a Resume or the
+# person's own message to them: the manual pause it sets clears itself on the first healthy write, a write a session
+# this very wave woke makes within seconds, so the pause alone would not hold. The hold lives in the pause file: the
+# door's own write marks the press with its instant (`stop`), so a kernel that dies before the next pass still has
+# it, and that pass turns the marker into `held`, the sessions parked then, each with that instant. A restart keeps
+# both. What lifts a session's hold is the person: their Resume, which drops every hold, or a message of their own
+# in that session after the Stop (the transcript's person_t, read on the pass that sees the message arrive). A prompt
+# romp put in is not theirs, so the refusal that answers a nudge is held like the record before it; and a pass that
+# reads no row for a held session changes nothing.
+#
+# PACED like the CLI launches (sdk_backend._LaunchSlots; a retry into a running CLI launches nothing, so it cannot
+# take one of those slots, whose release is a CLI's init): at most SPEND_RESUME_CONCURRENCY retries are out unanswered
+# at a time. Out means delivered with no answer after it yet (the transcript's own reading, retry_out: the model's
+# output or an API error is an answer, a record the CLI or a subagent wrote is not) or in the backend's hands and not
+# yet in the transcript (_retry_handed_over); so a slot frees on the API's answer to that session, an error as much as
+# output, or on the session ending, losing its CLI or being stopped, and the count is the same after a kernel restart
+# as before it. A press that finds every slot taken keeps its snapshot, and its probe goes when one frees. Sessions
+# that never answer hold their slots: the log names them once each time the set changes, so the wait is visible.
+#
+# Across a restart: a session already retried is no longer parked (its retry is a prompt in its transcript) or has its
+# retry in the backend's hands, so nothing is sent twice; the count of retries out and a Stop's hold are read again
+# from the transcripts, the backend and the pause file; a press is forgotten, and the records it had not reached fall
+# back to the evidence rule.
+SPEND_RESUME_CONCURRENCY = max(1, int(os.environ.get("ROMP_BOOT_RESUME_CONCURRENCY", "3")))   # the launch stagger's own knob and
+#                                       default (sdk_backend.BOOT_RESUME_CONCURRENCY): one number for how many sessions romp wakes at once
+_spend_door = [None]                  # "resume": the person pressed Resume all (the setGlobalRetryPaused door) and the next jobs
+#                                       pass, half a second on, has not taken it yet. Memory: a press is spent by a restart (a
+#                                       Stop is on file instead, the pause file's `stop`)
+_spend_press = {}                     # billing (_billing_key) -> {"records": {sid: cap record key} as parked at the press, "probe":
+#                                       the sid its probe went to (None until one is sent), "served": that probe was served}
+_spend_press_seq = [0]                # the pause's write count (_RETRY_PAUSE_SEQ) when the standing press was taken: a later
+#                                       write of the pause, by anything, spends the press
+_spend_wait_said = [None]             # the unanswered sessions the log last named as holding every slot
+_spend_doc_fault = [False]            # the pause file could not be read on the last pass (said once per such episode)
+
+
+def _spend_still(tm):
+    """Whether the standing spend pause came back on a refused retry ON THIS SESSION'S BILLING (_RETRY_PAUSE_STILL):
+    the status's spendStill, which its card words as the limit still in force."""
+    bill = _RETRY_PAUSE_STILL[0]
+    return bool(bill) and _billing_key(tm) == bill
+
+
+def _billing_key(tm):
+    """Which account a live row's session bills, as far as its row says: the backend, the side (_bills_side) and, for
+    a login, which stored login (the CLI's own report of the one that answered, else the one it is set to; "" is the
+    machine's own). Evidence that one account serves is read only for sessions with the same key: two logins on one
+    machine are two caps."""
+    tm = tm or {}
+    side = _bills_side(tm)
+    login = tm.get("authLoginLive")
+    if login is None:
+        login = tm.get("authLogin")
+    return (str(tm.get("backend") or ""), side, str(login or "") if side == "login" else "")
+
+
+def _retry_handed_over(be, sid):
+    """Whether romp's retry is in the backend's hands for a session whose transcript does not show it yet: still in the
+    backend's queue, or sent with its echo not yet landed (the backend keeps both across a kernel restart). With the
+    transcript's own reading (a parked session is one with no prompt after its cap record) this is the whole of
+    "already retried", so nothing the kernel remembers has to survive a restart for a retry not to be sent twice."""
+    if any(_is_retry_prompt(q) for q in be.pending_queued(sid)):
+        return True
+    atoms = getattr(be, "live_atoms", None)
+    for a in (atoms(sid) if callable(atoms) else None) or ():
+        if isinstance(a, dict) and _is_retry_prompt(a.get("_echo_text")) and not a.get("_landed") and not a.get("dropped"):
+            return True
+    return False
+
+
+def _spend_served_at(rows, live):
+    """{billing: when the newest request an alive session on it was served was made} (_api_served_times' req_t): the
+    evidence that a billing serves. A request counts only when it postdates the session's own landing on the billing
+    it is on now (one from before a switch was the other account's)."""
+    out = {}
+    for s in rows:
+        sid, path = str(s.get("sid") or ""), s.get("path")
+        tm = live.get(sid)
+        if not path or tm is None:
+            continue
+        req_t = _api_served_times(path)[0]
+        if req_t and req_t > float(tm.get("authSwitchedAt") or 0):
+            bill = _billing_key(tm)
+            out[bill] = max(out.get(bill, 0), req_t)
+    return out
+
+
+def _spend_retries_out(rows, live, parked):
+    """The sessions, by name, whose retry of a cap record is out unanswered among those a CLI serves: delivered, with
+    no answer after the retry yet (the transcript's retry_out), or in the backend's hands for a session still parked
+    (_retry_handed_over). Read from the transcripts and the backends each time, so it is the same list after a
+    restart; a session that ended, lost its CLI or was stopped by the person holds no slot."""
+    out = []
+    for s in rows:
+        sid, path = str(s.get("sid") or ""), s.get("path")
+        tm = live.get(sid)
+        if not path or tm is None or not tm.get("connected") or _session_retry_suppressed(sid):
+            continue
+        if sid in parked:
+            be = Sessions.backend_for(sid)
+            if be is None or not _retry_handed_over(be, sid):
+                continue
+        elif not _api_served_times(path)[1]:
+            continue
+        out.append(str(s.get("name") or sid[:8]))
+    return out
+
+
+def _spend_retry_refused(bill, name):
+    """A retry a Resume sent was refused: the pause re-engages marked `still` for that billing (on it the cap is STILL
+    in force, which its cards say), or, when the engage's own rule already put it back this pass, is marked so. Decided
+    by the caller on the record's identity, so a refusal stamped in the press's own second is not read as older than
+    the press."""
+    if not _retry_paused_on():
+        if _set_retry_paused(True, reason="spend", bills=bill[1], still=bill):
+            sys.stderr.write("retry-pause: re-engaged: the retry sent to %s on Resume was refused, so the monthly spend "
+                             "limit is still in force (%s billing); auto-retry + judges paused until the cap is raised "
+                             "(claude.ai/settings/usage)\n" % (name, bill[1]))
+    elif _retry_pause_reason() == "spend" and _RETRY_PAUSE_STILL[0] != bill:
+        _RETRY_PAUSE_STILL[0] = bill
+        _mark_views_dirty()
+
+
+def _spend_resume_pressed(parked, live):
+    """The person's Resume, taken on the jobs pass (the block above): a snapshot of the parked records by billing, each
+    billing owed a probe. (The door's own write already dropped any Stop's hold: `resumed`.)"""
+    _spend_press.clear()
+    if not parked:
+        return
+    for sid, (_s, _e, key) in parked.items():
+        press = _spend_press.setdefault(_billing_key(live.get(sid)), {"records": {}, "probe": None, "served": False})
+        press["records"][sid] = key
+    _spend_press_seq[0] = _RETRY_PAUSE_SEQ[0]
+    sys.stderr.write("auto-retry: Resume pressed with %d session(s) stopped on a spend cap, on %d billing(s): one retry "
+                     "per billing as a probe, the rest when it is served\n" % (len(parked), len(_spend_press)))
+
+
+def _spend_press_step(parked, rows, live):
+    """Settle each standing press's records (the block above). A record stays in the press while its session is still
+    parked on it (its retry is to come, or is in the backend's hands) or its retry is delivered and unanswered. It
+    leaves when the session has moved on, and what it moved to is read by identity, never by a stamp: parked on a NEW
+    cap record that answers a retry, a retry of the press was REFUSED (the pause re-engages marked `still`, and the
+    press ends there, probe or not: nothing else of it is sent); a model's output as its newest assistant record, a
+    probe was SERVED (the press opens for the rest); anything else (another error, the person's own prompt, a session
+    that ended, lost its CLI or was stopped) settles nothing, and a probe that ends so hands the probe to the next
+    record. A press with no record left is done."""
+    paths = {str(r.get("sid") or ""): r.get("path") for r in rows}
+    for bill, press in list(_spend_press.items()):
+        recs = press["records"]
+        for sid, key in list(recs.items()):
+            cur, tm, path = parked.get(sid), live.get(sid), paths.get(sid)
+            alive = tm is not None and bool(tm.get("connected")) and not _session_retry_suppressed(sid)
+            if alive and cur is not None and cur[2] == key:
+                continue                              # still on the record the press covered
+            req_t, out = _api_served_times(path)[:2] if alive and cur is None and path else (0, False)
+            if out:
+                continue                              # its retry is delivered, and unanswered
+            del recs[sid]
+            probe = sid == press["probe"] and not press["served"]
+            if alive and cur is not None and cur[1].get("afterRetry"):
+                _spend_retry_refused(bill, cur[0].get("name") or sid[:8])
+                recs.clear()                          # refused: nothing else of this press is sent
+                break
+            if probe and req_t:
+                press["served"] = True
+                sys.stderr.write("auto-retry: the Resume's probe on %s billing was served: the sessions parked at the "
+                                 "press follow\n" % bill[1])
+            elif probe:
+                press["probe"] = None
+        if not recs:
+            del _spend_press[bill]
+
+
+def _spend_resume_pass(now, live_map, rows, capped):
+    """One pass of the retry after a spend cap lifts (the block above). `rows` is the pass's alive sessions and `capped`
+    its (session, record) pairs stopped on a spend cap, both from _auto_retry_tick's own walk."""
+    live = live_map if isinstance(live_map, dict) else {}
+    parked = {str(s.get("sid") or ""): (s, aerr, aerr.get("uuid") or aerr.get("text") or "") for s, aerr in capped}
+    doc = _retry_pause_doc()                          # the pause, the Stop's marker and its hold: one read for the pass
+    if doc is None:
+        # the file is there and could not be read this instant: whether these sessions are paused, or held by a Stop,
+        # is not known, and nothing is sent on the guess that they are not. The next pass reads again
+        if not _spend_doc_fault[0]:
+            _spend_doc_fault[0] = True
+            sys.stderr.write("auto-retry: the pause file could not be read, so no retry after a spend cap is sent until "
+                             "it reads again\n")
+        _jobs_gate_owe("fault")                       # (the jobs pass's gate, shadow: retried next pass, a fault leaves no record)
+        return
+    _spend_doc_fault[0] = False
+    was = {sid: float(t0) for sid, t0 in (doc.get("held") if isinstance(doc.get("held"), dict) else {}).items()
+           if isinstance(t0, (int, float))}
+    held = dict(was)
+    stop = doc.get("stop") if isinstance(doc.get("stop"), (int, float)) else 0
+    if stop:
+        # the person's Stop, as the door's own write recorded it: every snapshot goes, and the sessions parked now are
+        # held since that instant, beside the ones an earlier Stop still holds. (A Resume not yet taken is older than
+        # this marker, which its write would have dropped: the door cleared it.)
+        _spend_press.clear()
+        held.update((sid, float(stop)) for sid in parked)
+    elif _spend_door[0] == "resume":
+        _spend_door[0] = None
+        _spend_resume_pressed(parked, live)
+    if _spend_press and _spend_press_seq[0] != _RETRY_PAUSE_SEQ[0]:
+        _spend_press.clear()                          # the pause was written since the press: the press is spent
+    if _spend_press:
+        _spend_press_step(parked, rows, live)
+    if held:
+        # a held session the person has written to since the Stop is theirs again: the hold is lifted on the pass that
+        # reads their message. Nothing else lifts one short of their Resume: not a prompt romp put in, not a new
+        # record, not a pass with no row for the session
+        paths = {str(r.get("sid") or ""): r.get("path") for r in rows}
+        for sid in [k for k, t0 in held.items() if paths.get(k) and _api_served_times(paths[k])[2] > t0]:
+            del held[sid]
+    if (stop or held != was) and _spend_held_write(held, doc) and stop and parked:
+        # (a write the file refuses, or one a newer press outran, leaves the marker for the next pass; this pass
+        #  holds the same sessions meanwhile)
+        sys.stderr.write("auto-retry: Stop pressed: %d session(s) stopped on a spend cap get no retry until a Resume "
+                         "or a message of yours\n" % len(parked))
+    if not parked:
+        _spend_wait_said[0] = None
+        return
+    paused = bool(doc.get("paused"))
+    spend_on = paused and doc.get("reason") == "spend"
+    bills = str(doc.get("bills") or "") if spend_on else ""
+    served = out = None                               # the evidence and the retries out, each read once, and only if needed
+    for sid, (s, aerr, key) in parked.items():
+        try:
+            tm = live.get(sid) or {}
+            if _auto_retried.get(sid) == key:
+                continue                              # this record has had its retry
+            if not tm.get("connected") or _session_retry_suppressed(sid):
+                continue                              # no live CLI, or a thread the person stopped
+            if paused and (not spend_on or _on_paused_billing(tm, bills)):
+                continue                              # a pause that covers this session: a spend pause holds only its own billing
+            bill = _billing_key(tm)
+            press = _spend_press.get(bill)
+            pressed = press is not None and press["records"].get(sid) == key
+            probe = pressed and press["probe"] is None and not press["served"]
+            if not _spend_record_stands(aerr, tm):
+                why = "its billing switched"
+            elif pressed and press["served"]:
+                why = "Resume: the probe on its billing was served"
+            elif probe:
+                why = "Resume: the probe for its billing"
+            elif aerr.get("afterRetry") or sid in held:
+                continue                              # the person's: it answers romp's own retry, or they pressed Stop on it
+            else:
+                if served is None:
+                    served = _spend_served_at(rows, live)
+                if not 0 < float(aerr.get("t") or 0) < served.get(bill, 0):
+                    continue                          # no request made after this record has been served on its billing
+                why = "its billing serves again"
+            if _pending_ops.get(sid):                 # the person's own input is held for it: delivered when the hold lifts,
+                _jobs_gate_owe("heldInput")           # that input is its retry (the jobs pass's gate, shadow: the queue's
+                continue                              # leaving is no input of this job's)
+            be = Sessions.backend_for(sid)
+            busy = getattr(be, "busy", None)
+            if be is None or _backend_compacting(be, sid) or (callable(busy) and busy(sid) is True):
+                continue                              # mid-compaction, or taking input this moment (that held input just
+                #                                       delivered, a message the person sent): the turn that opens is its retry
+            if _retry_handed_over(be, sid):
+                continue                              # its retry is already in the backend's hands (counted as out below)
+            if out is None:
+                out = _spend_retries_out(rows, live, parked)
+            if len(out) >= SPEND_RESUME_CONCURRENCY:
+                if _spend_wait_said[0] != out:        # said once each time the set changes, never once a pass
+                    _spend_wait_said[0] = list(out)
+                    sys.stderr.write("auto-retry: retries after the spend cap are waiting on %d unanswered session(s): %s%s\n"
+                                     % (len(out), ", ".join(out),
+                                        "; the Resume's probe on %s billing goes when one is answered" % bill[1] if probe else ""))
+                return                                # the rest follow as these are answered
+            if not _fire_api_retry(sid, be, served=key):
+                continue
+            out.append(str(s.get("name") or sid[:8]))
+            _spend_wait_said[0] = None
+            if probe:
+                press["probe"] = sid
+            sys.stderr.write("auto-retry: one retry to %s after its spend cap (%s)\n" % (s.get("name") or sid[:8], why))
+        except Exception:
+            _jobs_gate_owe("fault")                   # (the jobs pass's gate, shadow: retried next pass, a fault leaves no record)
+            sys.stderr.write("auto-retry after a spend cap (session %s): %s\n" % (sid or "?", traceback.format_exc()))
 
 
 def _idle_queue_drive_tick(now, live_map):
@@ -36580,7 +37030,7 @@ def _undelivered_wake_tail(path):
 
 
 _api_err_cache = {}           # path -> ((mtime, size), err|None)
-_api_last_failed_cache = {}   # path -> ((mtime, size), err|None, out_t): _api_last_failed's own (the latch)
+_api_last_failed_cache = {}   # path -> ((mtime, size), err|None, out_t, (req_t, retry_out)): _api_last_failed's own (the latch)
 
 
 _SESSION_STAMP_CACHE = {}    # sid -> ((goals mtime,size, overrides mtime,size), ((gid, at, why, kind), stamped tops)) — see _session_stamp_read
@@ -39948,7 +40398,7 @@ _API_ERR_TAIL_WINDOW = int(os.environ.get("ROMP_API_ERR_TAIL_WINDOW", "262144"))
 
 def _api_error_pass(path, start):
     """One pass from byte `start` to EOF answering BOTH transcript readers at once
-    -> (err, decided, latched, decided_latched, out_t).
+    -> (err, decided, latched, decided_latched, out_t, served).
 
     err / decided are _api_error's. The loop is _api_error's original whole-file scan, changed only at its three
     `err = ...` sites (each also sets `decided`, and the two assistant sites set `latched`, `decided_latched` and
@@ -39965,6 +40415,40 @@ def _api_error_pass(path, start):
     implies decided. out_t is the newest assistant OUTPUT record's timestamp while that record is the newest
     assistant record, else 0: the spend pause's recovery signal (_auto_resume_retry).
 
+    The readings for the retry after a spend cap lifts (_spend_resume_pass, 2026-11-15), all from the records this
+    pass already reads.
+    The error dict's `afterRetry`: the record answers romp's own retry of a spend-cap record (RETRY_MSG, sent while
+    a cap record stood, with no model's answer and no message of the PERSON's since), so a retry was already spent on
+    this cap and refused, and the record is the person's to move. Only their own message reopens it
+    (_prompt_is_the_persons): a nudge or a notice romp put into the session afterwards is romp's, the CLI's stop
+    record is nobody's message (a restart that cuts a turn writes the same one as their Esc), and the refusal that
+    follows either still answers no one who asked. A retry the ladder sent for some other error does not count: the
+    cap that answers it is that session's first refusal. It is never a guess: a window that begins after the record
+    that settles it (the prompt, or the cap record that stood when the prompt was sent) does not DECIDE a spend-cap
+    verdict, so the caller widens until the answer is the whole file's.
+    WHAT COUNTS AS AN ANSWER, for the retry's readings and the spend pause's lift (afterRetry, out_t, req_t,
+    retry_out): a record the MODEL wrote in this conversation. Not a record the CLI writes itself (message.model
+    "<synthetic>": its "No response requested." after a stop), which no request was served to produce: read as
+    output, one such record on an idle session lifted a spend pause under a standing cap and sent three retries into
+    it. And not a subagent's record (isSidechain), which is another conversation's: it answered nothing here, and
+    read as this conversation's it freed a retry's slot. These readings pass over both. The VERDICT and the LATCH do
+    not: err, decided, latched and decided_latched are computed exactly as before this change, from every record
+    (the CLI's settle after an error reads as recovered, the latch clears on it, and an agent's own file, where every
+    record is a sidechain one, still yields its error to the subagent viewer); tests/test_spend_cap_resume.py holds
+    them to that rule over every short sequence of records.
+    served, (req_t, retry_out, person_t). req_t is when the API was ASKED for what it then answered: the time of the
+    newest user record (a prompt or a tool result, never a meta record) before the newest output record, while that
+    output is the newest assistant record (out_t's twin), else 0. An answer's own stamp says only when it finished: a
+    request already in flight when a cap fell is answered after it, and proves nothing about the cap. A window that
+    begins after the user record reads 0, the side to err on (no evidence is claimed that the read did not see).
+    retry_out is whether romp's retry of a cap record is the newest genuine prompt with no assistant record after
+    it: delivered, and unanswered (the CLI's stop record after it says the turn was cut, so nothing is out). The
+    retries out at once are counted from it, so the count survives a restart.
+    person_t is when the PERSON last wrote to this conversation themselves (_prompt_is_the_persons), to the
+    millisecond, as far as this window shows: 0 when their newest message is above it, the side to err on again. A
+    Stop's hold is lifted by their message after it, on the pass that reads the message as the transcript's newest
+    lines, never by a prompt romp put in.
+
     A non-zero `start` lands mid-line, so the first partial line is dropped. model_refusal_* records land a
     few records AFTER the error they annotate and only mutate an err already set, so they need no special
     handling: with their error out of window nothing is assigned, and the caller widens."""
@@ -39973,6 +40457,12 @@ def _api_error_pass(path, start):
     latched = None
     decided_latched = False
     out_t = 0
+    req_t = 0
+    user_t = 0                                    # the newest user record's time: when the next answer's request was made
+    retried = None if start > 0 else False        # the newest genuine prompt is romp's retry of a cap record, unanswered by
+    #                                               output; None while this window has not seen what settles it
+    retry_out = False                             # ... and no answer has followed that prompt
+    person_t = 0.0                                # when the person last wrote here themselves, to the millisecond (0: not in this window)
     with open(path, errors="replace") as f:
         if start > 0:
             f.seek(start)
@@ -39984,6 +40474,7 @@ def _api_error_pass(path, start):
                 o = json.loads(line)
             except Exception:
                 continue
+            side = bool(o.get("isSidechain"))            # a subagent's record: the retry's readings pass over it (the docstring)
             t = o.get("type")
             if t == "assistant":
                 msg = o.get("message") or {}
@@ -39995,8 +40486,11 @@ def _api_error_pass(path, start):
                     # "prompt is too long" is NOT a transient API error (the user 2026-06-29): it means the
                     # context needs compacting → it's on YOU. Flag it so it (and only it) blocks; other API
                     # errors are transient (auto-retry recovers them) and stay in Working.
-                    decided = decided_latched = True
-                    out_t = 0                             # the newest assistant record is a failure again
+                    # (a spend-cap record whose afterRetry this window cannot settle decides nothing: the caller widens)
+                    decided = decided_latched = retried is not None or not _is_spend_limit(text)
+                    if not side:
+                        out_t = req_t = 0                 # the newest assistant record is a failure again
+                        retry_out = False                 # ... and it answers whatever was out
                     err = latched = {"text": text, "status": o.get("apiErrorStatus"),
                                      "category": o.get("error") or "unknown",
                                      # the error RECORD's identity — a new failed attempt writes a new record,
@@ -40032,20 +40526,48 @@ def _api_error_pass(path, start):
                                      # the Codex turn a kernel restart cut (codex_events abandoned, 2026-09-22). The
                                      # auto-retry skips it and the card draws no countdown, so no bare "retry" goes
                                      # into a thread whose turn was cut without the model being told
-                                     "noRetry": bool(o.get("rompNoRetry"))}
+                                     "noRetry": bool(o.get("rompNoRetry")),
+                                     # the record answers romp's own retry of a spend-cap record: one was already
+                                     # spent on this cap and refused, so it is the person's to move and nothing
+                                     # another session does retries it again (_spend_resume_pass)
+                                     "afterRetry": bool(retried)}
                 elif (isinstance(c, list) and any(isinstance(b, dict)
                         and b.get("type") in ("text", "tool_use", "thinking") for b in c)) \
                         or (isinstance(c, str) and c.strip()):
                     decided = decided_latched = True
                     err = latched = None                  # fresh assistant output → recovered
-                    out_t = int(em.parse_z(o.get("timestamp")) or 0)
+                    if not side and msg.get("model") != "<synthetic>":   # ... and, for the retry's readings, a model's answer
+                        out_t = int(em.parse_z(o.get("timestamp")) or 0)
+                        req_t = user_t                    # asked no earlier than the user record before it
+                        retried = retry_out = False
             elif t == "user":
+                own = not side and not o.get("isMeta")    # this conversation's own record (a meta record the CLI adds beside
+                #                                           a prompt is not the prompt, and makes no request of its own)
+                if own:
+                    user_t = int(em.parse_z(o.get("timestamp")) or 0)
                 c = (o.get("message") or {}).get("content")
                 is_tool_result = isinstance(c, list) and any(
                     isinstance(b, dict) and b.get("type") == "tool_result" for b in c)
                 if not is_tool_result:                    # a genuine prompt (e.g. a retry) clears _api_error's
                     decided = True                        # verdict and decides it; the latch ignores it
                     err = None
+                    if not own:
+                        pass
+                    elif _is_retry_prompt(c):
+                        if latched is not None or decided_latched or start <= 0:
+                            retried = bool(latched is not None and latched.get("spendLimit"))
+                        else:
+                            retried = None                # the record that stood when it was sent is above this window
+                        retry_out = retried is not False
+                    elif em.is_interrupt_record(o):
+                        retry_out = False                 # the turn in flight was cut: no answer to it is coming
+                    elif _prompt_is_the_persons(o, c):
+                        retried = retry_out = False       # their own message: what answers it answers them
+                        person_t = _msg_epoch(o) or 0.0
+                    # (any other prompt is romp's own, a nudge or a notice, or another session's mail: it neither
+                    #  is a retry nor makes the next refusal the person's to have asked for, and leaves both as they were.
+                    #  The CLI's stop record is nobody's message either: a kernel restart that cuts a turn writes the
+                    #  same one as the person's Esc)
             elif t == "system" and o.get("subtype") in ("model_refusal_no_fallback",
                                                         "model_refusal_fallback"):
                 # The CLI's structured refusal record — the EXACT event behind _is_refusal_text's
@@ -40060,13 +40582,32 @@ def _api_error_pass(path, start):
                 for d in (err, latched):                  # the same dict when both still hold the episode
                     if d is not None and o.get("parentUuid") == d.get("parentUuid"):
                         d["refusal"] = True
-    return err, decided, latched, decided_latched, out_t
+    return err, decided, latched, decided_latched, out_t, (req_t, retry_out, person_t)
+
+
+def _prompt_is_the_persons(o, content):
+    """Whether a user record is the PERSON's own message: author human, the classification the chat draws its bubbles
+    by (em.author_of over the record's text, its promptSource and the CLI's own origin stamp). Not romp's own prompts
+    (a nudge, a notice, the retry: they carry the romp-injected marker), not another session's mail, not a
+    notification the CLI spliced in. A prompt on the SDK's channel with no mark at all is the composer's. (The CLI's
+    stop record reads author human too and is not a message: the one caller rules it out first, em.is_interrupt_record.)"""
+    blocks = content if isinstance(content, list) else [{"type": "text", "text": content}] if isinstance(content, str) else []
+    return em.author_of(blocks, o.get("promptSource"), {}, sdk_human=True, origin=o.get("origin")) == "human"
+
+
+def _is_retry_prompt(content):
+    """Whether a user record's content is the retry romp injects (RETRY_MSG): the text as the CLI recorded it, a
+    string or text blocks, ending in the retry line (a notice romp put ahead of it in the same message, a rename's,
+    leaves the ending as it is)."""
+    if isinstance(content, list):
+        content = "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return isinstance(content, str) and content.strip().endswith(RETRY_MSG)
 
 
 def _api_error_scan(path, start, user_clears=True):
     """_api_error_pass for ONE reader -> (err, decided): _api_error's verdict by default, the latch's with
     user_clears=False. The differential tests read the scan through this name; the kernel reads the pass."""
-    err, decided, latched, decided_latched, _ = _api_error_pass(path, start)
+    err, decided, latched, decided_latched, _, _ = _api_error_pass(path, start)
     return (err, decided) if user_clears else (latched, decided_latched)
 
 
@@ -40089,7 +40630,7 @@ def _api_error_read(path, key, latch):
     newest prompt or assistant record and keeps exactly the offsets it always read; the latch's needs an
     assistant record. Whatever this read settled (or proved by reaching byte 0) is cached for both, so the
     pusher's second question about the same transcript in the same cycle is a cache hit.
-    -> (err, latched, out_t); latched is _API_UNDECIDED when a non-latch read stopped before an assistant
+    -> (err, latched, out_t, served); latched is _API_UNDECIDED when a non-latch read stopped before an assistant
     record (the latch's own read then widens, rarely: a tail of prompts longer than the window)."""
     size = key[1]
     # TAIL-FIRST: the pusher calls this per session per push, and the old whole-file read cost
@@ -40098,7 +40639,7 @@ def _api_error_read(path, key, latch):
     win = max(1, _API_ERR_TAIL_WINDOW)   # a knob of 0 or less would never widen (0*4 stays 0): clamp, don't spin
     while True:
         start = size - win if win < size else 0
-        err, decided, latched, decided_latched, out_t = _api_error_pass(path, start)
+        err, decided, latched, decided_latched, out_t, served = _api_error_pass(path, start)
         whole = start <= 0
         if whole or decided_latched or (decided and not latch):
             break
@@ -40109,10 +40650,10 @@ def _api_error_read(path, key, latch):
     if decided_latched or whole:
         if len(_api_last_failed_cache) > 256:
             _api_last_failed_cache.clear()
-        _api_last_failed_cache[path] = (key, latched, out_t)
+        _api_last_failed_cache[path] = (key, latched, out_t, served)
     else:
         latched = _API_UNDECIDED
-    return err, latched, out_t
+    return err, latched, out_t, served
 
 
 def _api_error(path):
@@ -40173,6 +40714,25 @@ def _api_last_output_t(path):
         return _api_error_read(path, key, latch=True)[2]
     except OSError:
         return 0
+
+
+def _api_served_times(path):
+    """(req_t, retry_out, person_t) for a session's transcript, from the latch's own read and cache
+    (_api_error_pass's `served`): when the request behind its newest assistant output was made, while that output is
+    its newest assistant record (else 0); whether romp's retry of a spend-cap record is its newest genuine prompt
+    with no assistant record after it; and when the person last wrote to it themselves, as far as the read went
+    (else 0). The retry after a spend cap lifts reads the first as its evidence that a billing serves, counts the
+    second as a retry still out, and lifts a Stop's hold on the third (_spend_resume_pass)."""
+    key = _api_stat_key(path)
+    hit = _api_last_failed_cache.get(path)
+    if hit is not None and key is not None and hit[0] == key:
+        return hit[3]
+    if key is None:
+        return 0, False, 0.0
+    try:
+        return _api_error_read(path, key, latch=True)[3]
+    except OSError:
+        return 0, False, 0.0
 
 
 def _suppress_kernel_driven_ask(sid, ask, now=None):
@@ -43691,8 +44251,8 @@ def _chat_build_sig(sess, tm=None, now=None, live_map=None, deps=None):
         _echoes = bool(be.live_atoms(sid)) if not hasattr(be, "unqueue") else False
         sig.append(_limit_hold(sid) if (queued or ops or _echoes) else None)
         # retry: the per-session auto-retry state the status carries (suppressed; the ladder's count and
-        # next-attempt time).
-        sig.append((_session_retry_suppressed(sid),) + tuple(_retry_gate_state(sid)))
+        # next-attempt time; whether the spend pause came back on a refused retry on this session's billing).
+        sig.append((_session_retry_suppressed(sid),) + tuple(_retry_gate_state(sid)) + (_spend_still(tm),))
         # bg: the live background-task rows the awaiting sources and the task box read (_bg_live_norm: the
         # row's task set joined with the reg's launch ledger, the transcript's pairing for a CLI with no
         # lifecycle set, each
@@ -51606,6 +52166,9 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   # down to the real thing instead of to each view's own 10s tick.
                   "retryNextAt": int(_retry_gate_state(sid)[1]) or None,
                   "retryTries": _retry_gate_state(sid)[0] or None,
+                  # the standing spend pause came back on a refused retry ON THIS SESSION'S BILLING (_spend_still): its card
+                  # says the limit is still in force; a session capped on another billing keeps the plain line
+                  "spendStill": _spend_still(tm),
                   "backend": _session_backend(sid, tm),
                   "model": tm["model"], "effort": tm["effort"], "mode": tm.get("mode", ""),
                   # a bypass pick waiting for the relaunch that carries the flag (2026-10-01): "mode" stays the one the
@@ -65592,6 +66155,7 @@ def _light_status(sid, path, tm, now):
             "apiModelLimit": bool(aerr and aerr.get("modelLimit")), "apiAuthErr": bool(aerr and aerr.get("authErr")),
             "apiRefusal": bool(aerr and aerr.get("refusal")),
             "retrySuppressed": _session_retry_suppressed(sid), "retryNextAt": int(next_at) or None, "retryTries": tries or None,
+            "spendStill": _spend_still(tm),
             "backend": _session_backend(sid, tm), "model": tm.get("model", ""), "effort": tm.get("effort", ""),
             "mode": tm.get("mode", ""),
             # a bypass pick waiting for its relaunch (2026-10-01), as build_session states it: a skeleton tab's hover says
@@ -91977,12 +92541,20 @@ class Handler(BaseHTTPRequestHandler):
             if ferr:                                   # a string here paused retries across EVERY session
                 _refuse_ws_flag(client, msg["type"], ferr, "value", msg.get("value"))
                 return
-            if not _set_retry_paused(paused):          # the pause file could not be read: nothing was written. The press
+            if not _set_retry_paused(paused, resumed=not paused, stop=paused):   # the pause file could not be read: nothing was written. The press
                 _RETRY_PAUSE_SEQ[0] += 1               # hears it: the seq moves here, for the press alone (the shell clears
                 _reply(client, {"type": "warn",        # the pressed button's acknowledgment on a moved seq and repaints the
                                 "text": "Couldn't change the pause: its file could not be read; nothing was changed "
                                         "\u2014 retry"})   # truth), and a warn frame on its socket (the shell routes it to the
-            _mark_views_dirty()                        # notification center, the chat page to its toast)
+                #                                        notification center, the chat page to its toast)
+            else:
+                # a press that landed, for the sessions stopped on a spend cap (2026-11-15, _spend_resume_pass, on the
+                # next jobs pass): a Resume asks for retries again, so one session per capped billing gets a retry as a
+                # probe and the rest wait for what it shows (a spend cap has no ladder for the lifted pause to resume);
+                # a Stop cancels what a Resume started and holds the sessions it had not reached, and its own write
+                # above carried the marker that says so (`stop`), on file before any pass has looked
+                _spend_door[0] = None if paused else "resume"
+            _mark_views_dirty()
             return
         if msg and msg.get("type") == "ready":
             client["proto"] = 2 if msg.get("proto") == 2 else 1   # the chat wire it speaks (T323 stage 4b): 2 = uuid frames; absent = index frames

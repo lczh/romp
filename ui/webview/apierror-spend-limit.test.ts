@@ -9,6 +9,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { retryPausedText } from "./api-card-line";
 
 const R = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const F = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
@@ -33,8 +34,10 @@ test("a spend cap paints the tab alarm-red (on-you), not amber retrying", () => 
 });
 
 test("the paused line names the spend cap and points at the settings page (no fake countdown)", () => {
-  assert.match(R, /globalRetryReason === "spend"/);
-  assert.match(R, /monthly spend limit reached — raise it at claude\.ai\/settings\/usage/);
+  // the paused line lives in api-card-line.ts since 2026-11-15 (one decider for the card's three writers), executed here
+  assert.equal(retryPausedText({ paused: true, resumeAt: null, reason: "spend" }, Date.now()),
+    "monthly spend limit reached — raise it at claude.ai/settings/usage");
+  assert.match(R, /reason: globalRetryReason \}/, "the page's pause reason reaches the decider");
 });
 
 test("the globalRetryPaused push reason is threaded into the client", () => {
@@ -62,9 +65,14 @@ test("the feed card badges a spent model allowance and HIDES Retry too", () => {
 // exactly as an unlabeled limit pause did. The kernel half (the frame still carries `reason`, the engage writes
 // "limit") is pinned in tests/test_api_health_rail.py's Wiring class.
 test("retryPausedText: spend first, then the resumeAt countdown (a 'limit' reason renders the countdown)", () => {
-  const fn = R.slice(R.indexOf("function retryPausedText()"), R.indexOf("function apiRetryTick()"));
-  assert.match(fn, /if \(globalRetryReason === "spend"\) return/);
-  assert.match(fn, /if \(globalRetryResumeAt\) \{/);
-  assert.ok(fn.indexOf('=== "spend"') < fn.indexOf("if (globalRetryResumeAt)"), "spend is checked before the countdown");
+  const now = Date.now(), resumeAt = Math.floor(now / 1000) + 600;
+  const hm = new Date(resumeAt * 1000).toTimeString().slice(0, 5);
+  const limit = retryPausedText({ paused: true, resumeAt, reason: "limit" }, now);
+  assert.match(limit, new RegExp("^usage limit — retrying at " + hm + " \\(in (9m 59s|10m 0s)\\)$"));
+  assert.equal(retryPausedText({ paused: true, resumeAt, reason: "" }, now), limit, "no reason-specific branch: the countdown IS the limit's rendering");
+  assert.equal(retryPausedText({ paused: true, resumeAt, reason: "spend" }, now),
+    "monthly spend limit reached — raise it at claude.ai/settings/usage", "spend is checked before the countdown");
+  const L = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "api-card-line.ts"), "utf8");
+  const fn = L.slice(L.indexOf("export function retryPausedText("), L.indexOf("export function apiCardLine("));
   assert.doesNotMatch(fn, /"limit"/, "no reason-specific branch: the countdown IS the limit's rendering");
 });

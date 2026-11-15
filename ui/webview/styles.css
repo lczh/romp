@@ -3192,6 +3192,27 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 /* ── body ── */
 .notice-body { margin-top: 7px; max-height: 420px; overflow: auto; font-size: 0.92em; color: var(--fg); }
 .notice-collapsible:not(.notice-open) > .notice-body { display: none; }
+/* THE LIVE API-ERROR CARD'S LINE (render.ts paintApiCardLine): what happens next, or what the person must do. The head's
+   meta slot is one line and ellipsizes, and a phone has no hover to read its tooltip by, so the line also has a place
+   at the top of the open card's body (.api-line), where it wraps on a pane of any width. Which of the two shows:
+   a REMEDY (the sentence the person must read on a blocked session) shows in the body at every width; a short form (a
+   countdown) keeps the head's slot while it fits there, and moves to the body on a card too narrow for it beside the
+   gist and the buttons (540px, measured: the longest countdown, the gist and both buttons). Wherever the body shows
+   the line the open card's slot is hidden, so it shows once; a folded card keeps the one-line form in its head, with
+   the whole line as its tooltip. The body's own size and ink: it is the body's first line, not a new kind of text.
+   The CARD is the size container (a container query resolves against ancestors: the postal card's rule above). On a
+   phone-width card the head wraps as well, so the gist keeps its words and the buttons take the next line. */
+.turn-apierror .notice { container-type: inline-size; }
+.api-line { display: none; margin: 0 0 5px; white-space: normal; overflow-wrap: anywhere; }
+.api-line.api-line-remedy { display: block; }
+.notice-open > .notice-head > .api-countdown.api-line-remedy { display: none; }
+@container (max-width: 540px) {
+  .turn-apierror .api-line { display: block; }
+  .turn-apierror .notice-open > .notice-head > .api-countdown { display: none; }
+}
+@container (max-width: 400px) {
+  .turn-apierror .notice-head { flex-wrap: wrap; row-gap: 5px; }
+}
 .notice-md.md > :first-child { margin-top: 0; }
 .notice-md.md > :last-child { margin-bottom: 0; }
 .notice-plain { color: var(--dim); }

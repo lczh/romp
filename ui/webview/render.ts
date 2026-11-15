@@ -141,6 +141,7 @@ import { dirStatusHint, nextDirActive, createDirPrompt, type DirStatus } from ".
 import { mediaSrc, kernelUrl, swirlOSrc, sessionReadUrl } from "./media";
 import { initStrip, fmtReset } from "./strip";
 import { durLabel } from "./duration";
+import { apiCardSays } from "./api-card-line";   // the live API card's line: one decider for its render, the tick and the Stop/Resume-all flip
 import { readLiveStatus, thinkingText, thinkingShort, thinkingTip, thoughtLabel, taskProgressText, turnThoughtTokens, tokensShort, type LiveStatus, type ThinkingLive } from "./live-status";   // what a session is doing this second (thinking, its subagents' progress), from the kernel's liveStatus frame (2026-10-08)
 import { apiErrorReason } from "./api-error-reason";
 import { chatMdExtensions, userMdHtml } from "./chat-md";
@@ -402,7 +403,7 @@ interface ChatNotice { itemId: string; key: string; rev: number; title: string; 
                        warns?: BadgeItem["warns"]; failLog?: BadgeItem["failLog"]; doneConfirming?: boolean | null;
                        summaryAnchorUuid?: string | null; summaryAnchorQuote?: string | null; summaryAnchorsPara?: SectionItem["summaryAnchorsPara"];
                        blocked?: unknown; column?: string | null; judging?: boolean | null; working?: SpinFields["working"]; sessState?: string | null }
-interface Status { state: ChipState; sinceEpoch: number | null; modelFallback?: ModelFallback | null; notices?: ChatNotice[] | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; bgServiceIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; modePending?: boolean; fast?: string; fastCapable?: boolean | null; auth?: string; authLive?: string; authPending?: boolean; authOwn?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; turnOpen?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; needsYou?: boolean | null; needsYouCount?: number | null; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; apiNoRetry?: boolean; subagentStandard?: boolean; subagentStandardOffered?: boolean; subagentSpeed?: string; subagentStandardRetry?: boolean; relaunchWaits?: string; relaunchCuts?: string; modelWait?: string; fastPending?: boolean; }   // subagentStandard = the session's "Subagents at standard speed (experimental)" switch, subagentStandardOffered = the fast menu shows its row (the switch is on, or the model is the one it needs), subagentSpeed = the row's sub-line: the kernel's speed check (usage.speed off the transcripts) or what holds the switch back (2026-10-08)   // relaunchWaits = what a pick's relaunch waits for, in words ("2 background tasks"; absent or "" when nothing holds it: the kernel's relaunch_waits, 2026-10-01, when a pick stopped cutting the work a session runs): the Billing sub-line says it, so does the effort change's chat line while the effort badge wears its dots, and for a waiting bypass pick (modePending) the mode picker's Bypass row and the tab's hover say it   // modelWait = the model pick the model badge's dots stand for when it waits for a relaunch ("Fable 5.2"; "" when none does: a pick the session's older Claude Code did not know, applied by the relaunch onto the installed one, the review of #455): the badge's hover and the tab's say it with relaunchWaits (modelWaitText)   // relaunchCuts = what pushing that pick through now would end (the kernel's relaunch_cuts; a queued message survives a relaunch, so it is not named): the Apply now row's sub-line and confirm (apply-now.ts)   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions): the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you: the red tab) rather than a transient API error (amber, retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried: retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried: a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); apiNoRetry = the blocking notice is one nothing retries (the launch error's noRetry, the Codex bracket's end notices: a compaction Codex could not run, the app-server's death, or a kernel restart whose outcome the new kernel cannot learn; the ends named 2026-09-22, when the restart end outgrew a gloss of one failed compaction): the card draws no Retry, no Stop-all and no retrying-soon meta (2026-09-21); needsYou = the FEED filed a card of this session under needs-you (build_session, from the kernel's last feed build; null before the first) → the Needs you ring widget wears a dashed magenta ring on the tab in every live state, working included (tab-state.ts RING_TEST, tab-widgets.ts composeTabRing; the ask ring of 2026-09-13, renamed and recoloured 2026-09-21); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
+interface Status { state: ChipState; sinceEpoch: number | null; modelFallback?: ModelFallback | null; notices?: ChatNotice[] | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; bgServiceIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; modePending?: boolean; fast?: string; fastCapable?: boolean | null; auth?: string; authLive?: string; authPending?: boolean; authOwn?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; turnOpen?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; needsYou?: boolean | null; needsYouCount?: number | null; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; spendStill?: boolean; apiNoRetry?: boolean; subagentStandard?: boolean; subagentStandardOffered?: boolean; subagentSpeed?: string; subagentStandardRetry?: boolean; relaunchWaits?: string; relaunchCuts?: string; modelWait?: string; fastPending?: boolean; }   // subagentStandard = the session's "Subagents at standard speed (experimental)" switch, subagentStandardOffered = the fast menu shows its row (the switch is on, or the model is the one it needs), subagentSpeed = the row's sub-line: the kernel's speed check (usage.speed off the transcripts) or what holds the switch back (2026-10-08)   // relaunchWaits = what a pick's relaunch waits for, in words ("2 background tasks"; absent or "" when nothing holds it: the kernel's relaunch_waits, 2026-10-01, when a pick stopped cutting the work a session runs): the Billing sub-line says it, so does the effort change's chat line while the effort badge wears its dots, and for a waiting bypass pick (modePending) the mode picker's Bypass row and the tab's hover say it   // modelWait = the model pick the model badge's dots stand for when it waits for a relaunch ("Fable 5.2"; "" when none does: a pick the session's older Claude Code did not know, applied by the relaunch onto the installed one, the review of #455): the badge's hover and the tab's say it with relaunchWaits (modelWaitText)   // relaunchCuts = what pushing that pick through now would end (the kernel's relaunch_cuts; a queued message survives a relaunch, so it is not named): the Apply now row's sub-line and confirm (apply-now.ts)   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions): the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you: the red tab) rather than a transient API error (amber, retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried: retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried: a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); apiNoRetry = the blocking notice is one nothing retries (the launch error's noRetry, the Codex bracket's end notices: a compaction Codex could not run, the app-server's death, or a kernel restart whose outcome the new kernel cannot learn; the ends named 2026-09-22, when the restart end outgrew a gloss of one failed compaction): the card draws no Retry, no Stop-all and no retrying-soon meta (2026-09-21); needsYou = the FEED filed a card of this session under needs-you (build_session, from the kernel's last feed build; null before the first) → the Needs you ring widget wears a dashed magenta ring on the tab in every live state, working included (tab-state.ts RING_TEST, tab-widgets.ts composeTabRing; the ask ring of 2026-09-13, renamed and recoloured 2026-09-21); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
 
 // The side a pick this box cannot bill actually fell to ("login" | "key"), "" when nothing did: the kernel's
 // authPickFell (the launch's own decision, 2026-09-09). An older kernel without the field is read the way the
@@ -5771,33 +5772,81 @@ function citeKey(c: Citation): string {
   return c.itemId ? "g:" + c.itemId : "q:" + JSON.stringify([c.quote || "", c.src || "", c.ctx || "", c.shown || ""]);
 }
 
-// The refusal card's remedy line, ONE string: renderApiError's initial write and apiRetryTick's
-// per-second re-assert both read it, so the card and the tick can never drift into different words.
-const REFUSAL_REMEDY = "the model's safeguards refused this prompt — rewrite it or drop this thread";
+// THE LIVE API CARD'S LINE has one decider, apiCardSays (api-card-line.ts): the card's render, the one-second tick
+// and the Stop/Resume-all flip all write it through paintApiCardLine, from the card's OWN session's status, the page's
+// global pause and that session's next retry time, so the three can never disagree. Each had its own ladder before,
+// and the flip's had two answers for every card (the pause's words, or that a retry was coming), so a Resume press
+// rewrote a spend-capped card to promise a retry the kernel never sends (2026-11-15).
+function apiCardSaysFor(sid: string | null): { line: string; remedy: boolean } {
+  const st = apiCardStatus(sid);
+  // the session's next automatic retry: the tick's own schedule for a tab, else the kernel's deadline off the status
+  // (a card painted before the first tick, and a comment thread, which the tick's schedule does not hold)
+  const next = sid ? apiRetryNext.get(sid) ?? (st?.retryNextAt ? st.retryNextAt * 1000 : undefined) : undefined;
+  return apiCardSays(st, { paused: globalRetryPaused, resumeAt: globalRetryResumeAt, reason: globalRetryReason }, next, Date.now());
+}
 
-// Every API card's Stop/Resume-all button and countdown re-read the global pause at once (a click here, or
-// the kernel's globalRetryPaused push) — one function, so the two callers can never drift into different words.
+// The status a live API card reads: its OWN session's. A tab's from the session map; a comment thread's card, which
+// is rendered into the open popover under the thread's own session id, from that thread's live status.
+function apiCardStatus(sid: string | null): Status | undefined {
+  if (!sid) return undefined;
+  const s = liveSession(sid);
+  if (s) return s.status;
+  const open = openCommentThread();
+  return open && threadSidOf(open.th) === sid ? threadMetaStatus(open.th) : undefined;
+}
+
+// Write one card's line in its two places (which of them SHOWS is the sheet's: styles.css .api-line). The head's
+// one-line slot carries the line, with the whole of it as its tooltip, since the slot ellipsizes on a narrow pane. The
+// top of the card's body carries it too, where it wraps: a REMEDY, the sentence the person must read on a blocked
+// session (api-card-line.ts apiCardSays's `remedy`), shows there at every width, and a short form (a countdown) only on
+// a card too narrow for it in the head. A phone has no hover to read a clipped slot by.
+function paintApiCardLine(slot: HTMLElement, body: HTMLElement | null): void {
+  const says = apiCardSaysFor(slot.dataset.sid || null);
+  if (slot.textContent !== says.line) { slot.textContent = says.line; setTip(slot, says.line); }
+  slot.classList.toggle("api-line-remedy", says.remedy);
+  if (!body) return;
+  if (body.textContent !== says.line) body.textContent = says.line;
+  body.classList.toggle("api-line-remedy", says.remedy);
+}
+
+// Every live API card's line, re-read: each card by the session renderApiError stamped on it (data-sid), never by
+// whichever tab is active now (a card is built for a background tab too, and stays in the page while its view is
+// hidden). The tick calls this every second and the flip at once.
+function relabelApiCards(): void {
+  for (const slot of Array.from(document.querySelectorAll(".api-countdown")) as HTMLElement[]) {
+    paintApiCardLine(slot, slot.closest(".notice")?.querySelector(".api-line") as HTMLElement | null);
+  }
+}
+
+// Every API card's Stop/Resume-all button and line re-read the global pause at once (a click here, or the
+// kernel's globalRetryPaused push) — one function, so the two callers can never drift into different words.
 function relabelStopAll(): void {
   for (const btn of Array.from(document.querySelectorAll(".api-stopall"))) {
     btn.textContent = globalRetryPaused ? "Resume all auto-retries" : "Stop all auto-retries";
     setTip(btn as HTMLElement, globalRetryPaused ? "resume auto-retrying globally" : "stop the auto-retry loop for all errors globally");
   }
-  for (const cd of Array.from(document.querySelectorAll(".api-countdown"))) {
-    cd.textContent = globalRetryPaused ? retryPausedText() : "retrying soon…";
-  }
+  relabelApiCards();
 }
 
 // The turn stopped on an API error — the session is BLOCKED until retried. A red-dot card at the bottom
 // (so it stands out, the user 2026-06-16) carrying the error text + a red "API error" badge and a Retry
 // button that pastes "retry" into the session to resume the stalled turn.
 function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLElement {
-  // Live countdown to the next AUTO-retry — apiRetryTick() (below) updates this text every second; it is the
-  // head's META slot (counts and countdowns live there, never a clock).
+  // The card's line: the countdown to the next AUTO-retry, the pause's reason, or the fix for a stop nothing
+  // retries — apiCardSays decides, here and on every later write (the tick each second, the Stop/Resume-all
+  // flip), by the session stamped on the element. This is the head's META slot (counts and countdowns live
+  // there, never a clock); a remedy also gets its own line in the body (paintApiCardLine, below).
+  // THE SESSION THIS CARD IS BUILT FOR is the one being rendered (renderingSid), never the active tab: the idle
+  // prebuild builds background tabs while another tab is active, and the keyed paint never repaints an unchanged
+  // card, so a card read from activeId wore the ACTIVE session's line and buttons for good (a background tab stopped
+  // on a spend cap kept a Retry button and a promise of a retry; a background transient error never counted down).
+  // The stamp, the line and the buttons' status all read this one id.
+  const own = renderingSid ?? activeId;
   const countdown = el("span", "notice-meta api-countdown");
-  countdown.textContent = "retrying soon…";
+  countdown.dataset.sid = own || "";
   // A SPEND-CAP block gets no Retry (the user 2026-07-16, mirroring the feed card's 2026-07-14 call):
   // retrying can't lift a billing cap. The card names the fix (raise the cap) with no dead button at all.
-  const st = activeId ? liveSession(activeId)?.status : undefined;
+  const st = apiCardStatus(own);
   // A spent MODEL allowance gets no Retry either (the user 2026-08-01): "retry" re-fails until the model
   // changes or its own window resets, so the card names the fix instead of offering a button that cannot work.
   // A dead CREDENTIAL is the same shape (the user 2026-08-08, per-session auth): retrying re-presents the
@@ -5820,6 +5869,11 @@ function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLEleme
   if (st?.apiNoRetry) {
     return notice({ src: "API", glyph: "api", sev: "err", gist, body, open: true, key: "apierr:" + (ev.uuid || (activeId || "")), cls: "turn-apierror" });
   }
+  // the line's place in the body, above the error's words: where a sentence the person must read can wrap
+  // (paintApiCardLine fills it; the sheet shows it for a remedy, and for a countdown on a narrow card)
+  const line = el("div", "api-line");
+  body.insertBefore(line, body.firstChild);
+  paintApiCardLine(countdown, line);
   const acts: HTMLElement[] = [];
   // every action is a data-act word button on the button vocabulary; the document.body delegate acts
   // (apiRetryNow / stopAllRetries) and acknowledges at once — the tail rebuilds on every
@@ -5831,11 +5885,8 @@ function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLEleme
   const paused = globalRetryPaused;
   // Per-thread suppression (the user 2026-07-06): the user interrupted THIS thread's storm → its auto-retry is
   // held off until a successful turn re-arms it. Distinct from the global pause; "Retry now" + a message still work.
-  const suppressed = activeId ? !!liveSession(activeId)?.status.retrySuppressed : false;
-  if (refusal) countdown.textContent = REFUSAL_REMEDY;   // never "retrying soon…": a refusal is deterministic, and the tick RE-ASSERTS this line every second
-  else if (spendCap) countdown.textContent = "spend limit reached — raise it at claude.ai/settings/usage";   // never "retrying soon…": the tick skips spend-capped threads
-  else if (paused) countdown.textContent = retryPausedText();   // a usage-limit pause counts down to the window reset
-  else if (suppressed) countdown.textContent = "auto-retry stopped for this session — send a message to resume";
+  // (The line says which of these holds: apiCardSays's order is the stops nothing retries, each with its own
+  // remedy, then the global pause, this thread's own stop, then the countdown.)
   const stop = noticeAct(paused ? "Resume all auto-retries" : "Stop all auto-retries", "stopAllRetries",
     paused ? "resume auto-retrying globally" : "stop the auto-retry loop for all errors globally");
   stop.classList.add("api-stopall");
@@ -5856,19 +5907,6 @@ const apiRetryNext = new Map<string, number>();   // sid -> epoch ms of its next
 let globalRetryPaused = false;                    // persisted via host globalRetryPaused push
 let globalRetryResumeAt: number | null = null;    // epoch SECONDS the limiting usage window resets (kernel resumeAt) — null for a manual pause
 let globalRetryReason = "";                       // "spend" when a monthly spend cap engaged the pause — no reset to count down to (the user 2026-07-14)
-
-// The paused line names WHY/WHEN retrying resumes: a RATE-window pause carries the window's reset time so the
-// card counts down (the user 2026-07-13); a monthly SPEND cap has no reset — it lifts only when you raise it, so
-// the card says so instead of a countdown (the user 2026-07-14); a manual Stop is the plain "off" label.
-function retryPausedText(): string {
-  if (globalRetryReason === "spend") return "monthly spend limit reached — raise it at claude.ai/settings/usage";
-  if (globalRetryResumeAt) {
-    const dt = Math.max(0, Math.ceil(globalRetryResumeAt - Date.now() / 1000));
-    const hm = new Date(globalRetryResumeAt * 1000).toTimeString().slice(0, 5);
-    return `usage limit — retrying at ${hm} (in ${durLabel(dt)})`;
-  }
-  return "auto-retry off (global)";
-}
 
 function apiRetryTick(): void {
   const now = Date.now();
@@ -5904,34 +5942,10 @@ function apiRetryTick(): void {
       }
     });
   }
-  // live countdown on the NEWEST error card (the live one — older cards in the transcript are settled
-  // history and stay static): "retrying in Ns", or during a usage-limit pause the reset-time countdown
-  // (the user 2026-07-13). Ticks every second even while paused, so the paused line stays live.
-  const cds = document.querySelectorAll(".api-countdown");
-  const cd = cds.length ? (cds[cds.length - 1] as HTMLElement) : null;
-  if (cd) {
-    const active = activeId ? liveSession(activeId) : null;
-    if (active?.status.apiRefusal) {
-      // A refusal is never auto-retried, so there is no countdown to show — hold the remedy line.
-      // FIRST in the ladder: the global pause is about auto-retry, which a refusal never gets. Writing
-      // (not skipping) each tick also heals the Stop/Resume-all handler's blanket countdown rewrite
-      // within a second, without that handler needing per-session context.
-      cd.textContent = REFUSAL_REMEDY;
-    } else if (globalRetryPaused) {
-      cd.textContent = retryPausedText();
-    } else if (active?.status.retrySuppressed) {
-      cd.textContent = "auto-retry stopped for this session — send a message to resume";
-    } else {
-      const at = activeId ? apiRetryNext.get(activeId) : undefined;
-      const tries = active?.status.retryTries || 0;
-      if (!at) { cd.textContent = "retrying soon…"; } else {
-        const left = Math.max(0, Math.ceil((at - now) / 1000));
-        // the ONE duration format (duration.ts): "2m 30s", never "150s"; the attempt count explains why the
-        // gap has grown (each failure steps the backoff up) rather than looking stuck
-        cd.textContent = `retrying in ${durLabel(left)}` + (tries > 1 ? ` · ${tries} tries so far` : "");
-      }
-    }
-  }
+  // every live API card's line (paintApiCardLine): the wait until its next retry, or during a usage-limit pause the
+  // reset-time countdown (the user 2026-07-13). Every second even while paused, so the paused line stays live; a
+  // card nothing retries is handed its remedy again each time, by the same function that wrote it at render.
+  relabelApiCards();
 }
 setInterval(() => { apiRetryTick(); retryingTick(); liveStatusTick(); }, 1000);   // ONE 1s timer drives the countdowns and the live-status clocks
 
