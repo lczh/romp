@@ -6357,35 +6357,50 @@ never the previous numbers.
 ### Retrying after a spend limit is raised
 
 A session stopped on a monthly spend limit is never retried while the limit
-stands: a retry cannot raise it. Once the kernel sees the limit lifted for a
-session, it sends that session one `retry`, once per error record. It sees
-that in one of three ways:
+stands: a retry cannot raise it. A session whose CLI is running and whose
+conversation ends on a spend-limit error gets one `retry` when one of these
+happens:
 
 - Another session on the same billing (the same login, or the API key) is
-  served a request it made after the record. An answer to a request that was
+  served a request it made after the error. An answer to a request that was
   already in flight when the limit fell does not count, though the `spend`
-  pause itself lifts on any fresh answer. A record that itself answers such
-  a retry is retried again only when a session that had been refused on that
-  billing is served: a limit can serve one session's small request and refuse
-  another's large one, and the first session's answers would otherwise draw a
-  retry each.
-- The session's CLI comes up on a different billing after the record. Only
+  pause itself lifts on any fresh answer.
+- The session's CLI comes up on a different billing after the error. Only
   that session is retried, even while the pause on the billing it left holds.
 - You press `Resume all auto-retries`. That is a request, not evidence, so
-  one stopped session is retried as a probe. If it is served, the rest follow
-  by the first rule. If it is refused, the pause returns and the stopped
-  sessions' cards read `spend limit still in force`.
+  one stopped session per capped billing is retried as a probe. If the probe
+  is served, every session that was stopped on that billing when you pressed
+  gets its retry. If it is refused, the pause returns, the stopped sessions'
+  cards read `spend limit still in force`, and nothing else is sent.
+
+A spend-limit error that itself answers such a retry is yours to move: romp
+does not retry it again, whatever other sessions do. A limit can serve one
+session's small request and refuse another's large one, and without this
+rule the first session's answers would draw a retry each. Your Resume, a
+message of yours to that session, or moving it to another billing retries
+it.
 
 At most three of these retries are unanswered at a time
 (`ROMP_BOOT_RESUME_CONCURRENCY`, the setting that paces CLI launches); the
-next is sent when the API answers one, with output or with a new error. A
-refusal is a new spend-limit record: the pause re-engages on it and nothing
-more is sent.
+next is sent when the API answers one, with output or with an error. A
+Resume pressed while three are out keeps its probe until one is answered.
+`Stop all auto-retries` cancels what a Resume started and leaves the
+sessions it had not reached as they are until you press Resume or write to
+them, even after the stop itself has cleared.
 
 Not retried this way: a session with no running CLI (its next message is its
-retry), a session you interrupted, a session holding a message of yours that
-was queued behind the limit (that message is delivered instead), a session
-covered by a usage-limit pause or a manual stop, and a Codex session.
+retry), a session you interrupted, a session mid-compaction, a session
+holding a message of yours that was queued behind the limit (that message is
+delivered instead), a session covered by a usage-limit pause or a manual
+stop, and a Codex session.
+
+The `still in force` wording lasts until the pause is next written: it
+lifts, you press Stop or Resume, or a pause of another kind engages. A
+kernel restart clears it too, and the pause then reads `spend limit
+reached`. A restart sends no retry twice and keeps the count of three: a
+session already retried has the retry in its conversation or in the
+backend's queue, and both are read again. A Resume's or a Stop's standing
+effect on the sessions it had not reached is forgotten by a restart.
 
 ## Where things live
 
