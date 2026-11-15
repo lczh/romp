@@ -5762,13 +5762,23 @@ function citeKey(c: Citation): string {
 // and the flip's had two answers for every card (the pause's words, or that a retry was coming), so a Resume press
 // rewrote a spend-capped card to promise a retry the kernel never sends (2026-11-15).
 function apiCardLineFor(sid: string | null): string {
-  const st = sid ? liveSession(sid)?.status : undefined;
-  return apiCardLine(st, { paused: globalRetryPaused, resumeAt: globalRetryResumeAt, reason: globalRetryReason, still: globalRetryStill },
+  return apiCardLine(apiCardStatus(sid), { paused: globalRetryPaused, resumeAt: globalRetryResumeAt, reason: globalRetryReason, still: globalRetryStill },
                      sid ? apiRetryNext.get(sid) : undefined, Date.now());
 }
 
+// The status a live API card reads: its OWN session's. A tab's from the session map; a comment thread's card, which
+// is rendered into the open popover under the thread's own session id, from that thread's live status.
+function apiCardStatus(sid: string | null): Status | undefined {
+  if (!sid) return undefined;
+  const s = liveSession(sid);
+  if (s) return s.status;
+  const open = openCommentThread();
+  return open && threadSidOf(open.th) === sid ? threadMetaStatus(open.th) : undefined;
+}
+
 // Every live API card's line, re-read: each card by the session renderApiError stamped on it (data-sid), never by
-// whichever tab is active now. The tick calls this every second and the flip at once.
+// whichever tab is active now (a card is built for a background tab too, and stays in the page while its view is
+// hidden). The tick calls this every second and the flip at once.
 function relabelApiCards(): void {
   for (const cd of Array.from(document.querySelectorAll(".api-countdown")) as HTMLElement[]) {
     cd.textContent = apiCardLineFor(cd.dataset.sid || null);
@@ -5793,12 +5803,18 @@ function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLEleme
   // retries — apiCardLineFor decides, here and on every later write (the tick each second, the Stop/Resume-all
   // flip), by the session stamped on the element. It is the head's META slot (counts and countdowns live
   // there, never a clock).
+  // THE SESSION THIS CARD IS BUILT FOR is the one being rendered (renderingSid), never the active tab: the idle
+  // prebuild builds background tabs while another tab is active, and the keyed paint never repaints an unchanged
+  // card, so a card read from activeId wore the ACTIVE session's line and buttons for good (a background tab stopped
+  // on a spend cap kept a Retry button and a promise of a retry; a background transient error never counted down).
+  // The stamp, the line and the buttons' status all read this one id.
+  const own = renderingSid ?? activeId;
   const countdown = el("span", "notice-meta api-countdown");
-  countdown.dataset.sid = activeId || "";
-  countdown.textContent = apiCardLineFor(activeId);
+  countdown.dataset.sid = own || "";
+  countdown.textContent = apiCardLineFor(own);
   // A SPEND-CAP block gets no Retry (the user 2026-07-16, mirroring the feed card's 2026-07-14 call):
   // retrying can't lift a billing cap. The card names the fix (raise the cap) with no dead button at all.
-  const st = activeId ? liveSession(activeId)?.status : undefined;
+  const st = apiCardStatus(own);
   // A spent MODEL allowance gets no Retry either (the user 2026-08-01): "retry" re-fails until the model
   // changes or its own window resets, so the card names the fix instead of offering a button that cannot work.
   // A dead CREDENTIAL is the same shape (the user 2026-08-08, per-session auth): retrying re-presents the
@@ -5832,8 +5848,8 @@ function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLEleme
   const paused = globalRetryPaused;
   // Per-thread suppression (the user 2026-07-06): the user interrupted THIS thread's storm → its auto-retry is
   // held off until a successful turn re-arms it. Distinct from the global pause; "Retry now" + a message still work.
-  // (The line says which of these holds: apiCardLine's order is refusal, the other stops nothing retries, the
-  // global pause, this thread's own stop, then the countdown.)
+  // (The line says which of these holds: apiCardLine's order is the stops nothing retries, each with its own
+  // remedy, then the global pause, this thread's own stop, then the countdown.)
   const stop = noticeAct(paused ? "Resume all auto-retries" : "Stop all auto-retries", "stopAllRetries",
     paused ? "resume auto-retrying globally" : "stop the auto-retry loop for all errors globally");
   stop.classList.add("api-stopall");

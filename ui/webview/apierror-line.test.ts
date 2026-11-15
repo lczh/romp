@@ -12,10 +12,12 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { apiCardLine, apiCardOnYou, retryPausedText, REFUSAL_REMEDY, ON_YOU_REMEDY, SPEND_STILL_REMEDY, SUPPRESSED_LINE,
-         type ApiCardStatus, type RetryPause } from "./api-card-line";
+import { apiCardLine, apiCardOnYou, retryPausedText, REFUSAL_REMEDY, SPEND_CAP_REMEDY, SPEND_STILL_REMEDY, MODEL_LIMIT_REMEDY,
+         AUTH_REMEDY, SUPPRESSED_LINE, type ApiCardStatus, type RetryPause } from "./api-card-line";
+import { apiErrorReason } from "./api-error-reason";
 
-const R = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+const ROOT = path.resolve(process.cwd(), "..");
+const R = fs.readFileSync(path.join(ROOT, "ui", "webview", "render.ts"), "utf8");
 
 const NOW = 1_800_000_000_000;                    // a fixed clock, epoch ms
 const OFF: RetryPause = { paused: false, resumeAt: null, reason: "" };
@@ -26,11 +28,24 @@ const STILL: RetryPause = { paused: true, resumeAt: null, reason: "spend", still
 const PAUSES: [string, RetryPause][] = [["off", OFF], ["manual", MANUAL], ["spend", SPEND], ["limit", LIMIT]];
 
 const ON_YOU: [string, ApiCardStatus, string][] = [
-  ["a spend cap", { apiSpendLimit: true }, ON_YOU_REMEDY],
-  ["a spent model allowance", { apiModelLimit: true }, ON_YOU_REMEDY],
-  ["a dead credential", { apiAuthErr: true }, ON_YOU_REMEDY],
+  ["a spend cap", { apiSpendLimit: true }, SPEND_CAP_REMEDY],
+  ["a spent model allowance", { apiModelLimit: true }, MODEL_LIMIT_REMEDY],
+  ["a dead credential", { apiAuthErr: true }, AUTH_REMEDY],
   ["a refusal", { apiRefusal: true }, REFUSAL_REMEDY],
 ];
+
+test("each stop nothing retries names its OWN fix, in words the interface already has for it", () => {
+  // the review of PR 470: a spent model allowance and a dead credential wore the spend cap's sentence, the wrong remedy
+  // for both (raising a spend limit mends neither). No new copy: each line is the sentence another surface already says.
+  assert.equal(SPEND_CAP_REMEDY, "spend limit reached — raise it at claude.ai/settings/usage");
+  assert.equal(REFUSAL_REMEDY, apiErrorReason({ refusal: true }), "the bell's sentence for a refusal (api-error-reason.ts)");
+  assert.equal(MODEL_LIMIT_REMEDY, "this model is out of allowance — switch model or add credits");
+  assert.equal(MODEL_LIMIT_REMEDY, apiErrorReason({ modelLimit: true }), "the retry line's and the bell's sentence (api-error-reason.ts)");
+  assert.equal(AUTH_REMEDY, "this session's sign-in or API key isn't working — fix the login (claude /login) or the key, or switch which one it bills");
+  const KERNEL = fs.readFileSync(path.join(ROOT, "kernel", "kernel.py"), "utf8");
+  assert.ok(KERNEL.includes(`else "${AUTH_REMEDY}" if aerr.get("authErr")`), "the feed card's sentence for a dead credential, word for word (the kernel's `what`)");
+  assert.equal(new Set(ON_YOU.map(([, , line]) => line)).size, 4, "four stops, four lines");
+});
 
 test("a card nothing retries keeps its remedy whatever the global pause does: engaged, lifted, or never on", () => {
   for (const [what, st, line] of ON_YOU) {
@@ -53,7 +68,7 @@ test("Resume all over a spend pause leaves a spend-capped card naming the cap, n
   const st: ApiCardStatus = { apiSpendLimit: true };
   const before = apiCardLine(st, SPEND, undefined, NOW);
   const after = apiCardLine(st, OFF, undefined, NOW);
-  assert.equal(before, "spend limit reached — raise it at claude.ai/settings/usage");
+  assert.equal(before, SPEND_CAP_REMEDY);
   assert.equal(after, before, "the flip changes nothing on a card the kernel never auto-retries");
 });
 
@@ -66,10 +81,11 @@ test("a Resume the cap refused is answered: the pause comes back marked, and the
   assert.equal(retryPausedText(STILL, NOW), "monthly spend limit still in force — raise it at claude.ai/settings/usage");
   assert.equal(apiCardLine({}, STILL, NOW + 4_000, NOW), retryPausedText(STILL, NOW), "a transient card under that pause wears the pause's line");
   // the mark belongs to a standing spend pause and to the cap's own card: nothing else reads it
-  assert.equal(apiCardLine(st, { ...STILL, paused: false }, undefined, NOW), ON_YOU_REMEDY, "the pause lifted: the plain line");
-  assert.equal(apiCardLine(st, { ...STILL, reason: "limit" }, undefined, NOW), ON_YOU_REMEDY);
-  assert.equal(apiCardLine({ apiModelLimit: true }, STILL, undefined, NOW), ON_YOU_REMEDY, "a spent model allowance is not the spend cap");
-  assert.equal(apiCardLine({ apiAuthErr: true }, STILL, undefined, NOW), ON_YOU_REMEDY);
+  assert.equal(apiCardLine(st, { ...STILL, paused: false }, undefined, NOW), SPEND_CAP_REMEDY, "the pause lifted: the plain line");
+  assert.equal(apiCardLine(st, { ...STILL, reason: "limit" }, undefined, NOW), SPEND_CAP_REMEDY);
+  assert.equal(apiCardLine(st, SPEND, undefined, NOW), SPEND_CAP_REMEDY, "a spend pause with no mark: the plain line");
+  assert.equal(apiCardLine({ apiModelLimit: true }, STILL, undefined, NOW), MODEL_LIMIT_REMEDY, "a spent model allowance is not the spend cap");
+  assert.equal(apiCardLine({ apiAuthErr: true }, STILL, undefined, NOW), AUTH_REMEDY);
   assert.equal(apiCardLine({ apiRefusal: true }, STILL, undefined, NOW), REFUSAL_REMEDY);
   // the frame's field reaches the decider, and a kernel that sends none reads as the plain line
   assert.match(R, /globalRetryStill = m\.still === true;/);
@@ -110,15 +126,22 @@ const card = R.slice(R.indexOf("function renderApiError("), R.indexOf("// ──
 const tick = R.slice(R.indexOf("function apiRetryTick("), R.indexOf("function renderTool("));
 
 test("render.ts reads a card's line through ONE helper, from the card's own session and the page's pause", () => {
-  assert.match(lineFor, /const st = sid \? liveSession\(sid\)\?\.status : undefined;/);
-  assert.match(lineFor, /return apiCardLine\(st, \{ paused: globalRetryPaused, resumeAt: globalRetryResumeAt, reason: globalRetryReason, still: globalRetryStill \},\n\s+sid \? apiRetryNext\.get\(sid\) : undefined, Date\.now\(\)\);/);
+  assert.match(lineFor, /return apiCardLine\(apiCardStatus\(sid\), \{ paused: globalRetryPaused, resumeAt: globalRetryResumeAt, reason: globalRetryReason, still: globalRetryStill \},\n\s+sid \? apiRetryNext\.get\(sid\) : undefined, Date\.now\(\)\);/);
+  // the status is the card's own session's: a tab's, or the open comment thread's for a card in its popover
+  assert.match(lineFor, /function apiCardStatus\(sid: string \| null\): Status \| undefined \{\n\s+if \(!sid\) return undefined;\n\s+const s = liveSession\(sid\);\n\s+if \(s\) return s\.status;\n\s+const open = openCommentThread\(\);\n\s+return open && threadSidOf\(open\.th\) === sid \? threadMetaStatus\(open\.th\) : undefined;/);
   // …and one writer applies it to every live card, each by the session stamped on it at render
   assert.match(lineFor, /function relabelApiCards\(\): void \{\n\s+for \(const cd of Array\.from\(document\.querySelectorAll\("\.api-countdown"\)\) as HTMLElement\[\]\) \{\n\s+cd\.textContent = apiCardLineFor\(cd\.dataset\.sid \|\| null\);/);
 });
 
-test("the card's render stamps its session on the line and writes it through the helper", () => {
-  assert.match(card, /countdown\.dataset\.sid = activeId \|\| "";/);
-  assert.match(card, /countdown\.textContent = apiCardLineFor\(activeId\);/);
+test("the card's render reads the session it is being built FOR, never the active tab: the stamp, the line and the buttons' status", () => {
+  // the idle prebuild builds background tabs while another tab is active (renderingSid is the one being built), and the
+  // keyed paint never repaints an unchanged card: read from activeId, a background card wore the active session's line
+  // and buttons for good (the review of PR 470; apierror-line-browser.test.ts renders it)
+  assert.match(card, /const own = renderingSid \?\? activeId;/);
+  assert.match(card, /countdown\.dataset\.sid = own \|\| "";/);
+  assert.match(card, /countdown\.textContent = apiCardLineFor\(own\);/);
+  assert.match(card, /const st = apiCardStatus\(own\);/);
+  assert.doesNotMatch(card, /liveSession\(activeId\)/, "no read of the active tab's status is left in the card");
 });
 
 test("the Stop/Resume-all flip relabels the buttons and hands every card's line to the helper", () => {
@@ -135,7 +158,8 @@ test("the one-second tick hands every card's line to the helper, paused or not",
 test("no writer in render.ts words a card's line on its own", () => {
   // every sentence a card can wear lives in api-card-line.ts; render.ts holds none of them, so a fourth
   // writer cannot drift into words of its own without failing here
-  for (const words of ["retrying soon…", "retrying in ", "auto-retry off (global)", "spend limit reached", "still in force", SUPPRESSED_LINE, REFUSAL_REMEDY]) {
+  for (const words of ["retrying soon…", "retrying in ", "auto-retry off (global)", "spend limit reached", "still in force",
+                       MODEL_LIMIT_REMEDY, AUTH_REMEDY, SUPPRESSED_LINE, REFUSAL_REMEDY]) {
     assert.ok(!R.includes(words), `render.ts still carries "${words}"`);
   }
   const writes = R.match(/\.textContent = apiCardLineFor\(/g) || [];

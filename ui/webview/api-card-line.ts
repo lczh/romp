@@ -10,6 +10,7 @@
 // card's own session status, the global pause, and that session's next retry time. Pure and DOM-free so
 // node tests execute it; the Status interface in render.ts is a superset of the shape read here.
 import { durLabel } from "./duration";
+import { apiErrorReason } from "./api-error-reason";
 
 export interface ApiCardStatus {
   apiRefusal?: boolean;
@@ -29,14 +30,21 @@ export interface RetryPause {
                              // Resume, was refused: the cap is still in force (the kernel's word, on the same frame)
 }
 
-// The refusal card's remedy line: a refusal is deterministic on the same input, so nothing retries it.
+// The lines of the four stops nothing retries (the card draws no Retry button for them): each names its own fix, in
+// words the interface already uses for that state, so the chat card, the feed card and the bell cannot disagree
+// about what a failure asks of the person.
+// A refusal is deterministic on the same input (api-error-reason.ts carries the same sentence for the bell).
 export const REFUSAL_REMEDY = "the model's safeguards refused this prompt — rewrite it or drop this thread";
-// A spend cap, a spent model allowance and a dead credential: nothing retries these either (the card
-// draws no Retry button for them), and the line names the fix.
-export const ON_YOU_REMEDY = "spend limit reached — raise it at claude.ai/settings/usage";
+// A monthly spend cap.
+export const SPEND_CAP_REMEDY = "spend limit reached — raise it at claude.ai/settings/usage";
 // …and the spend cap's own line once a retry has been tried and refused (the pause's `still`): the answer to a
 // Resume press that changed nothing, in place of a line that would read exactly as it did before the press.
 export const SPEND_STILL_REMEDY = "spend limit still in force — raise it at claude.ai/settings/usage";
+// A spent model allowance: the retry line's and the bell's own words for it (api-error-reason.ts), read from there.
+export const MODEL_LIMIT_REMEDY = apiErrorReason({ modelLimit: true });
+// A dead credential: the feed card's sentence for it (the kernel's _feed_session_entry `what`; the test pins the two
+// equal). The feed names the stored login instead when it knows which one was refused; this card says the general one.
+export const AUTH_REMEDY = "this session's sign-in or API key isn't working — fix the login (claude /login) or the key, or switch which one it bills";
 // A thread the person interrupted: its auto-retry stays off until a turn of theirs lands.
 export const SUPPRESSED_LINE = "auto-retry stopped for this session — send a message to resume";
 
@@ -64,13 +72,14 @@ export function retryPausedText(pause: RetryPause, nowMs: number): string {
 
 /** The card's line. `st` is the status of the session the card belongs to, `nextAtMs` that session's
  *  next automatic retry (epoch ms; undefined when none is scheduled), `nowMs` the clock.
- *  The order is the card's own: what nothing retries first (the remedy holds whatever the pause does),
- *  then the global pause, then this thread's own stop, then the countdown. */
+ *  The order is the card's own: what nothing retries first (each stop's own remedy, which holds whatever
+ *  the pause does), then the global pause, then this thread's own stop, then the countdown. */
 export function apiCardLine(st: ApiCardStatus | null | undefined, pause: RetryPause,
                             nextAtMs: number | undefined, nowMs: number): string {
   if (st?.apiRefusal) return REFUSAL_REMEDY;
-  if (st?.apiSpendLimit && pause.paused && pause.reason === "spend" && pause.still) return SPEND_STILL_REMEDY;
-  if (apiCardOnYou(st)) return ON_YOU_REMEDY;
+  if (st?.apiSpendLimit) return pause.paused && pause.reason === "spend" && pause.still ? SPEND_STILL_REMEDY : SPEND_CAP_REMEDY;
+  if (st?.apiModelLimit) return MODEL_LIMIT_REMEDY;
+  if (st?.apiAuthErr) return AUTH_REMEDY;
   if (pause.paused) return retryPausedText(pause, nowMs);
   if (st?.retrySuppressed) return SUPPRESSED_LINE;
   if (!nextAtMs) return "retrying soon…";

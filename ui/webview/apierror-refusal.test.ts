@@ -42,7 +42,7 @@ test("the chat error card drops Retry on a refusal and names the real fix in pla
   // tick's re-assert below cannot drift into different words
   assert.equal(REFUSAL_REMEDY, "the model's safeguards refused this prompt — rewrite it or drop this thread");
   assert.equal(apiCardLine({ apiRefusal: true }, { paused: false, resumeAt: null, reason: "" }, undefined, Date.now()), REFUSAL_REMEDY);
-  assert.match(apiErr, /countdown\.textContent = apiCardLineFor\(activeId\);/);
+  assert.match(apiErr, /countdown\.textContent = apiCardLineFor\(own\);/);
   // no dead button either: a refusal (like every no-Retry class) appends nothing after the Retry arm. Anchored with no
   // wildcard (review find): the Retry push, its closing brace and the next comment are adjacent lines, so a re-added
   // `else if` arm under any label fails this pin
