@@ -3330,7 +3330,45 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   every quarter of its fill, several walks in a restart's first minutes (a
   tenfold fill walks eight times), bounded by the series rather than the floor,
   since each walk costs its heap's size and the sizes grow by a quarter: their
-  sum is under five times the final heap's, under three on busy cycles. A backstop is staged as a release is: a cheap collect
+  sum is under five times the final heap's, under three on busy cycles. Growth
+  owes the walk only while memory is scarce (2026-11-15): the walk stops every
+  thread for a time linear in the heap (a lab fill of 240,000 records, 0.86 GB
+  resident, ran five walks of 108 to 491 ms where the longest collection had
+  been 7 ms, about 0.6 s per GB), and what it frees matters only to a machine
+  short of memory. So the growth bound is armed (`growthArmed`) only while the
+  process's resident size (`residentBytes`, the figure `process.rss_kb`
+  reports) is at or above `backstopResident` (one half) of its memory bound
+  (`memoryBoundBytes`: MemTotal, or the process's cgroup limit where one sits
+  below it, the bound every memory-scaled cache takes;
+  `recordCache.cgroupLimitBytes` is that limit as read at start). A 30 GB
+  kernel on a 2 TB host does not walk for growth, a 3 GB kernel on a 15 GB
+  machine not until it passes 7.5 GB, and a kernel under a unit's `MemoryHigh=`
+  or `MemoryMax=` walks from half that limit. The bound is read once, at the
+  first run, as every memory-scaled bound is read once at start, so a
+  `MemoryHigh=` changed on a running kernel applies at its next start. The
+  resident size is read once per run, after its freeze, by one read of
+  `/proc/self/statm`: three syscalls. A run is on the pusher thread, where
+  each syscall releases the GIL and can cost the pusher a switch interval to
+  get the interpreter back, and re-reading the bound's cgroup files there
+  made 115 syscalls a run on a five-level cgroup path (beside two CPU-bound
+  threads in a lab, a median of 521 ms a run then and 21 ms now), which a
+  limit applying without a restart is not worth. Under the fraction a run
+  reads neither `sys.getallocatedblocks()` (`heapBlocks` is then `null`) nor,
+  on a reclaim, `gc.get_freeze_count()` (`frozenAtReclaim` is then `null`;
+  `?walk=1` still reads the count), so a run costs what it did before the
+  growth bound plus that one read (0.04 ms uncontended); the fold-in count
+  and a release walk at any size. A gate that opens
+  after the first freeze has no walk to measure from, so the walk is owed at
+  once (past the floor, on a busy cycle too) and the quarter rule holds from
+  that walk on; the baseline moves only at a walk whose reading was taken and
+  stands across a spell back under the fraction, so crossing the fraction is
+  never a walk by itself, and after that first one two growth walks are never
+  less than a quarter of growth apart. A reading that cannot be had (`null`)
+  leaves growth owing the walk as without the gate, said once on stderr and
+  counted under `errors`. `growthWalks` counts the backstops growth has owed.
+  A machine whose usable memory is under its MemTotal with no cgroup limit to
+  say so (a balloon driver) reads as having memory to spare: give the unit a
+  `MemoryHigh=`, or lower the fraction. A backstop is staged as a release is: a cheap collect
   with the freeze in place first (the fold-in that cycle would have run, taking
   the young garbage since the last collection), then the unfreeze and the walk,
   so a reclaim's count is what the freeze held and not that plus the young. A
@@ -3356,6 +3394,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   sub-block carries `enabled`, `active` (whether a freeze is held now; named
   apart from the `frozen` count above, `gc.get_freeze_count()` on `?walk=1`),
   `loadTrees`, `backstopFoldins` and `backstopGrowth` (the three thresholds),
+  `backstopResident`, `memoryBoundBytes`, `residentBytes`, `growthArmed` and
+  `growthWalks` (the growth gate: its fraction, the bound as read once at
+  the first run, the resident size at the last run, whether growth owed the
+  walk by them, and how many it has owed),
   `heapBlocks`, `heapBlocksAtWalk`, `lastReclaimCollected`, `reclaimCollected` and
   `frozenAtReclaim` (the growth bound's readings and the last reclaim's finds,
   above), `gen2Threshold` (the
@@ -3401,7 +3443,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   that owes the backstop (`backstopGrowth`, default 0.25): 0 turns the growth
   bound off and leaves the fold-in count as the only backstop, a value above 1 is
   clamped to 1, and one that is not a number from 0 to 1 falls back to the
-  default, said once and counted under `errors`. While the freeze is on, the kernel also raises CPython's
+  default, said once and counted under `errors`. `ROMP_GC_FREEZE_BACKSTOP_RESIDENT`
+  sets the share of its memory bound the kernel must hold before growth owes
+  the backstop (`backstopResident`, default 0.5): 0 arms it at any size with
+  neither reading taken (the growth bound as first shipped), a value above 1 is
+  clamped to 1, and a bad one falls back to the default the same way; turning
+  the growth walk off is the growth knob's 0. While the freeze is on, the kernel also raises CPython's
   full-collection trigger (the third of `thresholds`, stock 10) to 100 at boot,
   and `gen2Threshold` reads it. CPython runs an automatic full collection once
   generation 2 has seen more than that many generation-1 collections and the
