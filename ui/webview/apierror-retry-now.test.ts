@@ -7,6 +7,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { apiCardLine, retryPausedText } from "./api-card-line";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 // isolate the Retry button's click handler — since 2026-09-08 (the notice-vocabulary pass) it lives on the
@@ -35,11 +36,17 @@ test("the AUTO-retry tick stays a plain apiRetry (no manual) so the pause/suppre
 test("a usage-limit pause counts down to the window reset instead of a mute label (the user 2026-07-13)", () => {
   // the kernel's globalRetryPaused push carries resumeAt (the limiting window's reset epoch, seconds)
   assert.match(RENDER, /globalRetryResumeAt = typeof m\.resumeAt === "number" \? m\.resumeAt : null;/);
-  assert.match(RENDER, /usage limit — retrying at \$\{hm\} \(in \$\{durLabel\(dt\)\}\)/);
-  // the tick updates the countdown every second EVEN while paused (only the schedule loop is gated)
-  assert.match(RENDER, /if \(globalRetryPaused\) \{\s*\n\s*cd\.textContent = retryPausedText\(\);/);
-  // the LIVE (newest) error card ticks — older cards in the transcript are settled history
-  assert.match(RENDER, /const cd = cds\.length \? \(cds\[cds\.length - 1\] as HTMLElement\) : null;/);
+  // the paused line is api-card-line.ts's (the card's one decider since 2026-11-15), executed: the reset as a
+  // clock time and the wait in the one duration format
+  const now = 1_800_000_000_000, resumeAt = now / 1000 + 134;
+  const hm = new Date(resumeAt * 1000).toTimeString().slice(0, 5);
+  assert.equal(retryPausedText({ paused: true, resumeAt, reason: "limit" }, now), `usage limit — retrying at ${hm} (in 2m 14s)`);
+  // the tick updates every card's line each second EVEN while paused (only the schedule loop is gated): the
+  // relabel sits after the schedule block, at the tick's own level
+  const tick = RENDER.slice(RENDER.indexOf("function apiRetryTick("), RENDER.indexOf("function renderTool("));
+  assert.match(tick, /\n  if \(!globalRetryPaused\) \{[\s\S]*\n  \}\n[\s\S]*\n  relabelApiCards\(\);\n\}/);
+  // the live card ticks by the session stamped on it; a settled error is a note with no line (apiErrorNote)
+  assert.match(RENDER, /const says = apiCardSaysFor\(slot\.dataset\.sid \|\| null\);/);
 });
 
 // ── the cadence is the KERNEL's (the user 2026-07-29) ───────────────────────────────────────────────
@@ -59,8 +66,9 @@ test("a long wait reads in minutes, with the attempt count explaining the gap", 
   // "retrying in 1750s" is not a readable wait, and a silent 30-minute gap reads as stuck rather than
   // as deliberate — the count is what says the backoff has stepped up
   // 2026-09-08: the ONE duration format (duration.ts durLabel — "2m 30s"), not a private minutes rule
-  assert.match(RENDER, /cd\.textContent = `retrying in \$\{durLabel\(left\)\}`/);
-  assert.match(RENDER, /tries > 1 \? ` · \$\{tries\} tries so far` : ""/);
+  const off = { paused: false, resumeAt: null, reason: "" }, now = 1_800_000_000_000;
+  assert.equal(apiCardLine({ retryTries: 6 }, off, now + 1_750_000, now), "retrying in 29m 10s · 6 tries so far");
+  assert.equal(apiCardLine({ retryTries: 1 }, off, now + 5_000, now), "retrying in 5s", "a first attempt has no history to explain");
 });
 
 test("the status carries the schedule", () => {
