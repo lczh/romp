@@ -174,6 +174,7 @@ CENSUS = {
     "_space_paths": ("memo", "the first resolution of a message's spaced spans latches for the process's life"),
     "_spend_ceiling_parse": ("pure", "over a message's text (the spend guard's own sentence)"),
     "_spend_cuts": ("sig", "states", "the spend guard's cut records, a fold of its own over the same file"),
+    "_spend_still": ("sig", "retry", "whether the spend pause came back on a refused retry on this session's billing (the status's spendStill): the mark's billing against the row's own"),
     "_split_followup": ("pure", "over a text"),
     "_split_reminders": ("pure", "over a text"),
     "_stamp_agents": ("sig", "taskout", "the sidecar directory and each agent transcript it reads are taskout deps (stat'd before the read, re-stat'd per cycle); the task scan is over the transcript, the liveness gate over the row and the spawn epoch (row, reg, gone)"),
@@ -980,7 +981,15 @@ class Differential(_World):
         b = self.sig()
         self.assertEqual(self.moved(a, b), ("retry",))
         self.assertTrue(km._write_retry_suppress({SID: NOW}), "the suppression ledger's one writer")
-        self.assertEqual(self.moved(b, self.sig()), ("retry",))
+        c = self.sig()
+        self.assertEqual(self.moved(b, c), ("retry",))
+        # the spend pause comes back on a refused retry on this session's billing: its card's line changes (spendStill)
+        saved = km._RETRY_PAUSE_STILL[0]
+        km._RETRY_PAUSE_STILL[0] = km._billing_key(self.row)     # this session's own billing
+        try:
+            self.assertEqual(self.moved(c, self.sig()), ("retry",))
+        finally:
+            km._RETRY_PAUSE_STILL[0] = saved
 
     def test_the_live_task_rows_miss_under_bg_as_the_builds_own_filter_returns_them(self):
         """The bg component is the row list _bg_live_norm returns, the build's own filtered view (a row

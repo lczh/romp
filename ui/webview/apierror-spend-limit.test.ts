@@ -37,7 +37,7 @@ test("the paused line names the spend cap and points at the settings page (no fa
   // the paused line lives in api-card-line.ts since 2026-11-15 (one decider for the card's three writers), executed here
   assert.equal(retryPausedText({ paused: true, resumeAt: null, reason: "spend" }, Date.now()),
     "monthly spend limit reached — raise it at claude.ai/settings/usage");
-  assert.match(R, /reason: globalRetryReason, still: globalRetryStill \}/, "the page's pause reason reaches the decider");
+  assert.match(R, /reason: globalRetryReason \}/, "the page's pause reason reaches the decider");
 });
 
 test("the globalRetryPaused push reason is threaded into the client", () => {

@@ -210,7 +210,7 @@ class FaultCensus(unittest.TestCase):
         "autoPauseOnLimit": ("_auto_pause_on_limit",), "usagePoll": ("_usage_poll_tick",), "retryUpgrade": ("_retry_upgrade_tick",),
         "autoPauseOnSpend": ("_auto_pause_on_spend_limit",), "spendGuard": ("_spend_guard_tick",),
         "autoResumeRetry": ("_auto_resume_retry",), "autoResumeSession": ("_auto_resume_session_retry",),
-        "autoRetry": ("_auto_retry_tick", "_fire_api_retry"), "idleQueueDrive": ("_idle_queue_drive_tick",),
+        "autoRetry": ("_auto_retry_tick", "_fire_api_retry", "_spend_resume_pass"), "idleQueueDrive": ("_idle_queue_drive_tick",),
         "clearDoneNotes": ("_clear_done_working_notes",), "heldWorking": ("_held_working_pass",),
         "checkpointFirstSight": ("_checkpoint_first_sight",), "persistCheckpoints": ("_persist_checkpoints", "_ckpt_settle_write"),
     }
