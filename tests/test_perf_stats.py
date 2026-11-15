@@ -606,10 +606,16 @@ class MallocBooks(unittest.TestCase):
         self.assertGreaterEqual(m["free"], 0)
         self.assertEqual(m["other"], snap["process"]["rss_kb"] * 1024 - m["arena"] - m["mmapped"],
                          "other is the identity, exactly (a difference, so it may read under 0: no sign is asserted)")
-        held = bytes(32 << 20)                               # a 32 MiB block: over glibc's mmap threshold, so it lands in `mmapped`
+        # A block mmap must serve, so it lands in `mmapped`: 32 MiB and more than everything glibc holds free. Over the
+        # mmap threshold alone is not enough, because glibc looks in its free chunks first, and a long run leaves the
+        # arena with room: a freed mmapped block raises the dynamic thresholds, blocks under them then come from the heap
+        # and stay with it when freed. With 32 MiB free there (CI's second Python 3.11 shard, 2026-11-15), a bare 32 MiB
+        # block was served from the heap and `mmapped` did not move.
+        m = km._process_stats_perf()["malloc"]
+        held = bytes((32 << 20) + m["free"])
         try:
             m2 = km._process_stats_perf()["malloc"]
-            self.assertGreaterEqual(m2["mmapped"] - m["mmapped"], 30 << 20, "a held 32 MiB bytes object shows in mmapped")
+            self.assertGreaterEqual(m2["mmapped"] - m["mmapped"], 30 << 20, "a held block the arena cannot serve shows in mmapped")
             self.assertGreaterEqual(m2["inUse"] - m["inUse"], 30 << 20, "and in what is in use")
         finally:
             del held
