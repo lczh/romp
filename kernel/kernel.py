@@ -1496,13 +1496,22 @@ _PERF_STATS = _PerfStats()
 # by weakref at its pop, is observed still alive with its worker thread finished (a surviving cycle, or a ref a live root keeps,
 # which reads the same, costs one reclaim and is counted a survivor); a bounded fold-in backstop reclaims on an idle cycle,
 # or on a busy one past twice its bound. The frozen-heap walks wait for an idle cycle, except that busy backstop past twice
-# its bound. Default on; ROMP_GC_FREEZE=off.
+# its bound. The backstop the heap's growth owes (2026-11-14) waits for memory to be scarce (2026-11-15): it is armed only while
+# this process's resident size is at or above half its memory bound (_mem_total_bytes: MemTotal under the process's cgroup
+# limit), the two readings the controller is handed below, taken once per reconcile. Default on; ROMP_GC_FREEZE=off.
 _GC_FREEZE_ERRORS = [0]
 _GC_FREEZE_SAID = [False]
+_GC_FREEZE_GATE_SAID = [False]   # the growth gate's unreadable resident size or bound, said once (_gc_freeze_tick)
 _GC_FREEZE_LOAD_TREES, _gc_freeze_bad_knob = gcf.load_trees_from_env()   # parsed with a fallback, never a bare int() at import (#1735 high)
 _GC_FREEZE_BACKSTOP_GROWTH, _gc_freeze_bad_growth = gcf.backstop_growth_from_env()   # the growth-owed backstop's fraction; 0 is its off switch (2026-11-14)
+_GC_FREEZE_BACKSTOP_RESIDENT, _gc_freeze_bad_resident = gcf.backstop_resident_from_env()   # the share of its memory the kernel must hold
+#                                                                          before growth owes that backstop; 0 arms it at any size (2026-11-15)
 _GC_FREEZE = gcf.GcFreeze(enabled=gcf.enabled_from_env(), load_trees=_GC_FREEZE_LOAD_TREES,
-                          backstop_growth=_GC_FREEZE_BACKSTOP_GROWTH)   # the ended note (note_ended) is wired when the SDK backend loads (below)
+                          backstop_growth=_GC_FREEZE_BACKSTOP_GROWTH, backstop_resident=_GC_FREEZE_BACKSTOP_RESIDENT,
+                          resident=lambda: _process_stats()["rss_kb"] * 1024,   # the resident size /perf reports (process.rss_kb), and
+                          memory_bound=lambda: _mem_total_bytes())   # the bound the memory-scaled caches take, both read at the call (a
+#                                                                      reconcile, never import: _mem_total_bytes is defined far below).
+#                                                                      The ended note (note_ended) is wired when the SDK backend loads (below)
 if _gc_freeze_bad_knob is not None:     # a bad ROMP_GC_FREEZE_LOAD_TREES fell back to the default: said once, counted, never fatal
     _GC_FREEZE_ERRORS[0] += 1
     try:
@@ -1515,6 +1524,13 @@ if _gc_freeze_bad_growth is not None:   # a bad ROMP_GC_FREEZE_BACKSTOP_GROWTH f
     try:
         sys.stderr.write("gc-freeze: ROMP_GC_FREEZE_BACKSTOP_GROWTH=%r is not a fraction from 0 (off) to 1; using the default %s\n"
                          % (_gc_freeze_bad_growth[:80], gcf.DEFAULT_BACKSTOP_GROWTH))
+    except Exception:
+        pass
+if _gc_freeze_bad_resident is not None:   # a bad ROMP_GC_FREEZE_BACKSTOP_RESIDENT fell back to the default: the same, said once, counted
+    _GC_FREEZE_ERRORS[0] += 1
+    try:
+        sys.stderr.write("gc-freeze: ROMP_GC_FREEZE_BACKSTOP_RESIDENT=%r is not a fraction from 0 (armed at any size) to 1; using the "
+                         "default %s\n" % (_gc_freeze_bad_resident[:80], gcf.DEFAULT_BACKSTOP_RESIDENT))
     except Exception:
         pass
 _GC_GEN2_THRESHOLD, _gc_gen2_bad_knob = gcf.gen2_threshold_from_env()   # the full-collection trigger while the freeze is on;
@@ -1568,6 +1584,15 @@ def _gc_freeze_tick(idle, first):
             except Exception:
                 pass
     kind = gcf.pusher_tick(_GC_FREEZE, idle, first, em.record_cache_stats, on_error)
+    if kind is not None and getattr(_GC_FREEZE, "growth_gate_unread", False) and not _GC_FREEZE_GATE_SAID[0]:
+        _GC_FREEZE_GATE_SAID[0] = True   # 2026-11-15: the growth gate had no reading to hold the walk back on: said once, counted, never silent
+        _GC_FREEZE_ERRORS[0] += 1
+        try:
+            sys.stderr.write("gc-freeze: the growth backstop's memory gate could not read the resident size (%r) or the memory bound (%r), "
+                             "in bytes; growth walks stay armed at any size, as without the gate (counted under /perf gc.freeze.errors)\n"
+                             % (getattr(_GC_FREEZE, "resident_bytes", None), getattr(_GC_FREEZE, "memory_bound_bytes", None)))
+        except Exception:
+            pass
     if kind == "release":    # #1735: a release means a session ended and the collector took (or was owed) a full-heap pause; name it (one per release, none per load)
         try:
             survivors = getattr(_GC_FREEZE, "last_release_survivors", 0)

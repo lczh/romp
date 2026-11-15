@@ -70,7 +70,42 @@ driver thread waiting on the GIL for it, four or five times in twelve hours at t
 first walk is read: `last_reclaim_ms` is that reclaim's WHOLE run (both collections, the re-freeze and the frozen count read,
 which is itself 14 ms per million frozen), held until the next reclaim where `last_ms` is the next fold-in's within minutes, and
 `reclaim_ms_max` the largest since boot; the backstop's stderr line carries the same figure. `ROMP_GC_FREEZE_BACKSTOP_GROWTH=0`
-turns the growth bound off while that reading is weighed. A busy
+turns the growth bound off while that reading is weighed.
+
+THE GROWTH BOUND WAITS FOR MEMORY TO BE SCARCE (2026-11-15). The walk stops every thread for a time linear in the heap: a lab
+fill of 240,000 synthetic records (0.86 GB resident, 12.5 million blocks) ran five growth walks of 108 to 491 ms where the
+longest collection without the growth bound was 7 ms, and 1.7 s of collection where there had been 0.44 s, about 0.6 s per GB
+at the last walk (a review of the growth bound read 0.7), once per quarter of growth and again through every restart's fill:
+seconds on a 15 GB machine, tens of seconds where the kernel holds tens of GB, by that line. What the walk buys is the frozen
+garbage's memory back, and a machine whose kernel is a small part of its memory is not short of it. So growth owes the walk only while the process's resident size is at or above `backstop_resident` (one half) of its memory
+bound, the bound every memory-scaled cache takes: MemTotal, or the process's cgroup limit where one sits below it (a unit's
+MemoryHigh= or MemoryMax=, the knob for a machine whose usable memory is under its MemTotal). A kernel of 30 GB on a 2 TB host
+never walks for growth; one of 3 GB on a 15 GB machine not until it passes 7.5 GB; one under a limit, from half that limit.
+The two readings are taken once per run, after its freeze (`resident` and `memory_bound`, injected: the kernel passes the
+resident size /perf reports and its _mem_total_bytes, both read at the call, so a limit lowered on a running kernel arms the
+gate at its next fold-in), and never per tick. Under the fraction a run reads neither `sys.getallocatedblocks()` (a walk of the
+allocator's pools, 3 to 5 ms at that lab's 0.86 GB, 218 ms over its 119 runs) nor, on a reclaim, `gc.get_freeze_count()`: both
+served the growth bound and its report alone, so a kernel with memory to spare pays for a run what it paid before the growth
+bound (the same lab fill with the gate closed: no walk, a longest collection of 7.6 ms, 0.45 s of collection), plus the two
+readings: 0.4 ms a run with the kernel's readers on a six-level cgroup path, the bound's cgroup files most of it.
+`backstop_growth` at 0 still means never, and now reads none of it either. The fold-in count and a release walk as they did,
+at any size.
+WHEN THE GATE OPENS LATER there is no walk to measure growth from: nothing frozen while memory was plentiful was walked, and
+memory is now scarce, so the walk is owed outright once the heap is past the floor, on a busy cycle too (a pusher that never
+idles would otherwise never take it). From that walk on it is the quarter rule. The baseline moves only at a walk whose reading
+was taken and stands across a spell back under the fraction, and a walk made while armed reads the heap whatever the gate says
+after it (the walk frees memory, so it can take the kernel back under the fraction itself): crossing the fraction is never a
+walk by itself, and after that first one two growth walks are never less than a quarter of growth apart, as before the gate.
+THE GATE HOLDS A WALK BACK ON A READING, NEVER ON THE LACK OF ONE: a reader that raises or answers nothing positive leaves
+growth owing the walk as it did before the gate, flagged (`growth_gate_unread`) for the kernel to say once; a controller given
+no readers has no gate. `ROMP_GC_FREEZE_BACKSTOP_RESIDENT` sets the fraction: 0 arms the growth walk at any size with neither
+reading taken, the growth bound exactly as it was written. /perf carries the fraction, both readings, whether growth walks are
+armed and how many ran. THE SIGNAL IS THE PROCESS'S OWN SHARE, not the machine's free memory: MemAvailable would see a balloon
+that MemTotal does not, but it moves with every other process and the page cache, so on a shared host a neighbour's memory
+would bring a walk of tens of seconds to a kernel that holds a hundredth of the machine, and under a cgroup limit it is not the
+cgroup's figure at all.
+
+A busy
 cycle judges the ended sessions only before the first freeze, as the idle tick does: the initial freeze's
 collect takes their pre-freeze garbage, so the owed refs are dropped at no cost. Once a freeze is held, a
 busy cycle never judges them: their release waits for the idle tick. The record cache's
@@ -140,6 +175,10 @@ DEFAULT_BACKSTOP_GROWTH_FLOOR_BLOCKS = 1 << 21   # and by at least this many blo
 #                                                  grows by a quarter in its first minutes of warm-up and owes no frozen-heap walk for it.
 #                                                  A loaded kernel's warm-up is not protected by it: that one walks at every quarter of
 #                                                  its fill, a geometric series summing to under five times the final heap (docstring)
+DEFAULT_BACKSTOP_RESIDENT = 0.5  # growth owes the walk only while the process's resident size is at or above this fraction of its memory
+#                                  bound (MemTotal, or the process's cgroup limit where lower), 2026-11-15: the walk stops every thread for
+#                                  about 0.6 s per GB of heap, and a kernel that is a small part of its memory is not short of what it frees.
+#                                  0 arms it at any size (the growth bound as written, 2026-11-14), with neither reading taken
 MAX_GEN2_THRESHOLD = 2147483647  # the largest C int, the most gc.set_threshold takes: a knob past it falls back to the default
 _OFF = ("off", "0", "false")
 
@@ -181,6 +220,26 @@ def backstop_growth_from_env(env=None):
         return DEFAULT_BACKSTOP_GROWTH, raw
     if f != f or f in (float("inf"), float("-inf")) or f < 0:
         return DEFAULT_BACKSTOP_GROWTH, raw
+    return min(1.0, f), None
+
+
+def backstop_resident_from_env(env=None):
+    """(fraction, bad_raw): the ROMP_GC_FREEZE_BACKSTOP_RESIDENT knob, parsed like `backstop_growth_from_env`: the fraction
+    of its memory bound the process's resident size must reach before heap growth owes a frozen-heap walk
+    (DEFAULT_BACKSTOP_RESIDENT, one half). 0 arms the growth walk at ANY size, the growth bound as it was written on
+    2026-11-14 (for a machine whose usable memory is under its MemTotal with no cgroup limit to say so); a value above 1 is
+    clamped to 1, armed only at the bound itself; a value that is not a finite number, or is negative, falls back to the
+    default and comes back as `bad_raw` (the caller says it once and counts it), else None. Turning the growth walk OFF is
+    the growth knob's 0, not this one's. Never a bare float() at the kernel's import."""
+    raw = (env if env is not None else os.environ).get("ROMP_GC_FREEZE_BACKSTOP_RESIDENT")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_BACKSTOP_RESIDENT, None
+    try:
+        f = float(raw.strip())
+    except (TypeError, ValueError):
+        return DEFAULT_BACKSTOP_RESIDENT, raw
+    if f != f or f in (float("inf"), float("-inf")) or f < 0:
+        return DEFAULT_BACKSTOP_RESIDENT, raw
     return min(1.0, f), None
 
 
@@ -248,7 +307,8 @@ class GcFreeze:
 
     def __init__(self, enabled=True, load_trees=DEFAULT_LOAD_TREES, backstop_foldins=DEFAULT_BACKSTOP_FOLDINS,
                  gc=_gc_mod, clock=time.perf_counter, heap_blocks=sys.getallocatedblocks,
-                 backstop_growth=DEFAULT_BACKSTOP_GROWTH, backstop_growth_floor=DEFAULT_BACKSTOP_GROWTH_FLOOR_BLOCKS):
+                 backstop_growth=DEFAULT_BACKSTOP_GROWTH, backstop_growth_floor=DEFAULT_BACKSTOP_GROWTH_FLOOR_BLOCKS,
+                 backstop_resident=DEFAULT_BACKSTOP_RESIDENT, resident=None, memory_bound=None):
         self.enabled = bool(enabled)
         self.load_trees = max(MIN_LOAD_TREES, int(load_trees))
         self.backstop_foldins = max(1, int(backstop_foldins))
@@ -257,12 +317,25 @@ class GcFreeze:
         self._gc = gc
         self._clock = clock
         self._heap_blocks = heap_blocks   # the heap reading the growth bound compares (sys.getallocatedblocks; a test injects a counter)
-        self.heap_blocks = None           # the reading after the last run's freeze (None until a run, or when the reader raised)
+        self.heap_blocks = None           # the reading after the last run's freeze (None until a run, when the reader raised, or when
+        #                                   that run was under the growth gate and read none)
         self.heap_blocks_at_walk = None   # the reading after the last frozen-heap walk (the initial freeze, a full release, a backstop)
         self.last_reclaim_collected = 0   # what the last reclaim's unfrozen collection found: the garbage the freeze had locked away (the
         #                                   young garbage since the last collection taken by the staged cheap collect first, not counted here)
         self.reclaim_collected = 0        # the same, summed over every reclaim
-        self.frozen_at_reclaim = None     # gc.get_freeze_count() after the last reclaim's re-freeze (the walk was paid for anyway)
+        self.frozen_at_reclaim = None     # gc.get_freeze_count() after the last reclaim's re-freeze (the walk was paid for anyway); None
+        #                                   when that reclaim ran with the growth gate closed, which reads no gauge
+        self.backstop_resident = max(0.0, float(backstop_resident))   # the growth gate (2026-11-15): growth owes the walk only while the
+        #                                   resident size is at or above this fraction of the memory bound; 0: at any size
+        self._resident = resident         # the process's resident size in bytes, and
+        self._memory_bound = memory_bound   # its memory bound in bytes (the kernel passes its own readers; None: no gate)
+        self.resident_bytes = None        # the gate's two readings at the last run (None before one, where the gate takes none, or
+        self.memory_bound_bytes = None    # where the reader raised or answered nothing positive)
+        self.growth_armed = self.backstop_growth > 0 and (self.backstop_resident <= 0 or resident is None or memory_bound is None)
+        #                                   whether growth owes the walk: as of the last run's readings where there is a gate (False until
+        #                                   the first run reads them), from the start where there is none
+        self.growth_gate_unread = False   # the last run's gate lacked a reading and left the walk armed: the kernel says it once
+        self.growth_walks = 0             # backstops that the heap's growth owed (the fold-in count's are reclaims less these and the releases)
         self.frozen = False
         self._ins_mark = 0           # cache inserts at the last freeze
         self._foldins = 0            # load fold-ins since the last reclaim (the backstop counts these)
@@ -326,11 +399,16 @@ class GcFreeze:
 
     def growth_due(self, times=1):
         """Whether the heap has grown, since the last frozen-heap walk, by `times` the backstop_growth fraction of the reading
-        at that walk (a quarter for an idle cycle, a half for a busy one) and by at least the floor. False with no reading on
-        either side (no run yet, or a reader that raised) or with the fraction at 0: then the fold-in count alone bounds the walk."""
+        at that walk (a quarter for an idle cycle, a half for a busy one) and by at least the floor. False with no reading of
+        the heap (no run yet, a reader that raised, or a last run under the growth gate, which reads none: 2026-11-15) or
+        with the fraction at 0: then the fold-in count alone bounds the walk. Armed with a reading and NO walk to measure it
+        from (the gate opened after the first freeze), the walk is owed outright once the heap is past the floor, at any
+        `times`: nothing frozen while memory was plentiful was ever walked (the module docstring)."""
         base, now = self.heap_blocks_at_walk, self.heap_blocks
-        if base is None or now is None or self.backstop_growth <= 0:
+        if now is None or self.backstop_growth <= 0 or not self.growth_armed:
             return False
+        if base is None:
+            return now >= self.backstop_growth_floor
         grown = now - base
         return grown >= self.backstop_growth_floor and grown >= times * self.backstop_growth * base
 
@@ -345,8 +423,12 @@ class GcFreeze:
             return self._run("initial", inserts, []) if inserts > 0 else None
         if owed:
             return self._run("release", inserts, owed)
-        if self._foldins >= self.backstop_foldins or self.growth_due(1):
-            return self._run("backstop", inserts, [])
+        by_count = self._foldins >= self.backstop_foldins
+        if by_count or self.growth_due(1):
+            kind = self._run("backstop", inserts, [])
+            if not by_count:
+                self.growth_walks += 1
+            return kind
         if (inserts - self._ins_mark) >= self.load_trees:
             return self._run("load", inserts, [])
         return None
@@ -367,8 +449,11 @@ class GcFreeze:
             self.resolve_ended()                     # no frozen heap yet: judge the pre-freeze refs and drop the owed, as the idle tick does
             kind = self._run("initial", inserts, []) if inserts > 0 else None
         else:
-            if self._foldins >= 2 * self.backstop_foldins or self.growth_due(2):
+            by_count = self._foldins >= 2 * self.backstop_foldins
+            if by_count or self.growth_due(2):
                 kind = self._run("backstop", inserts, [])
+                if not by_count:
+                    self.growth_walks += 1
             elif (inserts - self._ins_mark) >= self.load_trees:
                 kind = self._run("load", inserts, [])
             else:
@@ -391,8 +476,11 @@ class GcFreeze:
         backstop therefore runs two collections, as a full release does. After the collect and the re-freeze, an owed ref still
         alive is kept by a LIVE ROOT, not a cycle: a wasted pause, counted as a survivor and dropped (never re-registered).
         The re-read runs after the re-freeze, which is harmless: a freeze collects nothing, so a ref alive after the collect
-        is alive after the freeze too."""
+        is alive after the freeze too. The growth gate is read once here, after the freeze (2026-11-15): the heap, and on a
+        reclaim the frozen count, are read only while growth owes the walk, or after a walk made while it did (so that walk
+        is the baseline even when it took the kernel back under the fraction)."""
         t0 = self._clock()
+        was_armed = self.growth_armed
         reclaimed, found = False, 0
         if kind == "release":
             self._gc.collect(); self.collections += 1    # cheap: the freeze stays in place, so this walks only the unfrozen
@@ -420,7 +508,11 @@ class GcFreeze:
         self.last_release_survivors = len(kept)
         self.last_kept_sids = kept
         self.survivors += len(kept)
-        self._read_heap()                            # after the freeze: what the heap holds now, the garbage this run took gone
+        gauges = self._read_gate() or (reclaimed and was_armed)   # the gate's two readings, once per run; under it no gauge is read
+        if gauges:
+            self._read_heap()                        # after the freeze: what the heap holds now, the garbage this run took gone
+        else:
+            self.heap_blocks = None                  # no reading this run: growth_due reads None as not due
         if reclaimed:
             self.last_kind = kind
             self.reclaims += 1
@@ -428,8 +520,10 @@ class GcFreeze:
             self.last_reclaim_collected = int(found or 0)   # the unfrozen collection's count: the garbage the freeze had locked away, the
             #                                                  young garbage gone to the staged cheap collect before it
             self.reclaim_collected += self.last_reclaim_collected
-            self.frozen_at_reclaim = self._read_frozen()
-            self.heap_blocks_at_walk = self.heap_blocks     # the growth bound measures from this walk
+            self.frozen_at_reclaim = self._read_frozen() if gauges else None
+            if gauges:
+                self.heap_blocks_at_walk = self.heap_blocks     # the growth bound measures from this walk; a walk under the gate
+                #                                                 read nothing, so the last walk that did stays the baseline
             self.last_reclaim_ms = (self._clock() - t0) * 1000.0   # the whole run, the frozen count read included: what the GIL's waiters saw
             self.reclaim_ms_max = max(self.reclaim_ms_max, self.last_reclaim_ms)
         else:
@@ -449,6 +543,36 @@ class GcFreeze:
         except Exception:
             self.heap_blocks = None
 
+    def _read_gate(self):
+        """The growth gate, read once per run after its freeze: whether heap growth owes a frozen-heap walk at this size. Never
+        with `backstop_growth` at 0 (nothing read); always with `backstop_resident` at 0 or with no readers given (no gate,
+        nothing read); otherwise the two readings are taken and growth is armed while the resident size is at or above the
+        fraction of the bound. A reading that cannot be had (the reader raised, or answered nothing positive) leaves it ARMED,
+        as before the gate, and is flagged on `growth_gate_unread`: the gate holds a walk back on a reading that memory is
+        plentiful, never on the lack of one. Sets `growth_armed` and returns it."""
+        resident = bound = None
+        unread = False
+        if self.backstop_growth <= 0:
+            armed = False
+        elif self.backstop_resident <= 0 or self._resident is None or self._memory_bound is None:
+            armed = True
+        else:
+            resident, bound = self._read_bytes(self._resident), self._read_bytes(self._memory_bound)
+            unread = resident is None or bound is None
+            armed = unread or resident >= self.backstop_resident * bound
+        self.resident_bytes, self.memory_bound_bytes = resident, bound   # set once both are read: /perf never sees half a reading
+        self.growth_gate_unread, self.growth_armed = unread, armed
+        return armed
+
+    @staticmethod
+    def _read_bytes(reader):
+        """A gate reading in bytes, or None when the reader raised or answered nothing positive: a reconcile never fails on it."""
+        try:
+            n = int(reader())
+        except Exception:
+            return None
+        return n if n > 0 else None
+
     def _read_frozen(self):
         """gc.get_freeze_count() after a reclaim's re-freeze, or None where the collector lacks it or the read raised. A walk of the
         frozen generation (14 ms per million in the lab), read only here, where the reclaim just walked that heap anyway."""
@@ -464,10 +588,15 @@ class GcFreeze:
         """The /perf gc block's freeze sub-block: the state and the reconcile trade, so a reconcile collection is
         told apart from an organic one. `active` is whether a freeze is held now (named apart from the gc block's
         `frozen` count, gc.get_freeze_count() on GET /perf?walk=1). `gen2Threshold` is the full-collection trigger the
-        controller set (None while the stock one stands; the gc block's `thresholds` reads the collector itself)."""
+        controller set (None while the stock one stands; the gc block's `thresholds` reads the collector itself). The growth
+        gate's state is the last RUN's (2026-11-15): `backstopResident` the fraction, `memoryBoundBytes` and `residentBytes`
+        the two readings it compared (None before a run, where the gate takes none, or where one could not be had),
+        `growthArmed` whether growth owed the walk by them, `growthWalks` how many backstops growth has owed. Reads nothing."""
         return {"enabled": self.enabled, "active": self.frozen, "loadTrees": self.load_trees,
                 "gen2Threshold": self.gen2_threshold,
                 "backstopFoldins": self.backstop_foldins, "backstopGrowth": self.backstop_growth,
+                "backstopResident": self.backstop_resident, "memoryBoundBytes": self.memory_bound_bytes,
+                "residentBytes": self.resident_bytes, "growthArmed": self.growth_armed, "growthWalks": self.growth_walks,
                 "heapBlocks": self.heap_blocks, "heapBlocksAtWalk": self.heap_blocks_at_walk,
                 "lastReclaimCollected": self.last_reclaim_collected, "reclaimCollected": self.reclaim_collected,
                 "frozenAtReclaim": self.frozen_at_reclaim,

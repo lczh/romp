@@ -1110,7 +1110,8 @@ class KernelKnob(unittest.TestCase):
         """Load the kernel with `var` set to `value` and `extra` beside it. The two knobs this class tests are cleared
         unless passed (review 2026-10-03): a value exported in the shell for one must never reach the other's case."""
         import contextlib, io
-        env = {"ROMP_GC_FREEZE_LOAD_TREES": None, "ROMP_GC_GEN2_THRESHOLD": None, "ROMP_GC_FREEZE_BACKSTOP_GROWTH": None}
+        env = {"ROMP_GC_FREEZE_LOAD_TREES": None, "ROMP_GC_GEN2_THRESHOLD": None, "ROMP_GC_FREEZE_BACKSTOP_GROWTH": None,
+               "ROMP_GC_FREEZE_BACKSTOP_RESIDENT": None}
         env.update(extra or {})
         env[var] = value
         saved = {k: os.environ.get(k) for k in env}
@@ -1245,6 +1246,61 @@ class KernelKnob(unittest.TestCase):
         self.assertEqual(km5._GC_FREEZE.backstop_growth, 0.5, "a fraction is passed to the controller as given")
         self.assertEqual(km5._GC_FREEZE_ERRORS[0], 0)
         self.assertNotIn("ROMP_GC_FREEZE_BACKSTOP_GROWTH", err5)
+
+    def test_the_resident_knob_reaches_the_kernels_controller_with_the_kernels_two_readers(self):
+        """2026-11-15: ROMP_GC_FREEZE_BACKSTOP_RESIDENT reaches the controller the kernel builds at import, parsed like the
+        growth knob beside it (a bad value falls back to the default, counted and said once; 0 is the switch that arms the
+        growth walk at any size; a fraction is passed as given), and that controller is given the kernel's own two readings:
+        the resident size /perf reports under process.rss_kb, and the memory bound every memory-scaled bound takes
+        (_mem_total_bytes, MemTotal under the process's cgroup limit). Unset, the default is one half."""
+        from unittest import mock
+        km, err = self._load_with(None, "romp_kernel_knob_resident_unset", var="ROMP_GC_FREEZE_BACKSTOP_RESIDENT")
+        self.assertEqual((km._GC_FREEZE.backstop_resident, km.gcf.DEFAULT_BACKSTOP_RESIDENT), (0.5, 0.5), "unset: one half")
+        self.assertEqual(km._GC_FREEZE_ERRORS[0], 0)
+        gib = 1 << 30
+        with mock.patch.object(km, "_process_stats", lambda: {"rss_kb": 3 * gib // 1024}), \
+             mock.patch.object(km, "_mem_total_bytes", lambda: 15 * gib):
+            self.assertEqual(km._GC_FREEZE._resident(), 3 * gib, "the resident reader is the /perf process block's rss_kb, in bytes")
+            self.assertEqual(km._GC_FREEZE._memory_bound(), 15 * gib, "the bound reader is the kernel's _mem_total_bytes, read at the call")
+        self.assertGreater(km._GC_FREEZE._resident(), 0, "this process's own resident size reads")
+        self.assertEqual(km._GC_FREEZE._memory_bound(), km._mem_total_bytes(), "and its own bound")
+        bad, errb = self._load_with("abc", "romp_kernel_knob_resident_abc", var="ROMP_GC_FREEZE_BACKSTOP_RESIDENT")
+        self.assertEqual(bad._GC_FREEZE.backstop_resident, 0.5, "abc falls back to the default")
+        self.assertEqual(bad._GC_FREEZE_ERRORS[0], 1, "the bad knob is counted under errors, once")
+        lines = [ln for ln in errb.splitlines() if "ROMP_GC_FREEZE_BACKSTOP_RESIDENT" in ln]
+        self.assertEqual(len(lines), 1, "and said once on stderr: %r" % errb)
+        self.assertIn("'abc'", lines[0])
+        self.assertIn("using the default 0.5", lines[0])
+        km0, err0 = self._load_with("0", "romp_kernel_knob_resident_zero", var="ROMP_GC_FREEZE_BACKSTOP_RESIDENT")
+        self.assertEqual(km0._GC_FREEZE.backstop_resident, 0.0, "0 arms the growth walk at any size")
+        self.assertEqual(km0._GC_FREEZE_ERRORS[0], 0, "no error for the switch")
+        self.assertNotIn("ROMP_GC_FREEZE_BACKSTOP_RESIDENT", err0, "and nothing said: %r" % err0)
+        km3, err3 = self._load_with("0.3", "romp_kernel_knob_resident_third", var="ROMP_GC_FREEZE_BACKSTOP_RESIDENT")
+        self.assertEqual(km3._GC_FREEZE.backstop_resident, 0.3, "a fraction is passed to the controller as given")
+        self.assertEqual(km3._GC_FREEZE_ERRORS[0], 0)
+
+    def test_the_kernels_controller_reads_no_heap_while_the_kernel_is_small_for_its_memory(self):
+        """The whole road, on the controller the kernel builds: a 3 GB kernel on a 15 GB machine folds in and never calls
+        sys.getallocatedblocks(), its /perf block says why (armed false, both readings), and the same kernel at 8 GB reads
+        the heap on its next fold-in."""
+        from unittest import mock
+        km, _ = self._load_with(None, "romp_kernel_knob_resident_road", var="ROMP_GC_FREEZE_BACKSTOP_RESIDENT")
+        gib, c, reads = 1 << 30, km._GC_FREEZE, []
+        c.enabled, c._gc, c._clock = True, FakeGc(), (lambda: 0.0)
+        c._heap_blocks = lambda: reads.append(1) or 5_000_000
+        rss = [3 * gib]
+        with mock.patch.object(km, "_process_stats", lambda: {"rss_kb": rss[0] // 1024}), \
+             mock.patch.object(km, "_mem_total_bytes", lambda: 15 * gib):
+            self.assertEqual(c.tick(inserts=1), "initial")
+            self.assertEqual(c.tick(inserts=9), "load")
+            self.assertEqual(reads, [], "no heap read on the first freeze or the fold-in: the kernel is a fifth of its memory")
+            p = c.perf()
+            self.assertEqual((p["growthArmed"], p["residentBytes"], p["memoryBoundBytes"], p["backstopResident"], p["growthWalks"]),
+                             (False, 3 * gib, 15 * gib, 0.5, 0))
+            rss[0] = 8 * gib
+            self.assertEqual(c.tick(inserts=17), "load")
+            self.assertEqual(reads, [1], "past half its memory the fold-in reads the heap")
+            self.assertTrue(c.perf()["growthArmed"])
 
 
 def _install_fake_sdk():
@@ -1849,3 +1905,328 @@ class BackstopGrowthKnob(unittest.TestCase):
         self.assertEqual(c.tick(inserts=17), "load")
         self.assertTrue(c.growth_due(1), "a half owes the walk")
         self.assertEqual(c.tick(inserts=17), "backstop")
+
+
+class CountingGc(FakeGc):
+    """A FakeGc with a frozen count that counts its reads: gc.get_freeze_count() walks the frozen generation, so a
+    reclaim that reads it pays for it."""
+    def __init__(self):
+        super().__init__()
+        self.frozen_reads = 0
+    def get_freeze_count(self):
+        self.frozen_reads += 1
+        return 12345
+
+
+class GrowthGate(unittest.TestCase):
+    """2026-11-15: the growth-owed walk waits for memory to be scarce. The walk stops every thread for a time linear in the
+    heap (a lab fill of 240,000 synthetic records read about 0.6 s per GB, a review of the growth bound 0.7), once per
+    quarter of growth, and what it buys is the frozen garbage's memory back. On a machine whose kernel is a small part of its memory that is a pause for memory nobody
+    is short of, repeated as the heap fills after every restart. So growth owes the walk only while the process's resident
+    size is at or above `backstop_resident` (one half) of its memory bound, the same min(MemTotal, the process's cgroup
+    limit) every memory-scaled bound takes; under it a run reads neither sys.getallocatedblocks() nor, on a reclaim,
+    gc.get_freeze_count(), which only the growth bound and its report needed. The fold-in count and a release walk as they
+    did. Pinned here on readers that count their calls: under the fraction (no walk, no heap read), at or above it (the
+    growth bound as it was written), the gate opening later (one walk, then the quarter rule), a walk that itself closes
+    the gate (still the baseline), the override fractions, the growth knob's 0, a reading that cannot be had, and /perf."""
+
+    GB = 1 << 30
+
+    def _controller(self, fake, blocks, resident, bound, **kw):
+        """(controller, calls): a controller over `fake` whose heap, resident and bound readers count their calls."""
+        calls = {"heap": 0, "resident": 0, "bound": 0}
+        def heap():
+            calls["heap"] += 1
+            return blocks[0]
+        def res():
+            calls["resident"] += 1
+            return resident[0]
+        def bnd():
+            calls["bound"] += 1
+            return bound[0]
+        kw.setdefault("backstop_growth_floor", 0)
+        kw.setdefault("backstop_foldins", 1000)
+        kw.setdefault("backstop_growth", 0.25)
+        c = gf.GcFreeze(enabled=True, load_trees=8, gc=fake, clock=lambda: 0.0, heap_blocks=heap, resident=res, memory_bound=bnd, **kw)
+        return c, calls
+
+    def test_a_kernel_under_half_its_memory_owes_no_growth_walk_and_reads_no_heap(self):
+        GB = self.GB
+        fake, blocks, resident, bound = CountingGc(), [1000], [3 * GB], [15 * GB]
+        c, calls = self._controller(fake, blocks, resident, bound)
+        self.assertEqual((gf.DEFAULT_BACKSTOP_RESIDENT, c.backstop_resident), (0.5, 0.5), "the default: one half of the bound")
+        self.assertEqual(c.tick(inserts=1), "initial")
+        inserts = 1
+        for grown in (2000, 5000, 10000):            # three fold-ins over a heap grown tenfold, 3 GB resident of 15 throughout
+            blocks[0] = grown
+            inserts += 8
+            self.assertEqual(c.tick(inserts=inserts), "load", "a material load still folds in")
+            self.assertFalse(c.growth_due(1), "growth owes nothing while the kernel is a fifth of its memory (heap at %d)" % grown)
+            self.assertFalse(c.growth_due(2))
+            self.assertIsNone(c.tick(inserts=inserts), "an idle tick with nothing loaded runs nothing")
+            self.assertIsNone(c.tick_busy(inserts), "a busy one neither")
+        self.assertEqual(calls["heap"], 0, "sys.getallocatedblocks() was read on none of the four runs")
+        self.assertEqual((calls["resident"], calls["bound"]), (4, 4), "the gate's two readings, once per run and never per tick")
+        self.assertEqual((c.heap_blocks, c.heap_blocks_at_walk), (None, None), "no heap reading was taken")
+        self.assertEqual((c.growth_armed, c.resident_bytes, c.memory_bound_bytes), (False, 3 * GB, 15 * GB))
+        owner = _Owner()
+        c.note_ended(owner, thread=_FakeThread(alive=False))
+        self.assertEqual(c.tick(inserts=inserts), "release", "a release still walks the frozen heap for its surviving cycle")
+        self.assertEqual((fake.frozen_reads, c.frozen_at_reclaim), (0, None), "without the frozen count read, which only the growth report needed")
+        self.assertEqual(calls["heap"], 0, "and without the heap read")
+        self.assertEqual((c.reclaims, c.growth_walks), (1, 0))
+
+    def test_the_fold_in_count_still_bounds_the_walk_under_the_fraction(self):
+        GB = self.GB
+        fake, blocks = CountingGc(), [1000]
+        c, calls = self._controller(fake, blocks, [30 * GB], [2048 * GB], backstop_foldins=2)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        blocks[0] = 9000
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertIsNone(c.tick(inserts=9), "30 GB resident of 2 TB: growth owes nothing")
+        self.assertEqual(c.tick(inserts=17), "load")
+        self.assertEqual(c.tick(inserts=17), "backstop", "the second fold-in reaches the count, the bound that was there before the growth one")
+        self.assertEqual((c.reclaims, c.growth_walks), (1, 0), "a walk the count owed is not a growth walk")
+        self.assertEqual((calls["heap"], fake.frozen_reads), (0, 0), "and it read neither gauge")
+
+    def test_a_kernel_at_or_above_half_its_memory_walks_on_growth_as_before(self):
+        GB = self.GB
+        fake, blocks = CountingGc(), [1000]
+        c, calls = self._controller(fake, blocks, [int(7.5 * GB)], [15 * GB])
+        self.assertEqual(c.tick(inserts=1), "initial")
+        self.assertEqual((c.heap_blocks_at_walk, c.heap_blocks, c.growth_armed), (1000, 1000, True), "exactly half counts: the initial freeze takes the baseline")
+        blocks[0] = 1240
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertIsNone(c.tick(inserts=9), "under a quarter of growth: no walk")
+        blocks[0] = 1250
+        self.assertEqual(c.tick(inserts=17), "load")
+        fake.calls.clear()
+        self.assertEqual(c.tick(inserts=17), "backstop", "a quarter of growth since the last walk, with memory scarce: the idle tick walks")
+        self.assertEqual(fake.calls, ["collect", "unfreeze", "collect", "freeze"])
+        self.assertEqual((c.reclaims, c.growth_walks, c.heap_blocks_at_walk), (1, 1, 1250), "counted as a growth walk, re-baselined")
+        self.assertEqual((fake.frozen_reads, c.frozen_at_reclaim), (1, 12345), "the reclaim reads the frozen count for its report")
+        self.assertEqual(calls["heap"], 4, "the heap is read once per run, as before")
+        blocks[0] = 1900
+        t = lambda idle, ins: gf.pusher_tick(c, idle=idle, first=False, stats_fn=lambda: {"inserts": ins}, on_error=self.fail)
+        self.assertEqual(t(False, 25), "load")
+        self.assertEqual(t(False, 25), "backstop", "a busy cycle takes it at a half (650 over 1250), as before")
+        self.assertEqual(c.growth_walks, 2)
+
+    def test_the_gate_opening_later_owes_one_walk_then_the_quarter_rule(self):
+        """A kernel that crosses the fraction after its first freeze has no walk to measure growth from: nothing frozen while
+        memory was plentiful was ever walked, and memory is now scarce, so the walk is owed outright (past the floor), on a
+        busy cycle too, since a pusher that never idles would otherwise never take it. From that walk on it is the quarter
+        rule, and the baseline is kept across a spell back under the fraction: crossing it again is not a walk."""
+        GB = self.GB
+        fake, blocks, resident = CountingGc(), [1000], [3 * GB]
+        c, calls = self._controller(fake, blocks, resident, [15 * GB])
+        self.assertEqual(c.tick(inserts=1), "initial")
+        blocks[0] = 5000
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertIsNone(c.tick(inserts=9))
+        self.assertEqual(calls["heap"], 0, "under the fraction: nothing read")
+        resident[0] = 8 * GB                           # past 7.5 GB of 15
+        blocks[0] = 5100
+        self.assertEqual(c.tick(inserts=17), "load", "the fold-in that finds memory scarce reads the heap")
+        self.assertEqual((calls["heap"], c.heap_blocks, c.heap_blocks_at_walk, c.growth_armed), (1, 5100, None, True))
+        self.assertTrue(c.growth_due(1), "armed with no walk to measure from: owed")
+        self.assertTrue(c.growth_due(2), "on a busy cycle too")
+        fake.calls.clear()
+        self.assertEqual(c.tick_busy(17), "backstop", "the busy cycle takes it")
+        self.assertEqual(fake.calls, ["collect", "unfreeze", "collect", "freeze"])
+        self.assertEqual((c.growth_walks, c.heap_blocks_at_walk, fake.frozen_reads), (1, 5100, 1), "one walk, and the baseline is its reading")
+        self.assertIsNone(c.tick(inserts=17), "nothing owed right after")
+        blocks[0] = 6000
+        self.assertEqual(c.tick(inserts=25), "load")
+        self.assertIsNone(c.tick(inserts=25), "900 over 5100 is under a quarter: the quarter rule from here")
+        resident[0] = 7 * GB                           # back under the fraction
+        blocks[0] = 9000
+        heap_reads = calls["heap"]
+        self.assertEqual(c.tick(inserts=33), "load")
+        self.assertEqual((calls["heap"], c.heap_blocks, c.growth_armed), (heap_reads, None, False), "under it again: no heap read")
+        self.assertIsNone(c.tick(inserts=33), "and nothing owed, however the heap grew")
+        self.assertEqual(c.heap_blocks_at_walk, 5100, "the baseline stands across the spell")
+        resident[0] = 8 * GB
+        blocks[0] = 6300
+        self.assertEqual(c.tick(inserts=41), "load")
+        self.assertIsNone(c.tick(inserts=41), "armed again at 1200 over the kept baseline, under a quarter: crossing the fraction is not a walk")
+        blocks[0] = 6400
+        self.assertEqual(c.tick(inserts=49), "load")
+        self.assertEqual(c.tick(inserts=49), "backstop", "1300 over 5100 is a quarter: the walk")
+        self.assertEqual((c.growth_walks, c.reclaims), (2, 2))
+
+    def test_the_floor_holds_the_first_walk_of_a_gate_that_opens_on_a_small_heap(self):
+        GB = self.GB
+        fake, blocks, resident = CountingGc(), [1000], [3 * GB]
+        c, calls = self._controller(fake, blocks, resident, [15 * GB], backstop_growth_floor=600)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        resident[0] = 8 * GB
+        blocks[0] = 500
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertIsNone(c.tick(inserts=9), "armed, yet the whole heap is under the floor: a small heap owes no walk")
+        blocks[0] = 600
+        self.assertEqual(c.tick(inserts=17), "load")
+        self.assertEqual(c.tick(inserts=17), "backstop", "at the floor the first walk is owed")
+
+    def test_a_walk_that_takes_the_kernel_back_under_the_fraction_still_sets_the_baseline(self):
+        """The walk frees memory, so the reading after it can be under the fraction the reading before it was over. Were
+        the heap read only while armed, that walk would leave the old baseline standing, and the next fold-in over the
+        fraction would measure a quarter from it again: a walk at every crossing rather than at every quarter of growth.
+        A walk made while armed reads the heap whatever the gate says after it."""
+        GB = self.GB
+        resident = [8 * GB]
+
+        class FreeingGc(CountingGc):
+            def unfreeze(self):
+                super().unfreeze()
+                resident[0] = 7 * GB                   # the walk returns memory: under 7.5 GB of 15 from here
+
+        fake, blocks = FreeingGc(), [1000]
+        c, calls = self._controller(fake, blocks, resident, [15 * GB])
+        self.assertEqual(c.tick(inserts=1), "initial")
+        blocks[0] = 1300
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertEqual(c.tick(inserts=9), "backstop")
+        self.assertEqual((c.growth_armed, c.heap_blocks_at_walk, c.frozen_at_reclaim), (False, 1300, 12345),
+                         "under the fraction after the walk, and the walk's reading is the baseline all the same")
+        resident[0] = 8 * GB
+        blocks[0] = 1400
+        self.assertEqual(c.tick(inserts=17), "load")
+        self.assertIsNone(c.tick(inserts=17), "over the fraction again at 100 over the baseline: no walk")
+        self.assertEqual(c.growth_walks, 1)
+
+    def test_the_override_fractions(self):
+        GB = self.GB
+        for fraction, resident, armed in ((0.2, 3 * GB, True), (0.2, int(2.9 * GB), False), (1.0, 15 * GB, True),
+                                          (1.0, int(14.9 * GB), False), (0.5, int(7.4 * GB), False)):
+            with self.subTest(fraction=fraction, resident=resident):
+                c, calls = self._controller(CountingGc(), [1000], [resident], [15 * GB], backstop_resident=fraction)
+                self.assertEqual(c.tick(inserts=1), "initial")
+                self.assertEqual((c.growth_armed, calls["heap"]), (armed, 1 if armed else 0))
+        # 0 is the growth bound as it was written, at any size: armed with neither gate reading taken
+        fake, blocks = CountingGc(), [1000]
+        c, calls = self._controller(fake, blocks, [1 * GB], [2048 * GB], backstop_resident=0)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        blocks[0] = 1250
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertEqual(c.tick(inserts=9), "backstop", "a quarter of growth walks, 1 GB resident of 2 TB or not")
+        self.assertEqual((calls["resident"], calls["bound"]), (0, 0), "the override at 0 reads neither the resident size nor the bound")
+        self.assertEqual((c.growth_armed, c.growth_walks, c.resident_bytes, c.memory_bound_bytes), (True, 1, None, None))
+        # the bound is read at each run, so a limit lowered on a running kernel arms the gate at its next fold-in
+        bound = [2048 * GB]
+        c, calls = self._controller(CountingGc(), [1000], [30 * GB], bound)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        self.assertFalse(c.growth_armed, "30 GB of 2 TB")
+        bound[0] = 32 * GB
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertEqual((c.growth_armed, c.memory_bound_bytes), (True, 32 * GB), "30 GB of a 32 GB limit set since: armed, no restart")
+
+    def test_the_resident_knob_parses_like_the_growth_knob(self):
+        name = "ROMP_GC_FREEZE_BACKSTOP_RESIDENT"
+        self.assertEqual(gf.backstop_resident_from_env({}), (0.5, None), "absent: one half, no complaint")
+        self.assertEqual(gf.backstop_resident_from_env({name: "  "}), (0.5, None), "whitespace: the default")
+        self.assertEqual(gf.backstop_resident_from_env({name: "0"}), (0.0, None), "0 arms the growth walk at any size")
+        self.assertEqual(gf.backstop_resident_from_env({name: " 0.3 "}), (0.3, None), "a fraction, stripped")
+        self.assertEqual(gf.backstop_resident_from_env({name: "1"}), (1.0, None), "the ceiling: only at the bound itself")
+        self.assertEqual(gf.backstop_resident_from_env({name: "3"}), (1.0, None), "above the ceiling: clamped")
+        for raw in ("abc", "-1", "nan", "inf", "-inf"):
+            with self.subTest(raw=raw):
+                self.assertEqual(gf.backstop_resident_from_env({name: raw}), (0.5, raw), "a bad value falls back and is named")
+
+    def test_the_growth_knob_at_zero_still_means_never_and_now_reads_nothing(self):
+        GB = self.GB
+        fake, blocks = CountingGc(), [1000]
+        c, calls = self._controller(fake, blocks, [14 * GB], [15 * GB], backstop_growth=0, backstop_foldins=2)
+        self.assertEqual(c.tick(inserts=1), "initial")
+        blocks[0] = 10000
+        self.assertEqual(c.tick(inserts=9), "load")
+        self.assertIsNone(c.tick(inserts=9), "ROMP_GC_FREEZE_BACKSTOP_GROWTH=0: never by growth, 14 GB resident of 15 or not")
+        self.assertEqual(c.tick(inserts=17), "load")
+        self.assertEqual(c.tick(inserts=17), "backstop", "the fold-in count is the bound left")
+        self.assertEqual((calls["heap"], calls["resident"], calls["bound"], fake.frozen_reads), (0, 0, 0, 0),
+                         "and no run read the heap, the gate or the frozen count: the cost before the growth bound")
+        self.assertEqual((c.growth_armed, c.growth_walks, c.frozen_at_reclaim), (False, 0, None))
+
+    def test_a_reading_that_cannot_be_had_leaves_the_growth_walk_armed_and_says_so(self):
+        """The gate holds a walk back on a reading that memory is plentiful, never on the lack of one: a reader that raises
+        or answers nothing positive leaves growth owing the walk as it did before the gate, flagged for the kernel to say
+        once, with the missing reading null on /perf. A controller given no readers has no gate at all (the tests of the
+        growth bound itself build theirs so) and flags nothing."""
+        GB = self.GB
+        def boom():
+            raise OSError("no /proc here")
+        for label, res, bnd, want in (("resident raises", boom, lambda: 15 * GB, (None, 15 * GB)),
+                                      ("resident reads 0", lambda: 0, lambda: 15 * GB, (None, 15 * GB)),
+                                      ("bound raises", lambda: 3 * GB, boom, (3 * GB, None))):
+            with self.subTest(label):
+                blocks = [1000]
+                c = gf.GcFreeze(enabled=True, load_trees=8, gc=CountingGc(), clock=lambda: 0.0, heap_blocks=lambda: blocks[0],
+                                backstop_growth=0.25, backstop_growth_floor=0, resident=res, memory_bound=bnd)
+                self.assertEqual(c.tick(inserts=1), "initial", "a reader that raises never fails the reconcile")
+                self.assertEqual((c.growth_armed, c.growth_gate_unread), (True, True))
+                self.assertEqual((c.resident_bytes, c.memory_bound_bytes), want)
+                blocks[0] = 1250
+                self.assertEqual(c.tick(inserts=9), "load")
+                self.assertEqual(c.tick(inserts=9), "backstop", "growth owes the walk as before the gate")
+                p = c.perf()
+                self.assertEqual((p["growthArmed"], p["residentBytes"], p["memoryBoundBytes"]), (True,) + want)
+        bare = gf.GcFreeze(enabled=True, load_trees=8, gc=CountingGc(), clock=lambda: 0.0, heap_blocks=lambda: 1000)
+        self.assertTrue(bare.perf()["growthArmed"], "armed from the start, as /perf says before any run")
+        self.assertEqual(bare.tick(inserts=1), "initial")
+        self.assertEqual((bare.growth_armed, bare.growth_gate_unread, bare.heap_blocks), (True, False, 1000), "no readers: no gate, nothing flagged")
+
+    def test_the_kernel_says_an_unreadable_gate_once(self):
+        import contextlib, io
+        km = load_source("romp_kernel_gcf_gate", os.path.join(BIN, "romp-kernel"))
+        saved = (km._GC_FREEZE, km.em.record_cache_stats, km._GC_FREEZE_ERRORS[0])
+        self.assertFalse(km._GC_FREEZE_GATE_SAID[0], "nothing said at import")
+
+        class _Controller:
+            enabled, growth_gate_unread, resident_bytes, memory_bound_bytes = True, True, None, 16 << 30
+            last_release_sids, last_release_survivors, last_kept_sids, last_ms = [], 0, [], 1.0
+            def __init__(self, kind):
+                self._kind = kind
+            def tick(self, inserts):
+                return self._kind
+        def _line(controller):
+            km._GC_FREEZE = controller
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                km._gc_freeze_tick(True, False)
+            return err.getvalue()
+        try:
+            km.em.record_cache_stats = lambda: {"inserts": 3}
+            km._GC_FREEZE_ERRORS[0] = 0
+            self.assertEqual(_line(_Controller(None)), "", "no run, nothing read, nothing said")
+            out = _line(_Controller("load"))
+            self.assertEqual(out.count("\n"), 1, "one line: %r" % out)
+            for needle in ("resident", "None", str(16 << 30), "armed"):
+                self.assertIn(needle, out, "the line names the readings and what follows: %s in %r" % (needle, out))
+            self.assertEqual(km._GC_FREEZE_ERRORS[0], 1, "counted under /perf gc.freeze.errors")
+            self.assertEqual(_line(_Controller("load")), "", "said once, not per fold-in")
+            self.assertEqual(km._GC_FREEZE_ERRORS[0], 1)
+        finally:
+            km._GC_FREEZE, km.em.record_cache_stats, km._GC_FREEZE_ERRORS[0] = saved
+
+    def test_perf_reports_the_gate(self):
+        GB = self.GB
+        fake, blocks, resident = CountingGc(), [1000], [3 * GB]
+        c, calls = self._controller(fake, blocks, resident, [15 * GB])
+        p = c.perf()
+        for k in ("backstopResident", "memoryBoundBytes", "residentBytes", "growthArmed", "growthWalks"):
+            self.assertIn(k, p, "the perf block names the gate's state: %s" % k)
+        self.assertEqual((p["backstopResident"], p["memoryBoundBytes"], p["residentBytes"], p["growthArmed"], p["growthWalks"]),
+                         (0.5, None, None, False, 0), "before the first run nothing is read")
+        self.assertEqual(calls, {"heap": 0, "resident": 0, "bound": 0}, "and perf() itself reads nothing")
+        c.tick(inserts=1)
+        p = c.perf()
+        self.assertEqual((p["memoryBoundBytes"], p["residentBytes"], p["growthArmed"], p["heapBlocks"]), (15 * GB, 3 * GB, False, None),
+                         "3 GB of 15: not armed, and the block says by what readings")
+        resident[0] = 9 * GB
+        blocks[0] = 4000
+        c.tick(inserts=9)
+        self.assertEqual(c.tick(inserts=9), "backstop")
+        p = c.perf()
+        self.assertEqual((p["memoryBoundBytes"], p["residentBytes"], p["growthArmed"], p["growthWalks"], p["heapBlocksAtWalk"]),
+                         (15 * GB, 9 * GB, True, 1, 4000), "9 GB of 15: armed, one growth walk run")
+        json.dumps(p)
