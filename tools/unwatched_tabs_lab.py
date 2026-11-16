@@ -45,6 +45,18 @@ Roads, one kernel boot each, over the same transcripts (written once):
 One line per road. One run per point, on whatever else the machine is doing (the load average says how much that was):
 a measurement, not a distribution.
 
+What an ask waits for (the final review of the change, 2026-11-16), each written to the --json row:
+
+    --burst N        after the clicks, N more small tabs at rest opened a tenth of a second apart, none waited for
+    --flips N        the two large tabs opened in turn N times, each at rest (use --watched 1), a small tab at rest asked
+                     for every quarter second while a large tab's full is on its way
+    --stacks         the kernel's own thread stacks (/perf?stacks=1) sampled through the clicks and tallied: where the
+                     pusher, the socket's lane and the threads that build an ask's tab stand, and `lockRead`, the samples
+                     with a sender reading the parse for a frame's tail start inside the locked send, or before it
+    --cold-burst     instead of the roads: one boot that has built only the tab on screen and one small tab, then two
+                     large tabs (a cold build each) and that small one clicked a third of a second apart; when each
+                     tab's full arrived
+
     nice -n 10 tools/unwatched_tabs_lab.py                       # 85 sessions of 1 MB, 60 s, both roads, four watched
     nice -n 10 tools/unwatched_tabs_lab.py --roads after --watched 1,4,8 --large 2 --large-mb 300 --json /tmp/watched.json
     nice -n 10 tools/unwatched_tabs_lab.py --tracking on --json /tmp/unwatched-on.json
@@ -482,6 +494,90 @@ def prepare_large(root, a):
     return out
 
 
+# The kernel's functions worth naming when one of them is anywhere on a sampled thread's stack: the senders and what they
+# call under a client's slot lock, the build, and the reads an ask's push makes before it builds.
+NOTABLE = ("_send_chat_proto2", "_tail_run_start", "_tail_tix", "_chat_send_prep", "_send_chat_or_status", "build_session",
+           "_connect_push_scope", "_chat_build_sig", "_light_status", "_send_tab_order", "_repair_worker", "_dispatch_ws",
+           "_release_skeleton", "_client_reset_chat_sid", "_parse", "_sessions")
+
+
+def sample_stacks(port, token, tally, stop, every=0.2):
+    """Tally where the kernel's threads stand until `stop`: its own /perf?stacks=1, per thread kind by the innermost two
+    frames and by which NOTABLE functions are on the stack. A thread waiting for a lock stands at the line that takes it."""
+    while not stop.wait(every):
+        try:
+            st = _get(port, token, "/perf?stacks=1").get("stacks") or {}
+        except Exception:
+            continue
+        tally["samples"] = tally.get("samples", 0) + 1
+        for key, row in st.items():
+            if row.get("self"):
+                continue
+            frames = row.get("frames") or []
+            names = [f.split(" ", 1)[0] for f in frames]
+            via = ">".join(n for n in NOTABLE if n in names)
+            at = (key.split(" ", 1)[-1], via, " < ".join(reversed(frames[-2:])))
+            tally[at] = tally.get(at, 0) + 1
+
+
+def stacks_report(tally, kinds=("pusher", "ws-lane", "ws-repair"), top=8):
+    out = {"samples": tally.get("samples", 0)}
+    for at, n in sorted(((k, v) for k, v in tally.items() if k != "samples"), key=lambda kv: -kv[1]):
+        if at[0] in kinds:
+            rows_ = out.setdefault(at[0], [])
+            if len(rows_) < top:
+                rows_.append({"n": n, "via": at[1], "at": at[2]})
+    return out
+
+
+def run_cold_burst(a, root, total):
+    """Three quick clicks on a kernel that has built the tab on screen and one small tab (loaded once, as a tab a page has
+    opened before is): two large tabs never built (a cold build each, the whole transcript parsed), then that small one.
+    Returns when each tab's full arrived, from its own click."""
+    kernel = page = watch = None
+    scripts = root["scripts"]
+    try:
+        smalls, larges = [t for t in scripts if not t.large], [t for t in scripts if t.large]
+        kernel, port, token, watch = boot(root, ROMP_WATCHED_TABS="4")
+        page = Page(port, "app=chat&iid=lab-page&rest=1&active=%s&skeleton=1&token=%s" % (smalls[0].sid, token))
+        page.say({"type": "ready", "proto": 2})
+        if page.wait(lambda typ, fid, raw: typ == "session" and fid == smalls[0].sid, timeout=600) is None:
+            raise RuntimeError("the first tab's frame never came")
+        at = page.count()
+        page.say({"type": "needFull", "id": smalls[3].sid, "why": "prefetch"})   # the small tab, loaded once: the kernel holds its parse
+        if page.wait(lambda typ, fid, raw: typ == "session" and fid == smalls[3].sid, since=at, timeout=600) is None:
+            raise RuntimeError("the small tab's first frame never came")
+        time.sleep(2.0)
+        tally, sampling = {}, threading.Event()
+        if a.stacks:
+            threading.Thread(target=sample_stacks, args=(port, token, tally, sampling), daemon=True).start()
+        clicks = []
+        for tr in larges[:2] + [smalls[3]]:
+            clicks.append((tr, time.monotonic(), page.count()))
+            page.say({"type": "activeTab", "id": tr.sid})
+            page.say({"type": "needFull", "id": tr.sid, "why": "skeleton-click"})
+            time.sleep(0.3)
+        out = []
+        for tr, tc, at in reversed(clicks):          # the small tab's first: it is the one on screen
+            hit = page.wait(lambda typ, fid, raw, s=tr.sid: typ == "session" and fid == s, since=at, timeout=900)
+            watch.check()
+            out.append({"sid": tr.sid[:8], "large": tr.large, "transcriptMB": round(os.path.getsize(tr.path) / 1048576, 1),
+                        "clickToFullMs": _ms(hit[1] - tc) if hit is not None else None})
+        sampling.set()
+        perf = _get(port, token, "/perf")
+        by = {r.get("sid"): r for r in _dig(perf, "builds", "chat", "bySession") or []}
+        for row, (tr, _, _) in zip(out, reversed(clicks)):
+            row["buildMs"] = round((by.get(tr.sid) or {}).get("last") or 0, 1)
+        return {"road": "coldBurst", "sessions": len(scripts), "large": len(larges), "transcriptMB": round(total / 1048576, 1),
+                "clicks": list(reversed(out)), "stacks": stacks_report(tally),
+                "kernelPeakRssMB": _rss_mb(kernel.pid, "VmHWM"), "loadavg": round(os.getloadavg()[0], 2)}
+    finally:
+        if page is not None:
+            page.close()
+        if kernel is not None:
+            halt(kernel, watch)
+
+
 def t_wall0(mono0):
     """The wall clock at a monotonic instant: file times are wall times."""
     return time.time() - (time.monotonic() - mono0)
@@ -591,6 +687,12 @@ def run_road(road, a, watched_k, root, total):
                 raw = page.frames[hit[0]][3] if hit[0] >= at else None
             return max(0.0, hit[1] - tc), raw
 
+        # where the kernel's threads stand while the page clicks (--stacks): its own /perf?stacks=1, sampled every quarter
+        # second, tallied per thread kind by stage and innermost three frames. A thread waiting for a lock stands at the line
+        # that takes it, so the tally names the lock an ask waited on where the clocks only say that it waited
+        tally, sampling = {}, threading.Event()
+        if a.stacks:
+            threading.Thread(target=sample_stacks, args=(port, token, tally, sampling), daemon=True).start()
         inside = [click(tr, False)[0] for tr in in_set[-3:]]
         rr = random.Random(13)
         picks = list(outside_small)
@@ -617,6 +719,61 @@ def run_road(road, a, watched_k, root, total):
             built = (row1.get("n") or 0) - (row0.get("n") or 0)
             outside_split.append({"clickToFreshMs": _ms(dt), "askPushMs": round(push_ms, 1), "askPushes": pushes,
                                   "buildMs": round(row1.get("last") or 0, 1) if built else None, "chatBuilds": built})
+        # the burst (--burst): quick clicks on small tabs at rest, a tenth of a second apart and none waited for, as a
+        # person pages through tabs; each timed from its own click to its full. The asks' resets and the tab switches
+        # go through the socket's one lane, so whatever holds the client's slot lock holds every one of them
+        burst_rows = []
+        if a.burst:
+            time.sleep(a.interval)
+            sent = []
+            # …led by the large tabs outside the set (--burst-large): a large tab's full is the frame whose tail start
+            # reads the parse, so the clicks right behind it are the ones that waited on the client's slot lock
+            lead = outside_large if a.burst_large else []
+            for tr in lead + picks[a.clicks:a.clicks + a.burst]:
+                sent.append((tr, time.monotonic(), page.count()))
+                page.say({"type": "activeTab", "id": tr.sid})
+                page.say({"type": "needFull", "id": tr.sid, "why": "rest-open"})
+                state_now["on"] = tr
+                time.sleep(0.1)
+            q_end = None
+            for tr, tc, at in sent:
+                hit = page.wait(lambda typ, fid, raw, s=tr.sid: typ == "session" and fid == s, since=at, timeout=600)
+                burst_rows.append([tr, _ms(hit[1] - tc) if hit is not None else None])
+            q_end = _get(port, token, "/perf")
+            by = {r.get("sid"): r for r in _dig(q_end, "builds", "chat", "bySession") or []}
+            burst_rows = [{"large": tr.large, "clickToFullMs": ms, "buildMs": round((by.get(tr.sid) or {}).get("last") or 0, 1)} for tr, ms in burst_rows]
+            if a.burst_large:
+                outside_large = []                   # opened in the burst: not clicked again below
+        # the flips (--flips): the large tabs opened in turn, each while it is at rest (with one watched tab, opening one
+        # leaves the other unwatched), and, for as long as a large tab's full is on its way, a small tab at rest opened
+        # every quarter second. A large tab's full is the frame whose tail start reads the session's parse; whatever that
+        # holds while it reads, the small tabs' asks behind it wait for
+        flip_rows, flip_small = [], []
+        if a.flips and len(larges) >= 2:
+            ring = [t for t in picks[a.clicks + a.burst:]] or picks
+            n_small = 0
+            for i in range(a.flips):
+                big = larges[(i + 1) % 2]
+                time.sleep(a.interval)
+                tc, at = time.monotonic(), page.count()
+                page.say({"type": "activeTab", "id": big.sid})
+                page.say({"type": "needFull", "id": big.sid, "why": "rest-open"})
+                state_now["on"] = big
+                pending = []
+                while True:
+                    hit = page.wait(lambda typ, fid, raw, s=big.sid: typ == "session" and fid == s, since=at, timeout=0.25)
+                    if hit is not None or time.monotonic() - tc > 600:
+                        break
+                    tr = ring[n_small % len(ring)]
+                    n_small += 1
+                    pending.append((tr, time.monotonic(), page.count()))
+                    page.say({"type": "needFull", "id": tr.sid, "why": "prefetch"})   # an ask alone: the large tab stays on screen
+                flip_rows.append({"sid": big.sid[:8], "clickToFullMs": _ms(hit[1] - tc) if hit is not None else None})
+                for tr, t1, a1 in pending:
+                    h = page.wait(lambda typ, fid, raw, s=tr.sid: fid == s and typ in ("session", "status"), since=a1, timeout=120)
+                    flip_small.append(h[1] - t1 if h is not None else None)
+                guard()
+            outside_large = []
         large_rows = []
         for tr in outside_large:
             dt, raw, q0, q1, row0, row1, push_ms, pushes = split_click(tr)
@@ -643,9 +800,11 @@ def run_road(road, a, watched_k, root, total):
                 "frameKB": round(len(raw) / 1024, 1) if raw else None,
                 "beyondPushMs": round(max(0.0, (dt or 0) * 1000 - push_ms), 1),
             })
+        sampling.set()
         stop.set()
         th.join(timeout=10)
         p2 = _get(port, token, "/perf")
+        stacks = stacks_report(tally)
 
         def d(key, a0, a1):
             x0, x1 = a0, a1
@@ -680,6 +839,17 @@ def run_road(road, a, watched_k, root, total):
             "outsideClicks": len(outside), "outsideUnanswered": len(outside) - len(ok_out),
             "outsideClickToFreshMs": {"p50": _ms(_pct(ok_out, 0.5)), "max": _ms(max(ok_out)) if ok_out else None},
             "outsideSplit": outside_split,
+            "burst": burst_rows, "stackSamples": tally.get("samples", 0), "stacks": stacks,
+            "flips": flip_rows,
+            "flipSmallAsks": {"n": len(flip_small), "unanswered": sum(1 for x in flip_small if x is None),
+                              "p50": _ms(_pct([x for x in flip_small if x is not None], 0.5)), "p90": _ms(_pct([x for x in flip_small if x is not None], 0.9)),
+                              "max": _ms(max([x for x in flip_small if x is not None])) if any(x is not None for x in flip_small) else None},
+            # the tally's own reading of the client's slot lock: samples with a sender reading the parse for a frame's tail
+            # start INSIDE the locked send, with one doing it before the lock, and with the socket's lane not idle
+            "lockRead": {"tailStartInsideSend": sum(v for k, v in tally.items() if k != "samples" and "_send_chat_proto2>_tail_run_start" in k[1]),
+                         "tailIndexBeforeSend": sum(v for k, v in tally.items() if k != "samples" and "_tail_tix>_chat_send_prep" in k[1]),
+                         "laneBusy": sum(v for k, v in tally.items() if k != "samples" and k[0] == "ws-lane" and "get (queue.py" not in k[2]),
+                         "laneSamples": sum(v for k, v in tally.items() if k != "samples" and k[0] == "ws-lane")},
             "largeOutside": large_rows,
             # each large session's chat builds over the span (the kernel's per-session timer): how many, and what one cost
             "largeBuilds": [{"sid": t.sid[:8], "watched": bool(rest and t.sid in (want or ())) or not rest,
@@ -712,6 +882,11 @@ def main():
     ap.add_argument("--tracking", choices=("off", "on"), default="off", help="the kernel's Task tracking switch (default off)")
     ap.add_argument("--roads", default=",".join(ROADS))
     ap.add_argument("--json", help="write the rows here too")
+    ap.add_argument("--burst", type=int, default=0, help="after the clicks, this many more small tabs at rest opened a tenth of a second apart, none waited for (default 0)")
+    ap.add_argument("--flips", type=int, default=0, help="after the burst, the two large tabs opened in turn this many times, a small tab at rest asked for every quarter second meanwhile (use with --watched 1)")
+    ap.add_argument("--burst-large", action="store_true", help="the burst begins with the large tabs outside the watched set")
+    ap.add_argument("--cold-burst", action="store_true", help="instead of the roads: one boot that has built only the tab on screen, then two large tabs and a small one clicked in quick succession")
+    ap.add_argument("--stacks", action="store_true", help="sample the kernel's thread stacks (/perf?stacks=1) while the page clicks; the tally is in the --json row")
     ap.add_argument("--keep", action="store_true", help="keep each road's temporary root (the kernel's log is in it)")
     a = ap.parse_args()
     if a.sessions * a.kb > 300 * 1024 or a.large_mb > 300:
@@ -729,6 +904,16 @@ def main():
     try:
         rows, total = write_seed(a, seed)
         shared = None
+        if a.cold_burst:                             # no prepare: the large tabs' first builds ARE the measurement
+            root = make_root(a, seed, rows, a.keep)
+            roots.append(root)
+            shutil.rmtree(seed, ignore_errors=True)
+            row = run_cold_burst(a, root, total)
+            rows_out.append(row)
+            print("cold burst: " + "; ".join("%s (%s MB) full after %s ms, its build %s ms" % ("large" if c["large"] else "small", c["transcriptMB"], c["clickToFullMs"], c["buildMs"])
+                                             for c in row["clicks"]) + " | kernel peak %s MB | load %s" % (row["kernelPeakRssMB"], row["loadavg"]))
+            save()
+            return
         if a.large:                                  # one root for every road: the large sessions' documents live in it
             shared = make_root(a, seed, rows, a.keep)
             roots.append(shared)

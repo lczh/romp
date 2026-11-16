@@ -125,9 +125,13 @@ export function onRest(st: SkeletonState, id: string, status: unknown, held: boo
 /** A full `session` frame landed (upsert): the id is loaded, its skeleton entry and stored status go.
  *  Returns whether it WAS held — a just-loaded skeleton that is the active tab must re-show its view, not
  *  append to the hidden one. Also records the id as loaded on this socket (see applyTabOrderSkeleton). */
-export function onFull(st: SkeletonState, id: string): boolean {
+export function onFull(st: SkeletonState, id: string, declined = false): boolean {
   st.loaded.add(id);
-  st.rested.delete(id);   // the full is the answer: the copy the page holds is current again
+  // the full is the answer: the copy the page holds is current again. A frame the page DECLINED answers nothing (an empty
+  // one for a session it holds with content, a read that failed: frame-merge.ts keepResidentEvents): the copy is as far
+  // behind as it was and stays marked, so the line that says so stays up until a frame that carries the transcript lands
+  // (2026-11-16: the mark went first, and the line came down over a copy eight turns behind)
+  if (!declined) st.rested.delete(id);
   const held = st.ids.delete(id);
   if (!held) return false;
   st.order = st.order.filter((x) => x !== id);

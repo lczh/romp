@@ -163,7 +163,10 @@ test("showActive gates the active session on the set, shows the loader with LOAD
 
 test("upsert computes wasSkeleton beside awaitingFull.delete and routes a just-loaded skeleton to showActive, not appendActive", () => {
   const up = fn("upsert");
-  assert.match(up, /awaitingFull\.delete\(msg\.id\);[^\n]*\n\s*const wasSkeleton = onFull\(skeletonTabs, msg\.id\);/);
+  // …after the frame's own verdict (2026-11-16): whether the page declines it (an empty frame for a session it holds with
+  // content) is read first and handed to onFull, so a declined frame does not take a copy at rest out of its behind mark
+  assert.match(up, /const kept = keepResidentEvents\(prev \? prev\.events : null, msg\.events\);\s*\n\s*const wasSkeleton = onFull\(skeletonTabs, msg\.id, kept\);/);
+  assert.ok(up.indexOf("awaitingFull.delete(msg.id);") < up.indexOf("const wasSkeleton = onFull(") && up.indexOf("awaitingFull.delete(msg.id);") > 0);
   assert.match(up, /if \(wasSkeleton \|\| skeletonLoading === msg\.id\) showActive\(\);[^\n]*\n\s*else if \(existed && !forked && !firstBuild && !adopted\) \{\s*\n\s*appendActive\(\);/,
     "the loader is up and the view hidden — appendActive would append onto a hidden view");
   assert.match(fn("appendActive"), /if \(!content \|\| !activeId \|\| skeletonTabs\.ids\.has\(activeId\)\) \{ showActive\(\); return; \}/,

@@ -13,6 +13,8 @@ import { mergeWindow, keyOf, prependHead } from "./chat-window";
 import { OVERLAY_KINDS, insertRun, regionsFromRuns, runsOf, splitHeldAgainstFrame, turnsBeforeTail, type Region } from "./chat-regions";
 import { frameOlder, droppedLandedHuman, dropsLandedRow } from "./frame-guard";   // the frame watermark guard (2026-09-22): upsert reads it
 import { isOptimisticUuid, isKernelEchoUuid } from "./send-pending";   // the uuid tests render.ts imports (the lifted predicates and upsert read them)
+import { keepResidentEvents } from "./frame-merge";                     // …and the two the rest test below runs for real
+import { newSkeletonState, onFull, onRest } from "./skeleton-tabs";
 
 const requireCjs = createRequire(__filename);
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
@@ -603,4 +605,23 @@ test("the reload restore's window ask (a keep offset, no re-land) is a navigatio
   assert.equal(restore.rows.length, 1); assert.equal(restore.rows[0].k, "regionask"); assert.equal(restore.rows[0].d.why, "landing");
   assert.deepEqual({ nav: restore.rows[0].d.nav, keep: restore.rows[0].d.keep, reland: restore.rows[0].d.reland, trail: restore.rows[0].d.trail }, { nav: true, keep: true, reland: false, trail: ["pointer-fetch-window"] }, "the ask's diagnostic row names the keep offset and the re-land flag apart, under the scroll rows' budget");
   assert.deepEqual(restore.posted, [{ type: "loadAround", id: "A", uuid: "u1" }], "the ask itself goes out after the mark");
+});
+
+test("an empty full for a tab at rest is declined and the copy STAYS marked behind; the content full that follows takes the mark off (2026-11-16)", () => {
+  // the final review: a tab at rest opened while its transcript could not be read was answered with a full of no events.
+  // The page declined the frame (frame-merge.ts: a held transcript is never taken from content to nothing) but had already
+  // cleared the mark, so its "Catching up" line went down over a copy that was as far behind as before. The real
+  // keepResidentEvents and onFull run here, over the real skeleton state.
+  const st = newSkeletonState();
+  st.loaded.add("A");
+  assert.equal(onRest(st, "A", { state: "working" }, true), "behind");
+  const rows: any[] = []; const sessions = new Map<string, any>([["A", heldTail([evU("t1"), evU("t2")])]]);
+  const { upsert } = liftUpsert(sessions, new Map(), "A", rows, [], { keepResidentEvents, onFull, skeletonTabs: st });
+  upsert({ type: "session", id: "A", name: "web", proto: 2, events: [], headKnown: false, headTotal: null, firstUuid: null, lastUuid: null, status: { state: "idle" }, tailLo: null });
+  assert.deepEqual(order(sessions.get("A")), ["t1", "t2"], "the copy stays on screen");
+  assert.equal(st.rested.has("A"), true, "…and stays marked behind: the line above the message box goes on saying so");
+  assert.ok(rows.some((r) => r.what === "empty-session-frame"), "the empty frame is filed, once");
+  upsert(frame2([evU("t1"), evU("t2"), evU("t3")], { tailLo: 195 }));
+  assert.deepEqual(order(sessions.get("A")), ["t1", "t2", "t3"]);
+  assert.equal(st.rested.has("A"), false, "the full that carries the transcript is the answer: the mark goes");
 });

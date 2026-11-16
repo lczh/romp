@@ -42937,6 +42937,7 @@ WIRE_CHUNK = 250                                 # events per loadOlder (chatHea
 # stderr (fail loudly, never degrade silently). A session that genuinely has nothing (a fresh one, a never-run
 # SDK session) has no previous events and is untouched; a /clear is never events-empty (its boundary card).
 _EMPTY_BUILD_NOTED = set()      # sids inside an empty-build episode (one stderr line per episode)
+_EMPTY_BUILD_BELLED = set()     # …and those whose episode was said on the bell, for a page waiting on the tab (2026-11-16)
 
 
 def _empty_build_regresses(m, prev_events, marked=False):
@@ -42971,21 +42972,35 @@ def _chat_prior_n(sid):
     prev = _prev_chat_events.get(sid)
     if prev:
         return len(prev)
-    return int(_chat_baseline_raced.get(sid) or 0)
+    return int(_chat_baseline_raced.get(sid) or _chat_rested.get(sid) or 0)   # …or what its pages held when it went to rest
 
 
-def _note_empty_build(sid, path, n_prev, marked=False):
+def _note_empty_build(sid, path, n_prev, marked=False, waiting=None):
     """One stderr line per episode naming the sid, the count the clients hold and whether the transcript path is even
     there; a romp-perf `chatempty` line every time, for the harness/perf log. The sentence follows the count's source
     (2026-09-21): with a baseline, `n_prev` is its length and the previous build is kept as the stand-in; under the
     detector's mark (`marked`), `n_prev` is the longest list some client was handed whole, a minimum for what the
-    clients hold, and nothing is kept or sent for the sid until content returns (_chat_prior_n)."""
+    clients hold, and nothing is kept or sent for the sid until content returns (_chat_prior_n). `waiting` (2026-11-16) is
+    the session's name when a page has ASKED for the tab whole and this read is its answer (a tab at rest being opened):
+    the page shows the copy it holds and says it is catching up, and goes on saying so until a read succeeds, so the
+    episode is also said once on the bell, where the person looks, in the words of what they see."""
     sid = str(sid or "")
     _perf("chatempty", sid=sid[:8], prev=int(n_prev or 0))
+    exists = bool(path) and os.path.exists(str(path))
+    if waiting is not None and sid not in _EMPTY_BUILD_BELLED:
+        # its own once-per-episode mark, beside the stderr line's: the episode may have been noted before any page asked
+        # (the per-session push runs this guard too and has no page to name), and the page that asks later is still owed it
+        _EMPTY_BUILD_BELLED.add(sid)
+        try:
+            _sync_notice("chat: the transcript of %s cannot be read (%s); its tab shows what it held when it was last open and "
+                         "says it is catching up until a read succeeds"
+                         % (waiting or sid[:8], "the file is there and read as empty" if exists else "the file is missing"),
+                         ok=False, kind="refused")
+        except Exception:
+            pass
     if sid in _EMPTY_BUILD_NOTED:
         return
     _EMPTY_BUILD_NOTED.add(sid)
-    exists = bool(path) and os.path.exists(str(path))
     if marked:
         held, road = "its clients hold at least %d events" % int(n_prev or 0), "sending nothing for it until content returns"
     else:
@@ -42997,6 +43012,7 @@ def _note_empty_build(sid, path, n_prev, marked=False):
 
 def _clear_empty_build_note(sid):
     _EMPTY_BUILD_NOTED.discard(str(sid or ""))
+    _EMPTY_BUILD_BELLED.discard(str(sid or ""))
 
 
 def _chat_diff(prev, cur):
@@ -65126,34 +65142,71 @@ def _lane_worker(client, lane):
 # to twelve for 300 MB). Now the needFull arm does its reset on the lane, in order, and hands the build to the client's
 # repairs: at most two threads a socket, each taking the ask for the tab the page shows NOW ahead of any other (an ask
 # for a tab the page has moved away from waits its turn; none is dropped, since the page keeps its ask latched until a
-# full answers it). The second thread starts only for an ask that names the tab on screen while the first is building
-# another tab, so a click is never behind a build for a tab the reader left. A caller's record with no lane (a test's
+# full answers it). A further thread starts only for an ask that names the tab on screen while the others are building
+# other tabs, so a click is never behind a build for a tab the reader left. A caller's record with no lane (a test's
 # dict) runs the push inline, as before. The page sends activeTab ahead of the ask its click makes, and the lane
 # dispatches that at once now that no build holds it, so `active` names the tab by the time its ask is taken.
+# A THIRD build, for the tab on screen (the final review, 2026-11-16). With two at most, a third quick click queued
+# behind two builds for tabs the reader had already left: two cold 80 MB transcripts, then a small tab at rest, whose
+# full came two minutes later. A running build cannot be taken back, so the ask for the tab on screen gets a thread of
+# its own beside them (REPAIR_BUILDS_MAX at once), when the kernel already holds a parse of that tab's transcript
+# (_repair_warm): its build is then a fold of what the session wrote since, small in time and in memory. That thread
+# answers that one ask and ends. A tab whose transcript has never been parsed waits for one of the two, as before: a
+# cold build reads the whole file and holds gigabytes for a large one (6 GB at the peak for 300 MB, measured), so cold
+# builds stay two at a time. Warm is a fact read at the ask, not a timer on how long a build has run.
+REPAIR_BUILDS_MAX = 3
+
+
+def _asks_under_way(c):
+    """The sids client `c` has asked for whole whose answer is queued or building on its repair threads (read under its
+    slot lock): each is served by its own push. Empty for a caller's record with no lane, whose asks run inline."""
+    with _client_lock(c):
+        r = c.get("repairs")
+        return (set(r["pending"]) | set(r["building"])) if r else set()
+
+
+def _repair_warm(sid):
+    """Whether the kernel holds a parse of `sid`'s transcript (the parse store's newest entry under the sid, a lookup),
+    so a build of it folds what the session wrote since instead of reading the whole file. False when that cannot be told."""
+    try:
+        return jd._parse_entry(str(sid)) is not None
+    except Exception:
+        return False
+
+
 def _repair_ask(handler, client, sid):
     if client.get("lane") is None:
         handler._push_one(client, only={sid})
         return
     stage = getattr(_STAGE_TL, "name", None) or "ws-lane"   # the lane's own mark, so the build lands where it did (T401)
+    one = None
     with _client_lock(client):
         r = client.setdefault("repairs", {"pending": [], "running": 0, "building": set()})
         if sid not in r["pending"]:
             r["pending"].append(sid)                  # an ask for a tab already waiting is answered by that one build
         on_screen = str(client.get("active") or "") == sid
         start = r["running"] == 0 or (r["running"] == 1 and on_screen and sid not in r["building"])
+        third = not start and on_screen and sid not in r["building"] and 2 <= r["running"] < REPAIR_BUILDS_MAX
         if start:
             r["running"] += 1
+    if third and _repair_warm(sid):                   # read with no lock held; then the state is read again
+        with _client_lock(client):
+            if (r["running"] < REPAIR_BUILDS_MAX and sid in r["pending"] and sid not in r["building"]
+                    and str(client.get("active") or "") == sid):
+                r["running"] += 1
+                start, one = True, sid
     if start:
-        threading.Thread(target=_stage_marked(stage)(_repair_worker), args=(handler, client), daemon=True, name="ws-repair").start()
+        threading.Thread(target=_stage_marked(stage)(_repair_worker), args=(handler, client, one), daemon=True, name="ws-repair").start()
 
 
-def _repair_worker(handler, client):
+def _repair_worker(handler, client, one=None):
     """Serve the client's waiting asks until none is left: the one for the tab its page shows now, else the oldest. A
-    build that raises is logged as the lane logs a failing op, a socket error drops the client, and the next ask is taken."""
+    build that raises is logged as the lane logs a failing op, a socket error drops the client, and the next ask is taken.
+    With `one`, the thread started for the tab on screen beside two builds: it serves that ask alone and ends."""
     r = client["repairs"]
     while True:
         with _client_lock(client):
-            pend = [x for x in r["pending"] if x not in r["building"]]
+            pend = [x for x in r["pending"] if x not in r["building"] and (one is None or x == one)]
             if not pend or not client.get("alive", True):
                 r["running"] -= 1
                 return
@@ -66480,6 +66533,16 @@ def _rest_blocker_locked(c, sid, k=None):
     return None
 
 
+def _asked_whole(sid, chat_clients):
+    """Whether some chat client in `chat_clients` has asked for `sid` whole and not been answered (its `askedFull` mark,
+    read under its slot lock): a page that is showing the tab's copy, or its loader, until the full arrives."""
+    for c in chat_clients:
+        with _client_lock(c):
+            if sid in (c.get("askedFull") or ()):
+                return True
+    return False
+
+
 def _gate_clients(chat_clients):
     """The chat clients the two halves of the gate ask (the review of the first cut, 2026-11-15): every one but a socket
     that has not said ready and is not armed for the diet. Such a socket holds nothing and can be sent no chat frame (no
@@ -66572,6 +66635,16 @@ def _rest_unwatched(sid, clients, light, k=None):
 # in a row that cannot be cached is a session moving while nobody watches, and the tab rests. Cleared by a build that
 # caches, by the rest, and with the tab. A plain set: adds and discards are atomic.
 _chat_rest_retried: set = set()
+# What the pages held of a tab when it went to rest: its event count (2026-11-16, the final review). The rest forgets the
+# shared baseline and the detector's mark, the two things the empty-build guard reads (_empty_build_regresses), so a tab
+# at rest whose transcript could not be read at the moment its page opened it was sent a full with no events: the page
+# took its "Catching up" line down and went on showing the copy it held, turns behind, unmarked, and the kernel said
+# nothing, where a watched tab in the same state is sent nothing and the kernel says so. With this the guard reads a
+# rested sid as it reads a marked one (its clients hold content though no baseline stands): no frame leaves, the page's
+# ask stands and its line with it, and the episode is said (_note_empty_build). Kept until the tab leaves the strip: a
+# session that had events never legitimately builds to none (a /clear leaves its boundary card, a fork mints a new id),
+# so the entry is true for as long as the tab is listed. Written and read under _chat_baseline_lock.
+_chat_rested: dict = {}
 
 
 def _rest_forget(sid):
@@ -66579,10 +66652,16 @@ def _rest_forget(sid):
     _chat_baseline_lock, as for a tab that left the strip. No client holds a base for the sid any more, so there is nothing
     a baseline could describe, and the tab's next whole frame establishes one (_seed_chat_baseline)."""
     with _chat_baseline_lock:
-        _built_chat.pop(sid, None)
-        _prev_chat_events.pop(sid, None)
+        hit = _built_chat.pop(sid, None)
+        prev = _prev_chat_events.pop(sid, None)
         _prev_chat_ledger.pop(sid, None)
-        _chat_baseline_raced.pop(sid, None)
+        raced = _chat_baseline_raced.pop(sid, None)
+        try:
+            held = max(len(prev or ()), int(raced or 0), len((hit[1].get("events") or ()) if hit else ()))
+        except Exception:
+            held = len(prev or ())
+        if held:
+            _chat_rested[sid] = max(held, _chat_rested.get(sid) or 0)   # what its pages hold: the empty-build guard's read
     _chat_rest_retried.discard(sid)
 
 
@@ -66811,6 +66890,7 @@ def _send_chat_or_status(c, m, ms, change_from, led_changed):
     path fires exactly as for a never-sent session. A sid the client asked for whole (askedFull) is never a
     skeleton to this function: a set naming one is the tripwire's case (_note_needfull_status, 2026-09-19),
     said on the record and answered with the full."""
+    _chat_send_prep(c, m, change_from)           # the payload's own derivations, with no lock held (2026-11-16)
     with _chat_full_outbox():                    # the chatFull rows the send below decides leave for the disk once the client's lock is released (2026-09-19)
         with _client_lock(c):
             sid = m["id"]
@@ -68455,6 +68535,8 @@ def _forget_chat_positions(live_sids):
     with _WIRE_MEMO_LOCK:                             # handler threads insert meanwhile: snapshot and pop under the lock
         for sid in [s for s in list(_UUID_POS) if s not in live_sids]:
             _UUID_POS.pop(sid, None)
+        for sid in [s for s in list(_TAIL_TIX) if s not in live_sids]:
+            _TAIL_TIX.pop(sid, None)
 
 
 def _uuid_positions(evs, sid=None):
@@ -68472,6 +68554,9 @@ def _uuid_positions(evs, sid=None):
     if sid is not None:
         with _WIRE_MEMO_LOCK:
             _UUID_POS[sid] = (evs, pos)
+            t = _TAIL_TIX.get(sid)
+            if t is not None and t[0] is not evs:
+                _TAIL_TIX.pop(sid, None)              # the turn index of a superseded list dies with it too (_tail_tix)
     return pos
 
 
@@ -68970,6 +69055,79 @@ def _turn_run_edge(tix, t):
     return i
 
 
+_TAIL_TIX = {}                                   # sid → (the events list, its turn index or None): one live entry per session, as _UUID_POS
+
+
+def _tail_tix(sid, evs, now):
+    """The turn index of a built events list (_turn_index_of_events over the session's parse), memoized per SESSION on the
+    list's identity, as _uuid_positions is: the pusher hands every client the same list, so the first reader pays and the
+    rest read. None when the session is not listed or its parse cannot be read, which is NOT kept: the next reader tries
+    again, as every full did before, so a listing that missed the session once does not leave a cached build's frames
+    without their tail start for as long as that build is served. This is the one piece of a full frame that reads the parse: the session listing, the parse
+    (a fold of whatever the transcript gained since the build), and a walk of every turn's atoms, hundreds of
+    milliseconds on a large session. It ran inside the client's slot lock (_send_chat_proto2 -> _tail_run_start), where
+    the pusher's next send to that client and the socket's own lane (an activeTab, a needFull's reset) wait: the final
+    review sampled two 80 MB watched sessions writing and found the pusher blocked on that lock in 37 samples and the
+    lane in 68 of 112, asks answered after 0.35 to 19 s for builds of 0.18 to 0.83 s. The senders take it BEFORE the
+    lock now (_chat_send_prep); _tail_run_start reads it here, and computes it only for a caller that did not."""
+    hit = _TAIL_TIX.get(sid)
+    if hit is not None and hit[0] is evs:
+        return hit[1]
+    tix = None
+    try:
+        sess = next((x for x in _sessions(now) if x["sid"] == sid), None)
+        if sess is not None:
+            tix = _turn_index_of_events(evs, _parse(sess["path"], sid, now)["turns"])
+    except Exception:
+        tix = None
+    if tix is not None:
+        with _WIRE_MEMO_LOCK:
+            _TAIL_TIX[sid] = (evs, tix)
+    return tix
+
+
+def _chat_full_owed(c, sid, pos, change_from, total):
+    """Whether a send of a `total`-event list to client `c` would leave as a FULL session frame: the delta branch's own
+    conditions (_send_chat_proto2) over what the client holds, read under its slot lock in one short step (lookups alone;
+    `pos` is the list's position map, taken before). False for a client that is sent a status frame or nothing for the
+    sid (a skeleton holder that has not asked, one whose set is not resolved, one before its ready, an index-wire one)."""
+    with _client_lock(c):
+        if c.get("proto") != 2 or c.get("handshake") is False:
+            return False
+        if sid in (c.get("skeleton") or ()) and sid not in (c.get("askedFull") or ()):
+            return False
+        if c.get("skeletonOnReady") or c.get("reconnect"):
+            return False
+        pc = (c.get("echat") or {}).get(sid)
+        pc = dict(pc) if isinstance(pc, dict) else None
+    if pc is None:
+        return True
+    pf, pl = pos.get(pc.get("first")), pos.get(pc.get("last"))
+    if pf is None and pl is not None:
+        pf = 0
+    if pf is None or pl is None or pf > pl:
+        return True
+    return change_from < total and (min(change_from, pl + 1) if change_from > 0 else 0) <= pf
+
+
+def _chat_send_prep(c, m, change_from):
+    """What a chat send derives from the PAYLOAD alone, taken before the client's slot lock so the lock covers the ordered
+    write and nothing else (the final review, 2026-11-16; _tail_tix has the measurement): the list's position map, which
+    both the delta and the full read, and, when this client is owed a FULL (_chat_full_owed), the list's turn index.
+    Whether it is owed one is read here in a short locked step of its own and read again by the send: a client whose
+    base is reset between the two (a needFull landing in the gap) is owed a full the first read did not see, and that
+    one send takes the index inside the lock, as every full did before; the other way round costs an index nobody
+    reads. Nothing here writes a client's state or decides a frame, so the order of what a client is sent is the send's
+    locked step alone, as before."""
+    sid, evs = m["id"], m.get("events") or []
+    total = len(evs)
+    if not total:
+        return
+    pos = _uuid_positions(evs, sid)
+    if _chat_full_owed(c, sid, pos, change_from, total):
+        _tail_tix(sid, evs, int(time.time()))
+
+
 def _tail_run_start(sid, evs, head_from, now):
     """(head_from, tailLo) for a proto-2 full frame whose cut `head_from` may fall inside a turn, or inside the unplaced
     prefix above the first placed turn: the turn of the first placed event at or after the cut, and _turn_run_edge for it,
@@ -68982,10 +69140,11 @@ def _tail_run_start(sid, evs, head_from, now):
     stranded. A parse that cannot place the cut leaves both as they were (the plain cut, tailLo None: the page then asks by
     the tail's first key, loadOlder, as before)."""
     try:
-        sess = next((x for x in _sessions(now) if x["sid"] == sid), None)
-        if sess is None or head_from >= len(evs):
+        if head_from >= len(evs):
             return head_from, None
-        tix = _turn_index_of_events(evs, _parse(sess["path"], sid, now)["turns"])
+        tix = _tail_tix(sid, evs, now)                # in hand when the sender took it before its lock (_chat_send_prep)
+        if tix is None:
+            return head_from, None
         t = _first_mapped_turn(tix, head_from) if head_from < len(tix) else None
         if t is None:
             return head_from, None
@@ -72562,8 +72721,13 @@ def _push(targets, connect=False, live_map=None, only=None):
                     # …and a tab the strip just listed that the page holds in no form (neither a base nor a skeleton: a session
                     # created since its last push) rides the repair too, as it rides any push that sends the strip, so the
                     # strip never names a tab whose full waits for the next cycle
+                    # …except a tab with an ask of its own queued or building (2026-11-16): the page asked for it whole, so it
+                    # holds it in no form either, and its own push answers it. Riding this one, it waited out that build on
+                    # the single-flight bound and then built a second copy: two quick clicks on cold tabs each built the
+                    # other's transcript again, and the thread started for a third click stayed behind both
                     _held = _held_in_some_form(c)
-                    only |= {x for x in tab_order if x not in _held}
+                    _own = _asks_under_way(c)
+                    only |= {x for x in tab_order if x not in _held and x not in _own}
             active = {c.get("active") for c in chat_clients if c.get("active")}
             # …and the sids a per-session event named since the last cycle (_push_session_soon, 2026-09-23): the SDK's
             # queue pop, which needs the pane to learn at once that the copy left romp's queue for the CLI. They rank
@@ -72842,6 +73006,9 @@ def _push(targets, connect=False, live_map=None, only=None):
                 with _chat_baseline_lock:
                     marked = m["id"] in _chat_baseline_raced
                     _prev_now = _prev_chat_events.get(m["id"])
+                    if not marked and _prev_now is None and m["id"] in _chat_rested:
+                        marked = True                    # a tab that went to rest with content (2026-11-16): its pages hold
+                        #                                  a copy though no baseline stands, as under the detector's mark
                 if _empty_build_regresses(m, _prev_now, marked=marked):
                     # a failed read, not a conversation that emptied (see _empty_build_regresses): with a baseline present,
                     # the last cached build stands in (the baseline's own events, so the diff below finds nothing to send)
@@ -72889,7 +73056,8 @@ def _push(targets, connect=False, live_map=None, only=None):
                     # empty parse, so _session_chip blanks a working session's pip and the recency stamp goes null, the
                     # class of failed-read change test 51 closes (tried, and the row read so); for the same reason no
                     # status frame goes from it.
-                    _note_empty_build(s["sid"], s.get("path"), _chat_prior_n(m["id"]), marked=marked)
+                    _note_empty_build(s["sid"], s.get("path"), _chat_prior_n(m["id"]), marked=marked,
+                                      waiting=(s.get("name") or "") if _asked_whole(s["sid"], _all_chat) else None)
                     if hit is None or marked:
                         if hit is not None:
                             chat_sessions.append(hit[1])     # the Outline row, from the cached build's ledger
@@ -73031,6 +73199,7 @@ def _push(targets, connect=False, live_map=None, only=None):
                     _prev_chat_ledger.pop(sid, None)
                     _chat_baseline_raced.pop(sid, None)
                     _chat_rest_retried.discard(sid)
+                    _chat_rested.pop(sid, None)          # …and what its pages held at its rest: the tab is gone
             if gone:
                 # ...and every alive chat client's base and dedup slot for it (2026-09-19). The page tears a tab down the
                 # moment the strip stops listing it (applyTabOrder), so a base the kernel still believed held was false
@@ -73695,6 +73864,8 @@ def _push_session_now(sid):
         with _chat_baseline_lock:                    # the mark and the baseline as one instant, as at the pusher's guard
             marked = sid in _chat_baseline_raced     # (2026-09-21): a pop-and-mark landing between two unlocked reads left
             _prev_now = _prev_chat_events.get(sid)   # this guard seeing neither, and a 0-event full went to every target
+            if not marked and _prev_now is None and sid in _chat_rested:
+                marked = True                        # a tab at rest: its pages hold a copy (2026-11-16, as at the pusher's guard)
         if _empty_build_regresses(m, _prev_now, marked=marked):   # (test 54 of the skeleton-reconnect module)
             # a marked sid's clients hold content though its baseline is popped (2026-09-21): no empty frame to any base
             # holder, the mark and the absent baseline stand for the cycle's repair; the note names the longest list
