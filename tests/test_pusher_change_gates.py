@@ -43,6 +43,23 @@ sb = load_source("romp_sdk_backend_gates", os.path.join(BIN, "romp_sdk_backend.p
 SID = "11111111-2222-3333-4444-555555555555"
 
 
+def too_deep_to_decode():
+    """A comments store whose thread list is nested past what json.loads decodes on this interpreter and this stack: the
+    text, at twice the first depth found to raise RecursionError. The depth is asked for, because it is the
+    interpreter's. Through 3.13 the decoder's C calls are counted, and a list nested 100,000 deep, the depth written
+    here until 2026-11-16, is far past the count. From 3.14 the bound is the C stack itself, so the depth follows the
+    stack's size and the build's frames: on an 8 MB stack one 3.14 build refused that list and CI's decoded it, where
+    the premise below then failed and the kernel's too-deep branch went unrun."""
+    depth = 10 ** 5
+    while depth <= 16 * 10 ** 5:
+        try:
+            json.loads('{"threads": %s}' % ("[" * depth + "]" * depth))
+        except RecursionError:
+            return '{"threads": %s}' % ("[" * (2 * depth) + "]" * (2 * depth))
+        depth *= 2
+    raise AssertionError("json.loads decoded a list nested %d deep: no depth tried here is too deep to decode" % (depth // 2))
+
+
 class CommentsStoreMemo(unittest.TestCase):
     def setUp(self):
         km._comments_memo.clear()
@@ -297,7 +314,7 @@ class CommentsStoreMemo(unittest.TestCase):
     def test_a_store_nested_too_deep_is_an_error_frame_and_no_squares(self):
         def nest(n):
             return "[" * n + "]" * n
-        too_deep = '{"threads": %s}' % nest(10 ** 5)
+        too_deep = too_deep_to_decode()
         with self.assertRaises(RecursionError, msg="premise: too deep to decode"):
             json.loads(too_deep)
         decodes = '{"threads": [], "x": %s}' % nest(sys.getrecursionlimit() * 3 // 5)
@@ -319,7 +336,7 @@ class CommentsStoreMemo(unittest.TestCase):
                                  "the next version is read")
 
     def test_load_comments_reads_a_store_it_cannot_decode_as_no_threads(self):
-        too_deep = '{"threads": %s}' % ("[" * 10 ** 5 + "]" * 10 ** 5)
+        too_deep = too_deep_to_decode()
         with self.assertRaises(RecursionError, msg="premise: too deep to decode"):
             json.loads(too_deep)
         for where, body in (("not JSON", self.BAD), ("too deep to decode", too_deep)):
