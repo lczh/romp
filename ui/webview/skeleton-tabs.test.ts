@@ -220,6 +220,9 @@ test("a rest frame for a tab the page holds marks its copy behind and keeps it a
   applyTabOrderSkeleton(st, [B, C], [A, B, C]);
   assert.deepEqual(held(st), [C], "a tab never rested is a skeleton after a redial, as before; the rested one keeps its copy on show");
   assert.equal(renderKind(st, B, true), "loaded");
+  // a frame the page declined (an empty one for a transcript it holds: a read that failed) answers nothing: still behind
+  assert.equal(onFull(st, B, true), false);
+  assert.equal(st.rested.has(B), true, "the mark stays, and the line that says so with it");
   // the full is the answer: the copy is current again, and nothing brings the mark back but a new rest frame
   assert.equal(onFull(st, B), false, "it was not a skeleton: the caller appends in place, it does not re-show");
   assert.equal(st.rested.has(B), false);

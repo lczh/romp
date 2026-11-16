@@ -22623,13 +22623,13 @@ function upsert(msg: any) {
     if (!applyStaleAnswer(msg.id)) return;
   }
   awaitingFull.delete(msg.id); endStaleAnswer(msg.id);   // a full session landed → this session is re-based; a later gap may ask again (and its ask's one re-send for an older answer is spent, 2026-09-23)
-  const wasSkeleton = onFull(skeletonTabs, msg.id);   // …and the tab is loaded: it leaves the skeleton set (the kernel released it when it sent this frame)
   // A frame that would take a HELD transcript from content to nothing is status-shaped, never a wipe (T249b,
   // the user 2026-09-07): the kernel sent `events: []` for a session with content when its read of the transcript
   // failed for a cycle, the pane blanked to a placeholder, and the content frame that followed re-landed the
   // reader as a first build (the recorded scroll snap). Decision in frame-merge.ts; said once per session in
   // the client-diag journal so a kernel that sends such frames is seen, never silently absorbed.
   const kept = keepResidentEvents(prev ? prev.events : null, msg.events);
+  const wasSkeleton = onFull(skeletonTabs, msg.id, kept);   // …and the tab is loaded: it leaves the skeleton set (the kernel released it when it sent this frame); a declined frame leaves a copy at rest marked behind
   if (kept && prev && !emptyFrameDiagSent.has(msg.id)) {
     emptyFrameDiagSent.add(msg.id);
     vscodeApi?.postMessage({ type: "clientDiag", surface: "chat", what: "empty-session-frame", data: { id: msg.id, held: prev.events.length } });

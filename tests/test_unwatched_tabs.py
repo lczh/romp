@@ -993,6 +993,369 @@ class AfterTheReview(_Base):
             km._feed_needs_input_of, km._feed_needs_input_count_of = saved
 
 
+S4 = "11111111-2222-3333-4444-121212121214"   # docs: a fourth tab, for the third quick click
+
+
+class AfterTheFinalReview(_Base):
+    """The final review's findings (2026-11-16): a failed read at the open of a tab at rest; the parse a full frame's tail
+    start needs, taken inside the client's slot lock; a third quick click queued behind two builds for tabs the reader
+    had left."""
+
+    def setUp(self):
+        super().setUp()
+        self.notices = []
+        self._real_notice = km._sync_notice
+        km._sync_notice = lambda text, ok=True, kind="sync": self.notices.append((text, ok, kind))
+
+    def tearDown(self):
+        km._sync_notice = self._real_notice
+        getattr(km, "_chat_rested", {}).clear()
+        getattr(km, "_TAIL_TIX", {}).clear()
+        km._EMPTY_BUILD_NOTED.clear()
+        getattr(km, "_EMPTY_BUILD_BELLED", set()).clear()
+        km._chat_build_faults.clear()
+        super().tearDown()
+
+    def _click(self, c, sid):
+        """What a click on a tab at rest sends: the tab it shows now, then its ask for the tab whole."""
+        km.Handler._dispatch_ws(_Self(), {"type": "activeTab", "id": sid}, c)
+        km.Handler._dispatch_ws(_Self(), {"type": "needFull", "id": sid, "why": "rest-open"}, c)
+
+    def _rested(self):
+        """A page on web with api taken back: the state a click on api starts from."""
+        c = self._client(active=S1)
+        self._warm(c)
+        self._move(S2)
+        km._push([c])
+        self.assertEqual([f.get("rest") for f in self._frames(c, "status", S2)], [True])
+        c["_frames"].clear()
+        del self.built[:]
+        return c
+
+    # ── 1: a failed read at the open ──
+    def test_60_a_transcript_that_cannot_be_read_at_the_open_sends_no_empty_frame_and_is_said_once(self):
+        c = self._rested()
+        held = self.n[S2]
+        self.n[S2] = 0                                       # the read fails: the build comes back with no events
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self._click(c, S2)
+            for _ in range(3):                               # …and goes on failing for three more cycles
+                km._push([c])
+        self.assertEqual(self._frames(c, "session", S2), [], "no full with no events: it took the page's line down over a copy still behind")
+        self.assertEqual(self._frames(c, "chatTail", S2), [])
+        self.assertIn(S2, c.get("askedFull") or (), "the ask stands, so the tab is not taken back and the page's line stays up")
+        mine = [n for n in self.notices if "api" in n[0]]
+        self.assertEqual(len(mine), 1, "said once on the bell, not once per cycle: %r" % self.notices)
+        text, ok, kind = mine[0]
+        self.assertEqual((ok, kind), (False, "refused"))
+        self.assertIn("cannot be read", text); self.assertIn("catching up", text)
+        self.assertEqual(err.getvalue().count("came back EMPTY"), 1, "…and once on stderr, as for a watched tab")
+        self.assertGreaterEqual(km._chat_rested.get(S2) or 0, 1, "what the pages held when it went to rest is what the guard reads")
+        # the read succeeds: the full that answers the ask, with the transcript
+        self.n[S2] = held + 2
+        self._move(S2, by=0)
+        km._push([c])
+        full = self._frames(c, "session", S2)
+        self.assertEqual(len(full), 1)
+        self.assertEqual(len(full[0]["events"]), held + 2)
+        self.assertNotIn(S2, c.get("askedFull") or ())
+        self.assertEqual(len([n for n in self.notices if "api" in n[0]]), 1)
+        self.assertNotIn(S2, km._EMPTY_BUILD_BELLED, "the read that succeeded ended the episode: a later failure is said anew")
+
+    def test_66_an_episode_noted_before_any_page_asked_is_still_said_to_the_page_that_asks(self):
+        # the per-session push runs the same guard and names no page: its stderr line must not use up the bell's one line
+        c = self._rested()
+        self.n[S2] = 0
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._note_empty_build(S2, self.paths[S2], 7, marked=True)       # the episode opens with nobody waiting
+            self.assertEqual(self.notices, [])
+            self._click(c, S2)
+            km._push([c])
+        self.assertEqual(len([n for n in self.notices if "api" in n[0]]), 1, "the page that asks is told, once: %r" % self.notices)
+
+    def test_61_a_tab_that_never_rested_or_never_had_events_is_untouched(self):
+        # a session that genuinely has nothing (a fresh one) is still sent its empty full; the record is of tabs that rested
+        c = self._client(active=S1)
+        self.n[S3] = 0
+        km._clients[:] = [c]
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._push([c])
+        self.assertEqual([len(f["events"]) for f in self._frames(c, "session", S3)], [0], "a fresh session's empty full goes, as before")
+        self.assertNotIn(S3, km._chat_rested)
+        self.assertEqual(self.notices, [])
+
+    def test_62_a_build_that_raises_at_the_open_leaves_the_ask_standing_and_is_said_once(self):
+        c = self._rested()
+        real = km.build_session
+
+        def broken(sid, now, live_map=None, **kw):
+            if sid == S2:
+                raise ValueError("a record that cannot be read")
+            return real(sid, now, live_map, **kw)
+        km.build_session = broken
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self._click(c, S2)
+                for _ in range(3):
+                    self._move(S2)
+                    km._push([c])
+        finally:
+            km.build_session = real
+        self.assertEqual(self._frames(c, "session", S2) + self._frames(c, "chatTail", S2), [], "nothing is sent for it")
+        self.assertIn(S2, c.get("askedFull") or (), "the ask stands: the page goes on saying it is catching up")
+        mine = [n for n in self.notices if "api" in n[0]]
+        self.assertEqual(len(mine), 1, "one line on the bell for the episode: %r" % self.notices)
+        self.assertIn("cannot be built", mine[0][0])
+        self._move(S2)
+        km._push([c])                                        # the build succeeds
+        self.assertEqual(len(self._frames(c, "session", S2)), 1)
+        self.assertNotIn(S2, c.get("askedFull") or ())
+
+    # ── 2: the parse a full needs, outside the client's lock ──
+    def _index_probe(self, c):
+        """Stand in for the session listing and the parse (one turn per event), and record at every index build whether
+        the calling thread holds the client's slot lock."""
+        owned = []
+        saved = (km._sessions, km._parse, km._turn_index_of_events, km.WIRE_TAIL)
+        km._sessions = lambda now: [{"sid": sid, "path": self.paths[sid]} for sid in TAB_ORDER]
+        km._parse = lambda path, sid, now: {"turns": [{"atoms": [{"uuid": "%s-u%d" % (sid[-1], i)}]} for i in range(self.n[sid])]}
+        real_index = km._turn_index_of_events
+
+        def index(evs, turns):
+            owned.append(km._client_lock(c)._is_owned())
+            return real_index(evs, turns)
+        km._turn_index_of_events = index
+        km.WIRE_TAIL = 3                                     # so a full is cut inside the list and its tail start is the index's
+        return owned, saved
+
+    def test_63_the_index_a_full_needs_is_built_with_the_clients_lock_released_on_the_ask_and_on_the_cycle(self):
+        c = self._rested()
+        owned, saved = self._index_probe(c)
+        try:
+            self._click(c, S2)                               # THE ASK'S ROAD: a full for the tab at rest
+            full = self._frames(c, "session", S2)
+            self.assertEqual(len(full), 1)
+            self.assertEqual(owned, [False], "the index was built once, with the lock released: %r" % owned)
+            n = self.n[S2]
+            self.assertEqual((len(full[0]["events"]), full[0]["tailLo"], full[0]["firstUuid"]), (3, n - 3, "2-u%d" % (n - 3)),
+                             "and the frame's tail start is the index's: the last three events, from their turn")
+            # THE CYCLE'S ROAD: the page's base for the tab on screen is gone (its own ask), and the cycle's send is the full
+            del owned[:]
+            km._client_reset_chat_sid(c, S1)
+            c["_frames"].clear()
+            self._move(S1)
+            km._push([c])
+            self.assertEqual(len(self._frames(c, "session", S1)), 1)
+            self.assertEqual(owned, [False], "the cycle's full too: %r" % owned)
+            # a delta needs no index at all: the tab on screen, on the base the ask's full gave it
+            del owned[:]
+            self._move(S2)
+            km._push([c])
+            self.assertEqual(len(self._frames(c, "chatTail", S2)), 1)
+            self.assertEqual(owned, [], "a delta on a held base builds no index, in the lock or out of it")
+        finally:
+            km._sessions, km._parse, km._turn_index_of_events, km.WIRE_TAIL = saved
+
+    def test_64_two_senders_and_one_page_no_tail_before_its_base_and_no_older_frame_after_a_newer_one(self):
+        # the wire, as a page reads it: two builders (the cycle and a targeted push) hand one client their lists in either
+        # order while the session writes and is sometimes rewound (a full for every base holder), each taking the index
+        # before the lock. The page's own rules are the check: a tail applies only after the key it names, and no frame
+        # is older than one already applied
+        import threading
+        sid, path = S1, self.paths[S1]
+        frames = []
+        c = {"app": "chat", "alive": True, "sent": {}, "ready": True, "proto": 2, "restTabs": True,
+             "send": lambda s: frames.append(json.loads(s)), "_frames": frames}
+        saved = (km._sessions, km._parse, km._turn_index_of_events, km.WIRE_TAIL)
+        km._sessions = lambda now: [{"sid": sid, "path": path}]
+        km._parse = lambda p, s_, now: {"turns": []}
+        real_index = km._turn_index_of_events
+
+        def slow_index(evs, turns):
+            time.sleep(0.004)                                # the parse a large session costs: both senders are inside it at once
+            return real_index(evs, turns)
+        km._turn_index_of_events = slow_index
+        km.WIRE_TAIL = 250
+        versions, keys = [], ["k%d" % i for i in range(4)]
+        for v in range(1, 61):
+            if v % 7 == 0:                                   # a rewind: the last two events leave and new ones come
+                keys = keys[:-2] + ["r%d-%d" % (v, i) for i in range(3)]
+            else:
+                keys = keys + ["k%d-%d" % (v, i) for i in range(2)]
+            evs = [{"kind": "assistant", "uuid": k, "md": k} for k in keys]
+            versions.append({"type": "session", "id": sid, "name": "web", "events": evs, "status": {"state": "working", "sinceEpoch": None},
+                             "ledger": {"summary": "", "tree": [], "current": None, "recent": [], "workingNote": "", "needsInput": None},
+                             "wm": {"leaf": "L", "tx": [[v, v]], "live": None}})
+
+        def sender(offset):
+            prev = None
+            for i, m in enumerate(versions):
+                if (i + offset) % 3 == 0:
+                    continue                                 # each sender skips some builds, so the two interleave out of step
+                evs = m["events"]
+                change = 0
+                if prev is not None:
+                    change = next((j for j, (a, b) in enumerate(zip(prev, evs)) if a["uuid"] != b["uuid"]), min(len(prev), len(evs)))
+                km._send_chat_or_status(c, m, None, change, False)
+                prev = evs
+        try:
+            ts = [threading.Thread(target=sender, args=(k,)) for k in (0, 1)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(60)
+            self.assertFalse(any(t.is_alive() for t in ts))
+        finally:
+            km._sessions, km._parse, km._turn_index_of_events, km.WIRE_TAIL = saved
+        held, last_v, fulls, tails = None, 0, 0, 0
+        for f in frames:
+            v = f["wm"]["tx"][0][0]
+            self.assertGreaterEqual(v, last_v, "a frame older than one the page already applied: %d after %d" % (v, last_v))
+            last_v = v
+            if f["type"] == "session":
+                fulls += 1
+                held = [e["uuid"] for e in f["events"]]
+            else:
+                tails += 1
+                self.assertIsNotNone(held, "a tail before any base")
+                self.assertIn(f["afterUuid"], held, "a tail that names a key the page does not hold: its base never arrived")
+                held = held[:held.index(f["afterUuid"]) + 1] + [e["uuid"] for e in f["events"]]
+        self.assertGreater(fulls, 3, "the rewinds sent fulls: %d fulls, %d tails" % (fulls, tails))
+        self.assertGreater(tails, 10)
+        self.assertEqual(held, [e["uuid"] for e in versions[-1]["events"]], "and the page ends on the newest list, whole")
+
+    def test_67_an_ask_does_not_build_or_wait_for_a_tab_that_has_an_ask_of_its_own(self):
+        # a repair push serves, beside its tab, every tab the strip lists that the page holds in no form (a session created
+        # since its last push). A tab the page has ASKED for is held in no form too, so the second click's push took the
+        # first click's tab along: it waited out that build, then built the transcript a second time
+        import threading
+        c = self._client(active=S1)
+        self._warm(c)
+        self._move(S2); self._move(S3)
+        km._push([c])                                        # api and tests at rest
+        c["_frames"].clear()
+        del self.built[:]
+        gate, started = threading.Event(), threading.Event()
+        real = km.build_session
+
+        def slow(sid, now, live_map=None, **kw):
+            if sid == S2:
+                started.set()
+                gate.wait(20)
+            return real(sid, now, live_map, **kw)
+        km.build_session = slow
+        lane = km._ws_arm_lane(c)
+        try:
+            put = lambda msg: km._lane_put(lane, msg["type"], lambda: km.Handler._dispatch_ws(_Self(), msg, c))
+            put({"type": "activeTab", "id": S2}); put({"type": "needFull", "id": S2, "why": "rest-open"})
+            self.assertTrue(started.wait(10))
+            put({"type": "activeTab", "id": S3}); put({"type": "needFull", "id": S3, "why": "rest-open"})
+            deadline = time.time() + 10
+            while time.time() < deadline and not self._frames(c, "session", S3):
+                time.sleep(0.02)
+            self.assertEqual(len(self._frames(c, "session", S3)), 1)
+            deadline = time.time() + 3
+            while time.time() < deadline and c["repairs"]["running"] != 1:
+                time.sleep(0.02)
+            self.assertEqual(c["repairs"]["running"], 1, "the second click's thread is done: it did not stay behind the first tab's build")
+            gate.set()
+            deadline = time.time() + 10
+            while time.time() < deadline and not self._frames(c, "session", S2):
+                time.sleep(0.02)
+            self.assertEqual(len(self._frames(c, "session", S2)), 1)
+            self.assertEqual(self.built.count(S2), 1, "and the first tab was built once: %r" % self.built)
+        finally:
+            gate.set()
+            km.build_session = real
+            km._lane_close(c)
+            c.pop("lane", None); c.pop("closing", None)
+            deadline = time.time() + 5
+            while time.time() < deadline and (c.get("repairs") or {}).get("running"):
+                time.sleep(0.02)
+
+    # ── 3: a third quick click ──
+    def test_65_a_third_quick_click_on_a_tab_the_kernel_holds_a_parse_of_is_answered_while_two_builds_run(self):
+        # …and one on a tab never parsed waits for one of the two, as before: a cold build reads the whole transcript,
+        # gigabytes for a large one, so cold builds stay two at a time
+        for warm in (True, False):
+            with self.subTest(warm=warm):
+                self._three_clicks(warm)
+
+    def _three_clicks(self, cold):
+        import threading
+        cold = bool(cold)                                    # (the parameter says whether the third tab is WARM)
+        real_warm = km._repair_warm
+        km._repair_warm = lambda sid: cold and sid == S4     # the kernel holds a parse of the third tab's transcript, or none
+        self.addCleanup(setattr, km, "_repair_warm", real_warm)
+        km._built_chat.clear(); km._prev_chat_events.clear(); km._prev_chat_ledger.clear(); km._chat_baseline_raced.clear()
+        km._chat_rested.clear()
+        del km._clients[:]
+        p4 = os.path.join(self.tmp, S4 + ".jsonl")
+        with open(p4, "w") as f:
+            f.write("x" * 100)
+        self.paths[S4], self.n[S4] = p4, 4
+        NAMES[S4] = "docs"
+        self.live[S4] = dict(self.live[S1])
+        rows = [{"sid": sid, "name": NAMES[sid], "path": self.paths[sid], "anchor": sid} for sid in TAB_ORDER + [S4]]
+        km._chat_tab_sessions = lambda now, live_map: list(rows)
+        c = self._client(active=S1)
+        km._clients[:] = [c]
+        km._push([c])                                        # every tab whole
+        for sid in (S2, S3, S4):
+            self._move(sid)
+        km._push([c])                                        # api, tests and docs at rest
+        self.assertEqual(sorted(f["id"] for f in self._frames(c, "status") if f.get("rest")), [S2, S3, S4])
+        c["_frames"].clear()
+        gate, started = threading.Event(), {S2: threading.Event(), S3: threading.Event()}
+        real = km.build_session
+
+        def slow(sid, now, live_map=None, **kw):
+            if sid in started:                               # two large tabs: each build takes as long as the test lets it
+                started[sid].set()
+                gate.wait(30)
+            return real(sid, now, live_map, **kw)
+        km.build_session = slow
+        lane = km._ws_arm_lane(c)
+        try:
+            put = lambda msg: km._lane_put(lane, msg["type"], lambda: km.Handler._dispatch_ws(_Self(), msg, c))
+            for sid in (S2, S3):                             # two quick clicks on large tabs…
+                put({"type": "activeTab", "id": sid}); put({"type": "needFull", "id": sid, "why": "rest-open"})
+                self.assertTrue(started[sid].wait(10), "its build is under way")
+            put({"type": "activeTab", "id": S4}); put({"type": "needFull", "id": S4, "why": "rest-open"})   # …then a small one
+            deadline = time.time() + (10 if cold else 1.5)
+            while time.time() < deadline and not self._frames(c, "session", S4):
+                time.sleep(0.02)
+            if cold:
+                self.assertEqual(len(self._frames(c, "session", S4)), 1, "the tab on screen is answered while both earlier builds still run")
+                self.assertEqual(self._frames(c, "session", S2) + self._frames(c, "session", S3), [])
+                self.assertEqual(km.REPAIR_BUILDS_MAX, 3)
+                deadline = time.time() + 5
+                while time.time() < deadline and c["repairs"]["running"] != 2:
+                    time.sleep(0.02)
+                self.assertEqual(c["repairs"]["running"], 2, "the third thread answered that one ask and ended: it takes no ask for a tab the page left")
+            else:
+                self.assertEqual(self._frames(c, "session", S4), [], "a tab never parsed waits for one of the two, as before")
+                self.assertEqual(c["repairs"]["running"], 2)
+            gate.set()
+            deadline = time.time() + 10
+            while time.time() < deadline and not self._frames(c, "session", S4):
+                time.sleep(0.02)
+            self.assertEqual(len(self._frames(c, "session", S4)), 1, "…and is answered")
+            deadline = time.time() + 10
+            while time.time() < deadline and not (self._frames(c, "session", S2) and self._frames(c, "session", S3)):
+                time.sleep(0.02)
+            self.assertEqual((len(self._frames(c, "session", S2)), len(self._frames(c, "session", S3))), (1, 1), "the asks for the tabs it left are still answered")
+        finally:
+            gate.set()
+            km.build_session = real
+            km._lane_close(c)
+            c.pop("lane", None); c.pop("closing", None)
+            deadline = time.time() + 5
+            while time.time() < deadline and (c.get("repairs") or {}).get("running"):
+                time.sleep(0.02)
+            NAMES.pop(S4, None)
+
+
 class WhatNeverReadABackgroundBuild(_Base):
     """The consumers the survey found beside the page's own tab frames, each shown to work with no chat build behind it."""
 

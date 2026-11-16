@@ -482,7 +482,9 @@ class SkeletonReconnect(unittest.TestCase):
         self.assertEqual(_owners(inspect.getsource(km), '"askedFull"'),
                          {"_client_reset_chat_sid", "_client_reset_chat_base", "_resolve_reconnect", "_held_as_skeleton_by_all",
                           "_send_chat_or_status", "_send_chat_proto2", "_send_chat_locked",
-                          "_rest_blocker_locked"},       # a READER (2026-11-15): a tab a client asked for whole is never taken back to rest
+                          "_rest_blocker_locked",        # a READER (2026-11-15): a tab a client asked for whole is never taken back to rest
+                          "_asked_whole",                # a READER (2026-11-16): whether a page waits on an ask, for the empty-build note
+                          "_chat_full_owed"},            # a READER (2026-11-16): whether a send would be a full, read before the send's own step
                          "the mark is touched only in these, each under the client's slot lock")
         # …and that reader is reached only from the rest's two passes, each inside the client's slot lock
         self.assertEqual(_owners(inspect.getsource(km), "_rest_blocker_locked("), {"_rest_blocked", "_rest_unwatched"})
@@ -720,13 +722,14 @@ class SkeletonReconnect(unittest.TestCase):
                           "_send_light_status",         # ...and its status send, membership re-checked under the lock (round three)
                           "_held_in_some_form",         # a needFull repair's read of what the page holds in any form, under the lock (2026-10-10)
                           "_rest_unwatched",            # a second WRITER (2026-11-15): a tab nobody watches joins the set of each client that held it whole
+                          "_chat_full_owed",            # a READER (2026-11-16): whether a send would be a full, under the lock, before the send's own step
                           "_tab_order_frame", "_send_chat_or_status", "_send_tab_order",
                           # the two READERS of the connect query's skeleton=1 term (a later chat column's dial,
                           # 2026-09-11): _ws sets the client's `reconnect` and `skeletonOnReady` flags from it, and
                           # _shim writes the term; neither touches the client's set
                           "_ws", "_shim"},
                          "the set is touched only in its helpers — a new site must join this list AND take the lock")
-        for name in ("_client_reset_chat_base", "_resolve_reconnect", "_send_chat_or_status", "_send_tab_order", "_rest_unwatched"):
+        for name in ("_client_reset_chat_base", "_resolve_reconnect", "_send_chat_or_status", "_send_tab_order", "_rest_unwatched", "_chat_full_owed"):
             s = inspect.getsource(getattr(km, name))
             self.assertLess(s.index("with _client_lock("), s.index('"skeleton"'), name + ": the lock comes first")
         # the two lock-free helpers are reached only from bodies that hold the lock

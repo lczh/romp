@@ -859,8 +859,11 @@ mark, which the kernel sends every cycle without reading the transcript. The
 page keeps the copy of the transcript it holds. Opening the tab shows that copy
 at once, with `Catching up` in the line above the message box, which takes a
 message meanwhile; the current transcript then arrives and takes the copy's
-place without redrawing the turns already on screen. A tab the page has never
-loaded shows the loader. In idle a page fetches only tabs it has never loaded,
+place without redrawing the turns already on screen. If the transcript cannot
+be read at that moment, or its build fails, nothing is sent: the copy and the
+`Catching up` line stay until a read succeeds, and the problem center says so
+once. A tab
+the page has never loaded shows the loader. In idle a page fetches only tabs it has never loaded,
 one at a time, so a tab that fell behind waits until it is opened.
 
 While a tab is behind, what the page reads from its copy says so. The tag
