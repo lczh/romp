@@ -267,10 +267,10 @@ def say(size_mb, res):
     line += "  kernel peak %s MB, load %s" % (_mb(res.get("kernelVmHWM")), res.get("load", "-"))
     peak = (res.get("docWorker") or {}).get("peak")
     if peak:
-        line += ("  worker resident peak %s MB (%.2f x the transcript; %s records, estimated %s MB), address space %s MB of "
-                 "%s MB allowed" % (_mb(peak.get("vmHWM")), (peak.get("vmHWM") or 0) / float(max(1, peak.get("bytes") or 1)),
-                                    peak.get("records"), _mb(peak.get("estimate")), _mb(peak.get("vmPeak")),
-                                    _mb(peak.get("softBytes"))))
+        grew = None if None in (peak.get("vmPeak"), peak.get("vmBase")) else peak["vmPeak"] - peak["vmBase"]
+        line += ("  worker resident peak %s MB (%.2f x the transcript; %s records, estimated %s MB), address space grew %s MB "
+                 "of %s MB allowed" % (_mb(peak.get("vmHWM")), (peak.get("vmHWM") or 0) / float(max(1, peak.get("bytes") or 1)),
+                                       peak.get("records"), _mb(peak.get("estimate")), _mb(grew), _mb(peak.get("softBytes"))))
     dw = res.get("docWorker") or {}
     if dw.get("fallbacks") or dw.get("refused") or dw.get("memory"):
         line += "  (worker: fallbacks %s, refused %s, memory %s)" % (dw.get("fallbacks"), dw.get("refused"), dw.get("memory"))

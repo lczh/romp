@@ -15,6 +15,9 @@ leaf's next parse restores from the document. Pinned here:
 - a job the machine has no memory for stays pending, counted and said once, and a smaller one behind it still goes; a worker
   that fails for memory (its own soft bound at the replace, its exit code, the OS) is a failed rebuild, never repeated
   inside the kernel;
+- the worker's bounds count what the JOB adds, from what the process held as its parse began: an interpreter that holds a
+  gigabyte of address space before any job (a free-threaded build's allocator reserves one) builds a job within its bound,
+  a job that grows past its bound still publishes nothing, and the limit stops a heap that outgrows it (2026-11-16);
 - the worker is started with no preexec_fn, refuses a job whose kernel is already gone, and ends when the process that
   started it does.
 
@@ -97,7 +100,37 @@ STAND_IN = textwrap.dedent('''
             f.write(g.read())
         sys.stdout.write(p.stdout.decode())
         sys.exit(p.returncode)
+    if mode == "reserved":                                # the real worker, in a process that holds a gigabyte of address space
+        import io, mmap, runpy                            #  (and none of memory) before the job, as a free-threaded build does
+        hold = mmap.mmap(-1, 1 << 30, flags=mmap.MAP_PRIVATE, prot=0)
+        sys.stdin = io.StringIO(line)
+        runpy.run_path(os.environ["FAKE_DOC_WORKER_REAL"], run_name="__main__")   # (it leaves through os._exit)
     sys.exit(5)
+''')
+
+# The worker's own bounds at work on a heap, in a process of its own: its module loaded from the file, `held` bytes of
+# address space reserved first (untouched: no memory), the baseline read, the limit set `limit` bytes over it, then small
+# objects made, as a parse makes them, until an allocation fails or the heap has grown three times past the limit (a limit
+# that does not bind). One JSON line: the baseline, the limit in force, whether the heap was stopped, how far the resident
+# memory got, and what the soft bound answers at an eighth of the limit and at four times it.
+PROBE = textwrap.dedent('''
+    import importlib.util, json, mmap, resource, sys
+    spec = importlib.util.spec_from_file_location("romp_doc_worker_probe", sys.argv[1])
+    w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)
+    limit, held = int(sys.argv[2]), int(sys.argv[3])
+    hold = mmap.mmap(-1, held, flags=mmap.MAP_PRIVATE, prot=0) if held else None
+    base = w._baseline()
+    set_ = w._limit_address_space(limit, base[0])
+    heap, stopped = [], False
+    try:
+        while w._vm_bytes("VmRSS") - base[1] < 3 * limit:
+            heap.append([{"k": i, "v": "x" * 64} for i in range(8192)])
+    except MemoryError:
+        stopped = True
+    heap.clear()                                          # room to answer in; the peaks stand
+    print(json.dumps({"base": base, "set": set_, "rlimit": resource.getrlimit(resource.RLIMIT_AS)[0], "stopped": stopped,
+                      "grew": w._vm_bytes("VmHWM") - base[1], "eighth": w._over_soft_bound(limit // 8, base),
+                      "four": w._over_soft_bound(4 * limit, base), "unread": w._over_soft_bound(limit, (None, base[1]))}))
 ''')
 
 
@@ -281,8 +314,12 @@ class TheWorkerBuildsTheDocument(Harness):
         self.assertEqual(out.count("rebuilt the document of %s (noDocument;" % self.leaf), 1, out)
         self.assertIsNone(em._ASM_REFRESH["inflight"], "the claim is back")
         self.assertIsNone(st["running"])
-        self.assertGreater(st["peak"]["vmPeak"], 0, "the worker reported what it cost")
-        self.assertLess(st["peak"]["vmPeak"], st["peak"]["softBytes"])
+        peak = st["peak"]
+        self.assertGreater(peak["vmBase"], 0, "the worker reported what it held as its parse began")
+        self.assertGreater(peak["rssBase"], 0)
+        self.assertGreaterEqual(peak["vmPeak"], peak["vmBase"], "and what it cost")
+        self.assertLess(peak["vmPeak"] - peak["vmBase"], peak["softBytes"], "the job's growth is what the bound is held against")
+        self.assertLess(peak["vmHWM"] - peak["rssBase"], peak["softBytes"])
         self.assertEqual(km._PERF_STATS.snapshot()["docWorker"]["done"], {"written": 1}, "the block rides /perf")
         self.assertEqual(self.restored(), self.cold(), "restored from the worker's document equals the cold parse")
         self.restores_with_no_whole_parse()
@@ -385,6 +422,17 @@ class TheWorkerBuildsTheDocument(Harness):
         self.assertNotIn("preexec_fn", kw)
         self.assertNotIn("start_new_session", kw)
         self.assertEqual(km._doc_worker_stats()["done"], {"written": 1})
+        # Its environment is the kernel's, with the allocator's reservation off whatever the kernel was started with: the
+        # limit counts address space, which a free-threaded build's allocator otherwise takes a gigabyte at a time.
+        # (Names and booleans alone are compared: no report renders a value of the environment.)
+        self.assertEqual(kw["env"]["MIMALLOC_ARENA_RESERVE"], "0")
+        self.assertTrue(kw["env"]["FAKE_DOC_WORKER_LOG"] == str(self.log), "the kernel's own environment is under it")
+        with mock.patch.dict(os.environ, {"MIMALLOC_ARENA_RESERVE": "1048576"}):
+            env = km._doc_worker_env()
+            self.assertEqual(env["MIMALLOC_ARENA_RESERVE"], "0")
+            self.assertEqual(set(env) ^ set(os.environ), set(), "every name of the kernel's environment, and no other")
+            self.assertEqual([k for k, v in os.environ.items() if k != "MIMALLOC_ARENA_RESERVE" and env[k] != v], [],
+                             "each with the kernel's value")
 
 
 class TheSwitch(Harness):
@@ -738,14 +786,14 @@ class Memory(Harness):
         self.assertFalse(km._doc_worker_verdict_file(self.leaf).exists())
         self.assertTrue(self.doc_file().exists())
 
-    @unittest.skipUnless(LINUX, "the worker's peak address space is read from /proc")
-    def test_the_real_worker_publishes_nothing_once_its_address_space_passed_its_soft_bound(self):
-        """The soft bound end to end: with a bound the interpreter itself is over, the real worker parses, reaches the replace,
-        and publishes nothing: no document, no temp file, a failed rebuild with `memory` said, and no fallback."""
+    @unittest.skipUnless(LINUX, "the worker's memory is read from /proc")
+    def test_the_real_worker_publishes_nothing_once_it_grew_past_its_soft_bound(self):
+        """The soft bound end to end: with a bound any parse grows past, the real worker parses, reaches the replace, and
+        publishes nothing: no document, no temp file, a failed rebuild with `memory` said, and no fallback."""
         self.session()
         self.switch("on")
         ck = jd.STATE / "checkpoints"
-        with mock.patch.object(km, "_doc_worker_bounds", lambda est: (8 << 30, 1)):   # a soft bound the interpreter is over
+        with mock.patch.object(km, "_doc_worker_bounds", lambda est: (8 << 30, 1)):   # a soft bound any parse grows past
             out = self.cycle()
         st = km._doc_worker_stats()
         self.assertEqual((st["spawned"], st["done"], st["memory"], st["fallbacks"], st["verdicts"]),
@@ -754,6 +802,43 @@ class Memory(Harness):
         self.assertEqual([p.name for p in ck.iterdir() if p.name.endswith(".tmp")], [], "nothing left behind")
         self.assertEqual(em.asm_checkpoint_stats()["written"], 1, "the document is this kernel's: the worker published none")
         self.assertEqual(self.rebuild_stats()["written"], 1)
+
+    @unittest.skipUnless(LINUX, "the worker's memory is read from /proc")
+    def test_what_the_process_held_before_the_job_is_not_counted_and_what_the_job_adds_still_is(self):
+        """The bounds are on what the JOB adds (2026-11-16). A free-threaded interpreter holds about 1,060 MB of address space
+        before any job, where a default one holds about 40: its allocator reserves a gigabyte. Counted from zero, the bounds
+        (about 100 MB for a small job) refused every job there: no document, a memory verdict for each leaf. The stand-in is
+        the real worker in a process that reserved a gigabyte first, so this holds on every build: a job within its bound
+        is built, though the process was past the job's whole limit before the job began; and the same bytes under a bound
+        of half what that job grew by publish nothing and keep a verdict, so a job that outgrows its bound is still
+        stopped by it."""
+        self.session(SID2)                                         # the same bytes under another name
+        self.session()
+        self.switch("on")
+        self.stand_in("reserved")
+        out = self.cycle()
+        st = km._doc_worker_stats()
+        self.assertEqual((st["spawned"], st["done"], st["memory"], st["fallbacks"]), (1, {"written": 1}, 0, {}),
+                         "%s\n%s" % (st, out))
+        peak = st["peak"]
+        self.assertGreater(peak["vmBase"], peak["limitBytes"], "the premise: past the job's limit before the job began")
+        self.assertGreater(peak["vmBase"], 1 << 30)
+        grew = peak["vmHWM"] - peak["rssBase"]
+        self.assertGreater(grew, 1 << 20, "the premise: the job added memory of its own: %s" % peak)
+        self.assertLess(max(grew, peak["vmPeak"] - peak["vmBase"]), peak["softBytes"])
+        with mock.patch.object(km, "_doc_worker_bounds", lambda est: (8 << 30, grew // 2)):
+            out = self.cycle(NOW + 601)
+        st = km._doc_worker_stats()
+        self.assertEqual((st["spawned"], st["done"], st["memory"], st["fallbacks"], st["verdicts"]),
+                         (2, {"written": 1, "failed": 1}, 1, {"memory": 1}, 1), "%s\n%s" % (st, out))
+        self.assertIn("past its bound", out)
+        leaf = [lf for lf in (self.leaf, str(self.proj / (SID2 + ".jsonl"))) if km._doc_worker_verdict_file(lf).exists()]
+        self.assertEqual(len(leaf), 1, "the second job's leaf keeps the verdict, the first one's none")
+        v = json.loads(km._doc_worker_verdict_file(leaf[0]).read_text())
+        self.assertGreater(v["vmBase"], 1 << 30, "the verdict says where the count began")
+        self.assertGreaterEqual(v["vmPeak"], v["vmBase"])
+        self.assertEqual(em.asm_checkpoint_stats()["written"], 1, "that job's document is this kernel's")
+        self.assertEqual(self.rebuild_stats()["written"], 2)
 
 
 class Sizing(Harness):
@@ -821,6 +906,9 @@ class Sizing(Harness):
         self.assertGreaterEqual(plan["soft"], plan["estimate"], "the soft bound is never under the estimate")
         big = km._doc_worker_bounds(4 << 30)
         self.assertEqual(big, (6 << 30, (6 << 30) - (256 << 20)), "a large job's guard is 256 MiB")
+        least = km._doc_worker_bounds(km._doc_worker_estimate(0, 0))
+        self.assertGreaterEqual(least[0] - least[1], 32 << 20, "and the smallest job's is no less than an allocator asks of "
+                                                                 "the OS at a time (a free-threaded build's: 32 MiB)")
 
     def test_small_records_are_refused_where_a_factor_of_the_bytes_would_have_admitted(self):
         """At 3.3 x the bytes this transcript would need about a megabyte; a parse holds kilobytes a record, so it needs a
@@ -995,6 +1083,49 @@ class TheWorkerProcess(Harness):
         self.assertNotEqual(done["pid"], os.getpid())
         self.assertEqual(len(done["docCut"]), 5)
         self.assertTrue(self.doc_file().exists())
+        self.assertGreater(done["vmBase"], 0, "what it held as the parse began")
+        self.assertGreater(done["rssBase"], 0)
+        self.assertGreaterEqual(done["vmPeak"], done["vmBase"])
+        self.assertGreater(done["vmHWM"], done["rssBase"], "the parse added memory")
+
+    def _probe(self, limit, held):
+        p = subprocess.run([sys.executable, "-c", PROBE, str(Path(WORKER).resolve()), str(limit), str(held)],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=km._doc_worker_env(), timeout=120)
+        self.assertEqual(p.returncode, 0, p.stderr.decode())
+        return json.loads(p.stdout.decode().splitlines()[-1])
+
+    def test_the_limit_stops_a_heap_that_outgrows_it_counted_from_the_baseline(self):
+        """The limit is the baseline plus what the job may add, and it binds: a heap of small objects is stopped by a failed
+        allocation near the limit, in the environment the kernel gives a worker, with nothing held before the job and with
+        a gigabyte of address space held. On a free-threaded build this is what the allocator setting is for: with its
+        reservation on, the address space stands still for a gigabyte of growth and the heap is never stopped here. The
+        soft bound reads the same growth: past it at an eighth of the limit, within it at four times, whatever was held
+        before."""
+        limit = 64 << 20
+        for held in (0, 1 << 30):
+            with self.subTest(held=held):
+                got = self._probe(limit, held)
+                self.assertTrue(got["set"])
+                self.assertGreater(got["base"][0], held)
+                self.assertEqual(got["rlimit"], got["base"][0] + limit, "the baseline plus the job's")
+                self.assertTrue(got["stopped"], "a failed allocation stopped the heap short of three times the limit: %s" % got)
+                self.assertLessEqual(got["grew"], limit + (64 << 20), "and near the limit: %s" % got)
+                self.assertGreaterEqual(got["grew"], limit // 4, "having had room the limit names (the allocator takes it "
+                                                                   "from the OS up to 32 MiB at a time): %s" % got)
+                self.assertIn("past its bound of 8 MB", got["eighth"] or "", got)
+                self.assertTrue(got["eighth"].startswith("memory: "), "the kernel reads a memory failure by this prefix")
+                self.assertIsNone(got["four"], "within a bound four times the limit, whatever the process held before")
+                self.assertIn("could not be read", got["unread"], "a baseline that cannot be read is not within the bound")
+
+    def test_a_job_handed_a_limit_does_not_run_when_its_baseline_cannot_be_read(self):
+        probe = ("import importlib.util, sys\n"
+                 "spec = importlib.util.spec_from_file_location('romp_doc_worker_probe', sys.argv[1])\n"
+                 "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+                 "print(mod._limit_address_space(64 << 20, None), mod._limit_address_space(0, None))\n")
+        p = subprocess.run([sys.executable, "-c", probe, str(Path(WORKER).resolve())], stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=60)
+        self.assertEqual(p.stdout.decode().split(), ["False", "True"], p.stderr.decode())
+        self.assertIn("the address-space limit could not be set", p.stderr.decode())
 
     def test_the_worker_writes_nothing_but_the_document(self):
         """No fold checkpoint is written by the worker: the kernel stays their only writer. A fold checkpoint the kernel wrote

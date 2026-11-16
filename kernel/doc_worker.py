@@ -12,7 +12,8 @@ interpreter, spawned and never a fork of the kernel, and the two talk in two lin
           hands em.asm_refresh_document, the checkpoint directory, the memory bounds, the kernel's pid and the identity
           of the kernel code it runs
   stdout  one JSON line, the outcome: {"op": "done", "pid", "outcome", "wrote", "reason", "tb", "newPre", "docCut", "ms",
-          "vmPeak", "vmHWM", "memory"}; em.asm_build_document's result plus what the job cost
+          "vmBase", "rssBase", "vmPeak", "vmHWM", "memory"}; em.asm_build_document's result plus what the job cost: the
+          address space and resident memory this process held as the parse began, and their peaks
 
 The build is em.asm_build_document, the same function the kernel's own road runs: a private whole parse, then the
 document's writer. What crosses back is the document on disk and that one line, never the parse (a parse is a tree of
@@ -28,15 +29,28 @@ It ends with the kernel: PR_SET_PDEATHSIG, requested HERE as the first thing aft
 and an exec in the kernel (a preexec_fn there forces a real fork of a many-gigabyte, many-threaded process). The request
 is tied to the thread that started this process, the kernel's rebuild thread, which waits for the done line.
 
-Memory. The kernel admits a job only when the machine has room for it, and hands two bounds. `limitBytes` is this process's
-address-space limit (RLIMIT_AS), the backstop: past it an allocation fails. A failed allocation is a MemoryError, and the
-parser, written for a process with no such limit, has places that read ANY error on a record as a malformed line and skip
-it, so a document built after one could be missing history and still look whole. `softBytes`, below the limit by a margin
-no single allocation of the parse approaches, closes that: at the replace, the last moment before a document is
-published, a peak address space past `softBytes` publishes nothing and the job reports `failed` with `memory` set. A
-MemoryError that surfaces is reported the same way, and one outside the build leaves through exit code EXIT_MEMORY.
-The process also asks to be the first one taken if the machine itself runs out (oom_score_adj), so that it is this
-process, never the kernel.
+Memory. The kernel admits a job only when the machine has room for it, and hands two bounds, both on what the JOB adds:
+they count from this process's own baseline (_baseline: its address space and resident memory with the kernel code
+loaded, read as the parse is about to begin). What an interpreter holds before any job is the interpreter's, and it
+differs by build: about 40 MB of address space on a default CPython 3.15, about 1,060 MB on a free-threaded one, whose
+allocator reserves 1 GiB of it before anything asks (2026-11-16: counted from zero, the bounds refused every job there).
+`limitBytes` is how far the address space may grow past the baseline (RLIMIT_AS at their sum), the backstop: past it an
+allocation fails. A failed allocation is a MemoryError, and the parser, written for a process with no such limit, has
+places that read ANY error on a record as a malformed line and skip it, so a document built after one could be missing
+history and still look whole. `softBytes`, below the limit by a margin no single allocation of the parse approaches,
+closes that: at the replace, the last moment before a document is published, growth past `softBytes` publishes nothing
+and the job reports `failed` with `memory` set. Growth is the address space's peak over its baseline or the resident
+peak over its own, whichever is larger: address space is what the limit counts, so it is what says an allocation may
+have failed, and resident memory is what the job took from the machine, which an allocator that reserves address space
+ahead of use shows nowhere else. A MemoryError that surfaces is reported the same way, and one outside the build leaves
+through exit code EXIT_MEMORY. The process also asks to be the first one taken if the machine itself runs out
+(oom_score_adj), so that it is this process, never the kernel.
+
+The limit binds because the kernel starts this process with MIMALLOC_ARENA_RESERVE=0 (kernel.py, _doc_worker_env). The
+allocator of a free-threaded build (mimalloc) otherwise takes address space 1 GiB at a time, and a job then grows by
+up to that much with its address space standing still: measured, a limit of 200 MB over the baseline stopped a heap at
+1,173 MB there, and at 213 MB with the reservation off, where the address space grows 32 MiB at a time as the job
+does (199 MB on a default build, which the variable does not touch).
 
 The same code as the kernel's. A checkout that moved after the kernel started holds a newer event model, whose documents
 the running kernel refuses and deletes, and a worker started from it would rebuild them until the restart. So after it
@@ -116,15 +130,18 @@ def _background():
         pass
 
 
-def _limit_address_space(nbytes):
-    """RLIMIT_AS at `nbytes` (never above a limit already in force). False when it cannot be set: a job handed a limit does
-    not run without one."""
+def _limit_address_space(nbytes, base):
+    """RLIMIT_AS at `base` + `nbytes`: the address space this process holds already, plus what the job may add (never above
+    a limit already in force). False when it cannot be set, or the baseline was not read: a job handed a limit does not
+    run without one."""
     if not nbytes:
         return True
     try:
         import resource
+        if base is None:
+            raise OSError("this process's address space could not be read")
         soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-        want = int(nbytes)
+        want = int(base) + int(nbytes)
         for cur in (soft, hard):
             if cur != resource.RLIM_INFINITY:
                 want = min(want, int(cur))
@@ -136,8 +153,8 @@ def _limit_address_space(nbytes):
 
 
 def _vm_bytes(field):
-    """A Vm* field of /proc/self/status in bytes (VmPeak: the address space's peak; VmHWM: the resident peak), None when it
-    cannot be read."""
+    """A Vm* field of /proc/self/status in bytes (VmSize and VmPeak: the address space and its peak; VmRSS and VmHWM: the
+    resident memory and its peak), None when it cannot be read."""
     try:
         with open("/proc/self/status", encoding="ascii", errors="replace") as f:
             for line in f:
@@ -148,18 +165,30 @@ def _vm_bytes(field):
     return None
 
 
-def _over_soft_bound(soft):
-    """The reason this process must publish nothing, or None: its address space peaked past the soft bound (or the peak
-    cannot be read, which a job handed a bound treats the same way)."""
+def _baseline():
+    """What this process holds before the job's parse, in bytes: (its address space, its resident memory), each None when it
+    cannot be read. The job's bounds count from here (Memory, above), so it is read after everything the process loads
+    whatever the job, and it is the size now, never a peak: a peak the loading left behind is then counted as growth,
+    which errs toward publishing nothing."""
+    return _vm_bytes("VmSize"), _vm_bytes("VmRSS")
+
+
+def _over_soft_bound(soft, base):
+    """The reason this process must publish nothing, or None: since the baseline (`base`, _baseline's pair) its address space
+    or its resident memory grew, at its peak, past the soft bound (or a figure cannot be read, which a job handed a bound
+    treats the same way)."""
     if not soft:
         return None
-    peak = _vm_bytes("VmPeak")
-    if peak is None:
-        return "memory: the worker's peak address space could not be read, so its bound of %.0f MB cannot be shown to hold" % (
-            int(soft) / 1048576.0)
-    if peak > int(soft):
-        return "memory: the worker's address space peaked at %.0f MB, past its bound of %.0f MB" % (peak / 1048576.0,
-                                                                                                  int(soft) / 1048576.0)
+    soft = int(soft)
+    grown = (("address space", _vm_bytes("VmPeak"), base[0]), ("resident memory", _vm_bytes("VmHWM"), base[1]))
+    for what, peak, start in grown:
+        if peak is None or start is None:
+            return "memory: the worker's %s could not be read, so its bound of %.0f MB cannot be shown to hold" % (
+                what, soft / 1048576.0)
+    for what, peak, start in grown:
+        if peak - start > soft:
+            return "memory: the worker's %s grew by %.0f MB over the %.0f MB it began the job with, past its bound of %.0f MB" % (
+                what, (peak - start) / 1048576.0, start / 1048576.0, soft / 1048576.0)
     return None
 
 
@@ -196,14 +225,17 @@ def run(job, out):
     ckpt = Path(job["ckptDir"])
     em.set_checkpoint_dir(lambda: ckpt)
     em.set_document_stop(lambda: True)                    # no fold checkpoint is written here: the kernel is their only writer
+    base = _baseline()                                    # the code is loaded, the parse not begun: the bounds count from here
+    if not _limit_address_space(job.get("limitBytes"), base[0]):
+        return EXIT_REFUSED
     soft = job.get("softBytes")
     res = em.asm_build_document(job["leaf"], job["rompuuid"], bool(job.get("sdkHuman")),
                                 candidate_files=list(job.get("cands") or [job["leaf"]]), states=job.get("states"),
                                 postal_log=job.get("postalLog"), now=job.get("now"), rebuild=job.get("rebuild"),
-                                refuse=(lambda: _over_soft_bound(soft)) if soft else None)
+                                refuse=(lambda: _over_soft_bound(soft, base)) if soft else None)
     reason = res.get("reason") or ""
     done = dict(res, op="done", pid=os.getpid(), ms=round((time.perf_counter() - t0) * 1000.0, 1),
-                vmPeak=_vm_bytes("VmPeak"), vmHWM=_vm_bytes("VmHWM"),
+                vmBase=base[0], rssBase=base[1], vmPeak=_vm_bytes("VmPeak"), vmHWM=_vm_bytes("VmHWM"),
                 memory=bool(res.get("outcome") == "failed" and (reason.startswith("MemoryError") or reason.startswith("memory:"))))
     out.write(json.dumps(done, separators=(",", ":")) + "\n")
     out.flush()
@@ -223,8 +255,6 @@ def main():
     if not _die_with_parent(job.get("parent")):
         return EXIT_REFUSED
     _background()
-    if not _limit_address_space(job.get("limitBytes")):
-        return EXIT_REFUSED
     try:
         return run(job, out)
     except MemoryError:
