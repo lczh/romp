@@ -1282,16 +1282,16 @@ class CompactionRestore(Harness):
         """The summary a stripped tree's boundary atom `uuid` carries."""
         return next((a.get("summary") for t in tree["turns"] for a in t["atoms"] if a.get("uuid") == uuid), None)
 
+    NEW_SUMMARY = "summary so far: the notes-api search pages by cursor"
+
     def test_a_document_cut_at_a_compaction_whose_summary_is_stamped_before_its_boundary_restores(self):
         """The boot of 2026-11-12: the CLI now writes most automatic compactions with three attachments between the boundary and
         its summary, the summary hung under the last of them and stamped seconds BEFORE its boundary (2 to 49 s on the live
-        host, structure only; early_summary_compaction). The pre-pass walks the summary first and, its parent being no
-        boundary, gives it to the last boundary walked: the PREVIOUS compaction's, in a cold parse as in a restore. The writer
-        cuts at the turn holding the last boundary, so that boundary opens the tail with its summary, and the previous
-        boundary, pre-cut, is frozen in the document already carrying the summary's text, exactly as a cold parse emits it.
-        The restore refused every such document (restore:preCutSummary, on a fifth of the live host's restores), since it
-        compared against the carry, which never holds a tail summary: 16 whole parses at that boot, and the rewritten
-        documents met the same refusal. Now the restore serves it, nothing to patch, equal to a cold parse."""
+        host, structure only; early_summary_compaction). The writer cuts at the turn holding the last boundary, so that
+        boundary opens the tail with its summary. The restore refused every such document for a while (restore:preCutSummary,
+        a fifth of the live host's restores, 16 whole parses at one boot). The summary belongs to its own boundary
+        (FileAdapter._summary_owner), the previous boundary keeps its own, and the restore serves the document with nothing to
+        patch, equal to a cold parse."""
         recs = episode(NOW - 86400)
         comp, s = early_summary_compaction(self.after(recs, 120), "live", recs[-1]["uuid"])
         recs += comp + turn(self.after(recs + comp, 30), "live", s)
@@ -1301,24 +1301,24 @@ class CompactionRestore(Harness):
         self.assertTrue(self.doc(path), "the document is written: %s" % em.asm_checkpoint_stats()["skipped"])
         at = sum(len(json.dumps(r)) + 1 for r in recs[:recs.index(comp[0])])
         self.assertEqual(doc_cut(path)[1], at, "the premise: the cut opens the tail at the compaction's boundary")
+        written = _doc(path)
+        self.assertEqual((written.get("sumOwner"), "b160" in (written.get("bnd") or {})), (1, True),
+                         "the writer marks the owner rule and keeps the boundary row map beside it")
         self.fresh()
         tree, modes, moved = self._parse_counted(path)
         got, cut = self._served(tree)
         cold = self.cold(path)
-        self.assertTrue((self._summary_of(cold, "b160") or "").startswith("summary so far: the notes-api search pages by cursor"),
-                        "the premise: a cold parse gives the summary to the previous boundary")
+        self.assertTrue((self._summary_of(cold, "eb_live") or "").startswith(self.NEW_SUMMARY), "the card carries its own summary")
+        self.assertFalse((self._summary_of(cold, "b160") or "").startswith(self.NEW_SUMMARY), "the previous card keeps its own")
         self.assertSameTree(got, cold, "the restart")
         self.assertEqual((modes, moved.get("full", 0), moved.get("restore:summaryPatched", 0)), (["restore"], 0, 0),
-                         "the restart restores, the frozen boundary already right: %s" % moved)
+                         "the restart restores, nothing to patch: %s" % moved)
         self.assertGreater(cut, 0, "the restored shape")
 
     def test_a_compaction_past_the_cut_whose_summary_is_stamped_before_its_boundary_restores_exactly(self):
-        """The same compaction landing past a standing document's cut (the compaction's restore road): the previous boundary is
-        frozen with its OWN summary, and a cold parse gives it the new one, so the restore patches the frozen atom
-        (restore:summaryPatched) and serves the cold parse's tree, from the restored entry and the whole one, and from an entry
-        restored from a document with no turns section (its prefix atoms patched in place of the index's rows), and again at
-        the next restart, which restores from the same document. Before 2026-11-12 the restore served the old summary there;
-        the refusal that replaced that parsed the transcript whole instead."""
+        """The same compaction landing past a standing document's cut (the compaction's restore road): its summary goes to its
+        own boundary in the tail, so the restore patches nothing and serves the cold parse's tree, from the restored entry, the
+        whole one and one restored from a document with no turns section, and again at the next restart."""
         ran = []
         for entry in ("restored", "whole", "atoms-only"):
             with self.subTest(entry=entry):
@@ -1340,17 +1340,15 @@ class CompactionRestore(Harness):
                 tree, modes, moved = self._parse_counted(path)
                 got, _cut = self._served(tree)
                 self.fresh()
-                boot_modes, before = [], dict(em._ASM_STATS)
+                boot_modes = []
                 boot, _cut = self._served(self.parse(path, boot_modes))
-                patched_boot = em._ASM_STATS.get("restore:summaryPatched", 0) - before.get("restore:summaryPatched", 0)
                 cold = self.cold(path)
-                self.assertTrue((self._summary_of(cold, "b160") or "").startswith("summary so far: the notes-api search pages by cursor"),
-                                "the premise: a cold parse gives the new summary to the previous boundary")
+                self.assertTrue((self._summary_of(cold, "eb_" + name) or "").startswith(self.NEW_SUMMARY), "its own card")
                 self.assertSameTree(got, cold, "the compaction")
                 self.assertSameTree(boot, cold, "the next restart")
                 self.assertEqual((modes, moved.get("g:boundary", 0), moved.get("restore:afterDemote", 0), moved.get("restore:summaryPatched", 0),
-                                  moved.get("full", 0)), (["restore"], 1, 1, 1, 0), "the compaction restores, one atom patched: %s" % moved)
-                self.assertEqual((boot_modes, patched_boot), (["restore"], 1), "the restart restores and patches again")
+                                  moved.get("full", 0)), (["restore"], 1, 1, 0, 0), "the compaction restores: %s" % moved)
+                self.assertEqual(boot_modes, ["restore"], "the restart restores")
                 ran.append(entry)
         self.assertEqual(len(ran), 3, "every entry ran: %s" % ran)
 
@@ -1361,7 +1359,9 @@ class CompactionRestore(Harness):
         The pass result for that boundary equals the carry again, and the first patch compared with the carry, so the frozen
         atom kept the tail summary, live, at the next restart and on the fold after. Every pre-cut boundary atom is now held to
         the pass result (restore:summaryPatched), found through the writer's `bnd` map, or by a scan of the turns section for
-        a document written before the map."""
+        a document written before the map.
+        (Since summaries are keyed on their boundary's attachment chain, the document here is one the writer wrote before
+        that rule, whose frozen atom holds the tail summary; the derivation and the comparison put both right.)"""
         for with_map in (True, False):
             with self.subTest(with_map=with_map):
                 self._forked_compaction("early-summary-forked-%s" % with_map, with_map)
@@ -1371,10 +1371,7 @@ class CompactionRestore(Harness):
         anchor = recs[-1]["uuid"]
         comp, s = early_summary_compaction(self.after(recs, 120), "forked", anchor)
         recs += comp + turn(self.after(recs + comp, 30), "forked", s)
-        path = self.write(name, recs)
-        self.fresh()
-        self.parse(path)
-        self.assertTrue(self.doc(path), "the document is written: %s" % em.asm_checkpoint_stats()["skipped"])
+        path = self._older_document(name, recs)                    # the older owner rule froze the tail summary on b160
         self.assertIn("b160", _doc(path).get("bnd") or {}, "the writer records each boundary atom's row")
         if not with_map:
             d = _doc(path)
@@ -1402,6 +1399,22 @@ class CompactionRestore(Harness):
         self.assertEqual((modes2, moved2.get("full", 0)), (["fold"], 0), "the turn after folds: %s" % moved2)
         self.assertEqual((boot_modes, boot_moved.get("restore:summaryPatched", 0)), (["restore"], 1), "and the restart patches it")
 
+    def test_a_boundary_row_map_naming_another_row_patches_nothing(self):
+        """The review of 2026-11-12: the patch finds a boundary atom's row through the writer's `bnd` map, and on the turns-section
+        path it trusted the row index without checking whose row it is, unlike the atoms-only path. A map that names another
+        record's row (a corrupt or hand-edited document) now patches nothing there: the atom at that row keeps what it had."""
+        path, recs = self._documented("bad-bnd")
+        d = _doc(path)
+        other = next(k for k, r_ in enumerate(d["atoms"]) if json.loads(r_).get("r") is not None
+                     and d["records"][json.loads(r_)["r"]][0] == "a200")
+        d["bnd"]["b160"] = [other, "0" * 16]                       # another record's row, and a digest that forces the compare
+        _write_doc(path, d)
+        self.fresh()
+        got, modes, moved = self._restore_counted(path)
+        a200 = next(a for t in got["turns"] for a in t["atoms"] if a.get("uuid") == "a200")
+        self.assertEqual((modes, moved.get("restore:summaryPatched", 0)), (["restore"], 0), "nothing patched: %s" % moved)
+        self.assertNotIn("summary", a200, "the record the map wrongly names keeps its own atom")
+
     def test_a_tail_record_stamped_before_the_cut_refuses_the_restore(self):
         """The review of 2026-11-12: a summary hung under an attachment and stamped BETWEEN two pre-cut boundaries (clock skew),
         landing past the cut. A cold parse walks it between them and gives it to the earlier boundary; a restore continues
@@ -1425,13 +1438,361 @@ class CompactionRestore(Harness):
         self.fresh()
         boot2, modes2, moved2 = self._restore_counted(path)
         cold = self.cold(path)
-        self.assertTrue((self._summary_of(cold, "b40") or "").startswith("summary so far: the notes-api search pages by cursor"),
-                        "the premise: a cold parse gives the skewed summary to the earlier boundary")
+        self.assertTrue((self._summary_of(cold, "eb_skew") or "").startswith("summary so far: the notes-api search pages by cursor"),
+                        "a cold parse gives the skewed summary to its own boundary (the owner rule); the carry's other facts "
+                        "(the last boundary walked, the replay window) still do not hold for a tail sorting before the cut")
         self.assertSameTree(boot, cold, "the restart after the append")
         self.assertSameTree(boot2, cold, "the restart after that")
         self.assertEqual((modes, moved.get("restore:stampOrder", 0), moved.get("full:refused", 0)), (["full"], 1, 1),
                          "refused for the stamp order, parsed whole: %s" % moved)
         self.assertEqual(modes2, ["restore"], "the rewritten document restores: %s" % moved2)
+    def _older_document(self, name, recs):
+        """`recs` parsed whole and documented as the writer did before summaries were keyed on their boundary's attachment
+        chain (no owner by structure, no `sumOwner` on the document); the caches cleared, so the next parse restores it."""
+        path = self.write(name, recs)
+        with mock.patch.object(em.FileAdapter, "_summary_owner", lambda self_, u: None):
+            self.fresh()
+            self.parse(path)
+            self.assertTrue(self.doc(path), "the premise: the document is written: %s" % em.asm_checkpoint_stats()["skipped"])
+        d = _doc(path)
+        d.pop("sumOwner", None)
+        _write_doc(path, d)
+        self.fresh()
+        return path
+
+    def test_an_older_document_cut_at_such_a_compaction_restores_corrected(self):
+        """A document the writer wrote before the owner was the attachment chain's boundary, cut at the compaction (the live
+        boot's shape): its previous boundary's atom is frozen with the NEW summary (the older rule's choice) and the carry
+        holds that boundary's own. The restore derives the pre-cut assignment again from the document's rows and the
+        transcript (_asm_doc_summaries_by_owner) and gives the frozen atom its own summary back (restore:summaryPatched): no
+        whole parse, equal to a cold parse, live and at the next restart. 157 of the live host's 232 documents hold a boundary
+        this corrects."""
+        recs = episode(NOW - 86400)
+        comp, s = early_summary_compaction(self.after(recs, 120), "older", recs[-1]["uuid"])
+        recs += comp + turn(self.after(recs + comp, 30), "older", s)
+        path = self._older_document("older-cut", recs)
+        got, modes, moved = self._restore_counted(path)
+        self.fresh()
+        boot, boot_modes, boot_moved = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertSameTree(got, cold, "the restore of the older document")
+        self.assertSameTree(boot, cold, "the next restart")
+        self.assertEqual((modes, moved.get("full", 0), moved.get("restore:summaryPatched", 0), moved.get("restore:summaryOwnerRefused", 0)),
+                         (["restore"], 0, 1, 0), "restored, the previous boundary's atom corrected: %s" % moved)
+        self.assertEqual((boot_modes, boot_moved.get("restore:summaryPatched", 0)), (["restore"], 1), "and again at the restart")
+
+    def test_an_older_document_whose_pre_cut_part_holds_such_compactions_restores_corrected(self):
+        """Compactions of the new shape BEFORE the cut of an older document: the older rule gave the second summary to the first
+        boundary and the first summary to none, both frozen so in the document and its carry. The restore derives the
+        assignment again and patches both atoms: equal to a cold parse, no whole parse."""
+        recs, parent, t = [], None, NOW - 86400
+        for k in range(240):
+            if k and k % 80 == 0:                                       # mid-turn: the reply carries on under the summary
+                comp, s = early_summary_compaction(t, "e%d" % k, parent)
+                recs += comp + [G.aline(t + 40, "carrying on with the notes-api work", "ec%d" % k, s, stop="end_turn")]
+                parent, t = "ec%d" % k, t + 120
+            recs += [G.uline(t, "step %d of the notes-api work" % k, "eu%d" % k, parent),
+                     G.aline(t + 20, "done with step %d" % k, "ea%d" % k, "eu%d" % k, stop="end_turn")]
+            parent, t = "ea%d" % k, t + 60
+        path = self._older_document("older-precut", recs)
+        got, modes, moved = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertEqual({u: (self._summary_of(cold, u) or "")[:60] for u in ("eb_e80", "eb_e160")},
+                         {"eb_e80": self.NEW_SUMMARY + " (e80)"[:60 - len(self.NEW_SUMMARY)],
+                          "eb_e160": self.NEW_SUMMARY + " (e160)"[:60 - len(self.NEW_SUMMARY)]}, "the premise: each card its own")
+        self.assertSameTree(got, cold, "the restore of the older document")
+        self.assertEqual((modes, moved.get("full", 0), moved.get("restore:summaryPatched", 0)), (["restore"], 0, 2),
+                         "restored, both boundaries' atoms corrected: %s" % moved)
+
+    def test_a_document_from_before_the_parent_link_rule_restores_corrected(self):
+        """Six of the live host's documents were written before the parent-link rule of 2026-09-19: their transcript's first
+        compaction has its summary parented on the boundary but stamped a second before it, and the writer of the day, keyed on
+        the last boundary walked, assigned it nowhere, so the carry and the frozen atom hold no summary where a cold parse
+        shows it. The carry holds FEWER assignments than the summaries make, never a different one, so the derivation stands
+        and the restore gives the frozen atom its summary: equal to a cold parse, no whole parse."""
+        recs = episode(NOW - 86400, turns=60, compact_every=1000)
+        t = self.after(recs, 120)
+        recs += [G.compact_line(t, "pb_first", recs[-1]["uuid"], trigger="auto"),
+                 G.compact_summary_line(t - 1, "ps_first", "pb_first", text="summary so far: the notes-api search is wired"),
+                 G.aline(t + 20, "carrying on with the notes-api work", "pc_first", "ps_first", stop="end_turn")]
+        for k in range(3):
+            recs += turn(self.after(recs, 60), "pre%d" % k, recs[-1]["uuid"])
+        path = self._older_document("older-pre-link", recs)
+        d = _doc(path)                                               # the writer of 2026-09-16: no summary assigned at all,
+        d["carry"]["summaries"] = {}                                 #  and no boundary row map
+        d.pop("bnd", None)
+        rows = d["records"]
+        for td in d.get("turns") or ():
+            for j, u in enumerate(td["uuids"]):
+                if u == "pb_first":
+                    k_ = td["atoms"][j]
+                    row = json.loads(d["atoms"][k_])
+                    row.setdefault("s", {})["summary"] = None
+                    d["atoms"][k_] = json.dumps(row, separators=(",", ":"))
+        _write_doc(path, d)
+        self.fresh()
+        got, modes, moved = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertEqual(self._summary_of(cold, "pb_first"), "summary so far: the notes-api search is wired", "the premise: its own card")
+        self.assertSameTree(got, cold, "the restore of the document")
+        self.assertEqual((modes, moved.get("full", 0), moved.get("restore:summaryPatched", 0)), (["restore"], 0, 1),
+                         "restored, the frozen atom given its summary: %s" % moved)
+
+    def test_an_older_document_with_a_chainless_summary_before_a_moved_one_restores_exact(self):
+        """The review of 2026-11-12: a summary with no attachment chain to a boundary (#462's off-path late parent: its chain
+        ends at a stop hook) keeps the last boundary walked, b80, under both rules; a compaction of the new shape after it
+        gave its summary to b80 too under the older rule, overwriting it, and moves to its own boundary under the newer one,
+        so b80's value is the chainless summary again. A derivation from the chain candidates alone never saw the chainless
+        one, the carry's check passed (the overwrite hid it), and the restore gave b80 its own summary. The pre-cut bytes are
+        now read for every summary line, so the set is complete and the restore equals a cold parse."""
+        recs = episode(NOW - 86400, turns=120, compact_every=40)        # b40, b80: summaries parented on their boundaries
+        recs += late_anchor_lead(self.after(recs, 60), recs[-1]["uuid"])
+        comp, _late = late_anchor_compaction(self.after(recs, 120), late_under="la_tail")   # la_sum: no chain to a boundary
+        recs += comp
+        early, s = early_summary_compaction(self.after(recs, 120), "moved", recs[-1]["uuid"])
+        recs += early + [G.aline(self.after(recs + early, 40), "carrying on", "mv_a", s, stop="end_turn")]
+        last, s2 = compaction(self.after(recs, 120), "last", recs[-1]["uuid"])
+        recs += last + turn(self.after(recs + last, 30), "last", s2)
+        path = self._older_document("older-chainless", recs)
+        got, modes, moved = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertTrue((self._summary_of(cold, "b80") or "").startswith("summary so far: the notes-api search ranks titles first"),
+                        "the premise: a cold parse gives b80 the chainless summary")
+        self.assertSameTree(got, cold, "the restore of the older document")
+        self.assertEqual((modes, moved.get("full", 0)), (["restore"], 0), "restored, no whole parse: %s" % moved)
+
+    def test_an_older_document_over_a_transcript_with_a_blank_line_parses_whole_once(self):
+        """The derivation takes a line's number for its record index, which holds only when every line before the cut is a
+        record: the file's pre-cut line count must equal the document's record count. A blank line (the reader skips it) breaks
+        that, so the restore of an older document refuses once (restore:summaryOwnerRefused) and the whole parse's document,
+        which carries the owner rule, restores after."""
+        recs = episode(NOW - 86400)
+        comp, s = early_summary_compaction(self.after(recs, 120), "blank", recs[-1]["uuid"])
+        recs += comp + turn(self.after(recs + comp, 30), "blank", s)
+        d_ = self.td / "older-blank"
+        d_.mkdir()
+        path = str(d_ / (SID + ".jsonl"))
+        lines = [json.dumps(r) + "\n" for r in recs]
+        Path(path).write_text("".join(lines[:5]) + "\n" + "".join(lines[5:]))   # a blank line among the first records
+        with mock.patch.object(em.FileAdapter, "_summary_owner", lambda self_, u: None):
+            self.fresh()
+            self.parse(path)
+            self.assertTrue(self.doc(path), "the premise: the document is written")
+        d = _doc(path)
+        d.pop("sumOwner", None)
+        _write_doc(path, d)
+        self.fresh()
+        got, modes, moved = self._restore_counted(path)
+        self.fresh()
+        boot, boot_modes, _m = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertSameTree(got, cold, "the whole parse")
+        self.assertSameTree(boot, cold, "the next restart")
+        self.assertEqual((modes, moved.get("restore:summaryOwnerRefused", 0)), (["full"], 1), "refused once: %s" % moved)
+        self.assertEqual(boot_modes, ["restore"], "the rewritten document restores")
+
+    def _older_document_bytes(self, name, data):
+        """`data`, a transcript's bytes, documented as the writer did before the owner rule (see _older_document)."""
+        d_ = self.td / name
+        d_.mkdir()
+        path = str(d_ / (SID + ".jsonl"))
+        Path(path).write_bytes(data)
+        with mock.patch.object(em.FileAdapter, "_summary_owner", lambda self_, u: None):
+            self.fresh()
+            self.parse(path)
+            self.assertTrue(self.doc(path), "the premise: the document is written")
+        d = _doc(path)
+        d.pop("sumOwner", None)
+        _write_doc(path, d)
+        self.fresh()
+        with em._ASM_CKPT_LOCK:
+            em._ASM_SUMOWNER_MEMO.clear()
+        return path
+
+    @staticmethod
+    def _mixed_records():
+        """A session compacted once in the older shape (b40, its summary parented on it), then once in the new shape (its
+        summary stamped before its boundary: the older rule gave it to b40 too, over b40's own), then once more in the older
+        shape so the document's cut falls past both: b40's value comes from the derivation alone, its own summary, which the
+        carry does not hold (the new-shape summary overwrote it there)."""
+        recs = episode(NOW - 86400, turns=80, compact_every=40)
+        t = max(em.parse_z(r["timestamp"]) for r in recs) + 120
+        comp, s = early_summary_compaction(t, "mixed", recs[-1]["uuid"])
+        recs += comp + [G.aline(t + 40, "carrying on", "mx_a", s, stop="end_turn")] + turn(t + 100, "mixed", "mx_a")
+        last, s2 = compaction(t + 400, "mixlast", recs[-1]["uuid"])
+        return recs + last + turn(t + 500, "mixlast", s2)
+
+    def test_an_older_document_over_a_bare_cr_parses_whole_once(self):
+        """The final review of 2026-11-12: the reader splits a line at a bare CR as at a newline (bytes.splitlines) and skips a
+        blank line, so one blank line and one line holding two records split by a bare CR keep the file's line count equal to
+        its record count while every index after them shifts by one: the derivation read the wrong lines and served b40's card
+        empty. A bare CR before the cut now refuses the restore once; the whole parse's document restores after."""
+        recs = self._mixed_records()
+        lines = [json.dumps(r) for r in recs]
+        k = next(j for j, r in enumerate(recs) if r.get("isCompactSummary") and r.get("parentUuid") == "b40")
+        # two records on one line split by a bare CR before b40's summary, a blank line after the record that follows it: between
+        # the two, each line number is one short of its record index, and the summary's own line sits at b40's index
+        data = (lines[0] + "\r" + "\n".join(lines[1:k + 2]) + "\n\n" + "\n".join(lines[k + 2:]) + "\n").encode("utf-8")
+        path = self._older_document_bytes("older-bare-cr", data)
+        got, modes, moved = self._restore_counted(path)
+        self.fresh()
+        boot, boot_modes, _m = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertTrue(self._summary_of(cold, "b40"), "the premise: b40's card carries its summary")
+        self.assertSameTree(got, cold, "the whole parse")
+        self.assertSameTree(boot, cold, "the next restart")
+        self.assertEqual((modes, moved.get("restore:summaryOwnerRefused", 0)), (["full"], 1), "refused once: %s" % moved)
+        self.assertEqual(boot_modes, ["restore"], "the rewritten document restores")
+
+    def test_an_older_document_whose_summary_holds_invalid_utf8_restores_exact(self):
+        """The final review of 2026-11-12: the reader decodes a line with bad bytes replaced and keeps it; the scan decoded the
+        raw bytes, met the error and dropped the summary, so b40's card was served empty. The scan now decodes as the reader."""
+        recs = self._mixed_records()
+        i = next(k for k, r in enumerate(recs) if r.get("isCompactSummary") and r.get("parentUuid") == "b40")
+        recs[i] = dict(recs[i], message={"role": "user", "content": "summary so far: the notes-api search BADBYTES is wired"})
+        data = "".join(json.dumps(r) + "\n" for r in recs).encode("utf-8").replace(b"BADBYTES", b"\xff\xfe")
+        path = self._older_document_bytes("older-bad-utf8", data)
+        got, modes, moved = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertIn("\ufffd", self._summary_of(cold, "b40") or "", "the premise: a cold parse keeps the summary, bad bytes replaced")
+        self.assertSameTree(got, cold, "the restore")
+        self.assertEqual((modes, moved.get("full", 0)), (["restore"], 0), "restored: %s" % moved)
+
+    def test_an_older_document_whose_summary_line_has_a_form_feed_or_a_vertical_tab_at_its_edge_restores_exact(self):
+        """The last review of this change: the reader strips each line with bytes.strip, which takes a form feed and a vertical
+        tab at a line's edge as it takes a space, and keeps the record; the scan decoded the line unstripped, met the error and
+        dropped the hit, and the line count still agreed, since the reader had counted the record. A form feed after b40's
+        own summary left b40's card empty (the new-shape summary moved off it and nothing took its place); a vertical tab
+        before the new-shape summary refused a document that restores. The scan now strips as the reader does."""
+        ran = []
+        for name, uuid, edge in (("ff-after-old", "s40", lambda ln: ln[:-1] + b"\x0c\n"), ("vt-before-new", "es_mixed", lambda ln: b"\x0b" + ln)):
+            with self.subTest(edge=name):
+                recs = self._mixed_records()
+                lines = [(json.dumps(r) + "\n").encode("utf-8") for r in recs]
+                i = next(k for k, r in enumerate(recs) if r.get("uuid") == uuid)
+                self.assertIs(recs[i].get("isCompactSummary"), True, "the premise: the edited line is a summary's")
+                lines[i] = edge(lines[i])
+                path = self._older_document_bytes("older-" + name, b"".join(lines))
+                got, modes, moved = self._restore_counted(path)
+                cold = self.cold(path)
+                self.assertTrue((self._summary_of(cold, "b40") or "").startswith("summary so far: "),
+                                "the premise: a cold parse reads the edited line and b40's card carries its own summary")
+                self.assertTrue((self._summary_of(cold, "eb_mixed") or "").startswith(self.NEW_SUMMARY), "and the new one its own")
+                self.assertSameTree(got, cold, "the restore")
+                self.assertEqual((modes, moved.get("full", 0), moved.get("restore:summaryOwnerRefused", 0)), (["restore"], 0, 0),
+                                 "restored, not refused: %s" % moved)
+                ran.append(name)
+        self.assertEqual(len(ran), 2, "both edges ran: %s" % ran)
+
+    def test_the_summary_scan_reads_each_line_as_the_reader_does_and_counts_a_hit_it_cannot_decode(self):
+        """The scan against the reader's reference scanner over the same bytes: a form feed, a vertical tab, spaces and a CRLF
+        at a summary line's edges decode to the records the reader keeps, at the reader's record indexes; a line naming the key
+        that is no JSON is counted, never passed over, and the line count holds it."""
+        recs = [G.compact_summary_line(NOW, "sc_a", "sb_a", text="summary so far: the notes-api search is wired"),
+                G.compact_summary_line(NOW + 1, "sc_b", "sb_b", text="summary so far: the notes-api search pages by cursor"),
+                G.uline(NOW + 2, "a prompt between the summaries", "sc_u", "sc_b"),
+                G.compact_summary_line(NOW + 3, "sc_c", "sb_c", text="summary so far: the notes-api search ranks titles first")]
+        ln = [json.dumps(r).encode("utf-8") for r in recs]
+        good = ln[0] + b"\x0c\n" + b"\x0b" + ln[1] + b"\n" + ln[2] + b"\n" + b" \t" + ln[3] + b" \x0c\r\n"
+        d_ = self.td / "scan-edges"
+        d_.mkdir()
+        p = d_ / (SID + ".jsonl")
+        p.write_bytes(good)
+        hits, n, bare_cr, undecoded = em._asm_scan_summary_lines(str(p), len(good))
+        read, _end = em._scan_jsonl_bytes(good, 0)
+        self.assertEqual([r.get("uuid") for r in read], ["sc_a", "sc_b", "sc_u", "sc_c"], "the premise: the reader keeps all four")
+        self.assertEqual(({k: v.get("uuid") for k, v in hits.items()}, n, bare_cr, undecoded),
+                         ({0: "sc_a", 1: "sc_b", 3: "sc_c"}, 4, False, 0), "every summary line, at the reader's indexes")
+        self.assertEqual([hits[k] for k in sorted(hits)], [r for r in read if r.get("isCompactSummary") is True], "decoded as the reader's")
+        bad = ln[0] + b"\n" + b'{"type":"user","isCompactSummary":true,"uuid":"sc_cut' + b"\n" + ln[3] + b"\n"
+        p.write_bytes(bad)
+        hits, n, bare_cr, undecoded = em._asm_scan_summary_lines(str(p), len(bad))
+        self.assertEqual(({k: v.get("uuid") for k, v in hits.items()}, n, bare_cr, undecoded), ({0: "sc_a", 2: "sc_c"}, 3, False, 1),
+                         "a line naming the key that does not decode is counted")
+
+    def test_a_line_naming_the_key_that_the_scan_cannot_decode_refuses_the_older_document(self):
+        """The same review: a hit the scan cannot decode is never passed over, whatever the line count says. In a transcript
+        as the reader reads it today such a line is no record either, so the count already disagrees and refuses; the form
+        feed above is how a line can be a record to the reader and nothing to the scan while the count agrees, and the rule
+        must not rest on there being no second way. Pinned with the count made to agree: an undecodable line naming the key
+        written just before the document's cut (no record's index shifts), and the document's record count for the file
+        raised by one. The restore refuses once (restore:summaryOwnerRefused) and the whole parse's document restores after."""
+        recs = self._mixed_records()
+        lines = [(json.dumps(r) + "\n").encode("utf-8") for r in recs]
+        clean = self._older_document_bytes("older-undecodable-clean", b"".join(lines))
+        pre_n = int(_doc(clean)["files"][SID]["cut"][1])
+        self.assertTrue(0 < pre_n < len(recs), "the premise: the document cuts inside the transcript")
+        broken = b'{"type":"user","isCompactSummary":true,"uuid":"cut-short' + b"\n"
+        path = self._older_document_bytes("older-undecodable", b"".join(lines[:pre_n]) + broken + b"".join(lines[pre_n:]))
+        d = _doc(path)
+        f = d["files"][SID]
+        self.assertEqual((int(f["cut"][1]), int(f["cut"][0]), int(f["pre"])), (pre_n, sum(len(x) for x in lines[:pre_n]) + len(broken), pre_n),
+                         "the premise: the same cut, the undecodable line the last one before it, and no record to the reader")
+        f["pre"] = pre_n + 1                                         # the count made to agree with the lines before the cut
+        _write_doc(path, d)
+        self.fresh()
+        with em._ASM_CKPT_LOCK:
+            em._ASM_SUMOWNER_MEMO.clear()
+        got, modes, moved = self._restore_counted(path)
+        self.fresh()
+        boot, boot_modes, _m = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertSameTree(got, cold, "the whole parse")
+        self.assertSameTree(boot, cold, "the next restart")
+        self.assertEqual((modes, moved.get("restore:summaryOwnerRefused", 0)), (["full"], 1), "refused once: %s" % moved)
+        self.assertEqual(boot_modes, ["restore"], "the rewritten document restores")
+
+    def test_an_older_documents_derivation_is_saved_beside_it_for_the_next_process(self):
+        """The final review of 2026-11-12: the derivation reads the pre-cut bytes (2.2 s for the live host's 1 GB document), and
+        an older document is replaced only by its next write, so every boot paid it again. The restore saves the derivation in
+        the document's sidecar against the document file's stat and each lineage file's inode and scanned bytes: the next
+        process restores from it with no read (restore:summaryOwnerSaved), still after an append, and a changed document file
+        sets it aside."""
+        path = self._older_document_bytes("older-saved", "".join(json.dumps(r) + "\n" for r in self._mixed_records()).encode("utf-8"))
+        got, modes, moved = self._restore_counted(path)
+        meta = json.loads(em._asm_ckpt_file(path).with_name(em._asm_ckpt_file(path).name + ".meta").read_text())
+        self.assertIn("sumOwnerScan", meta, "the derivation is saved in the sidecar")
+        self.assertEqual((meta.get("av"), sorted(meta.get("files") or [])), (_doc(path)["av"], sorted(_doc(path)["files"])),
+                         "the sidecar's own fields stay")
+        self._append(path, turn(self.after(self._mixed_records(), 300), "saved-more", "xa_mixlast"))
+        self.fresh()
+        with em._ASM_CKPT_LOCK:
+            em._ASM_SUMOWNER_MEMO.clear()
+        got2, modes2, moved2 = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertSameTree(got2, cold, "the next process, after an append")
+        self.assertEqual((modes, modes2, moved2.get("restore:summaryOwnerSaved", 0)), (["restore"], ["restore"], 1),
+                         "the next process restores from the saved derivation: %s" % moved2)
+        d = _doc(path)                                               # the document file changes: the saved derivation is set aside
+        _write_doc(path, d)
+        self.fresh()
+        with em._ASM_CKPT_LOCK:
+            em._ASM_SUMOWNER_MEMO.clear()
+        _g, modes3, moved3 = self._restore_counted(path)
+        self.assertEqual((modes3, moved3.get("restore:summaryOwnerSaved", 0)), (["restore"], 0), "derived again: %s" % moved3)
+
+    def test_an_older_document_that_cannot_be_corrected_exactly_parses_whole_once(self):
+        """The backstop: a transcript's first compaction of the new shape had no owner under the older rule, so no restore
+        window opened after its summary, and with the owner it opens; a user record between that summary and the next reply
+        could be read as a replay either way, which the rows cannot decide. Such an older document is refused
+        (restore:summaryOwnerRefused) and parsed whole once, and the document the whole parse offers restores at the next
+        restart."""
+        recs = episode(NOW - 86400, turns=60, compact_every=1000)    # no compaction before the new one
+        comp, s = early_summary_compaction(self.after(recs, 120), "first", recs[-1]["uuid"])
+        recs += comp + turn(self.after(recs + comp, 30), "first", s)    # a user record right after the summary
+        more = []
+        for k in range(3):
+            more += turn(self.after(recs + more, 60), "after%d" % k, (more or recs)[-1]["uuid"])
+        path = self._older_document("older-backstop", recs + more)
+        got, modes, moved = self._restore_counted(path)
+        self.fresh()
+        boot, boot_modes, boot_moved = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertSameTree(got, cold, "the whole parse")
+        self.assertSameTree(boot, cold, "the next restart")
+        self.assertEqual((modes, moved.get("restore:summaryOwnerRefused", 0), moved.get("full:refused", 0)), (["full"], 1, 1),
+                         "refused once, parsed whole: %s" % moved)
+        self.assertEqual(boot_modes, ["restore"], "the rewritten document restores: %s" % boot_moved)
 
     def test_a_parent_a_pre_cut_record_named_parses_whole_on_every_road(self):
         """A record landing as the parent that a record BEFORE the document's cut named (the pre-cut orphan after turn 150):

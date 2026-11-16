@@ -62,6 +62,8 @@ EVENT_MODEL_ALLOWED = {
     #                                                     body: the comment cut reads the RAW record by offset (2026-10-01)
     "_tail_prompt_shaped", "_tail_sync_point", "_tail_refusal", "tail_window",   # the tail-first window's rules, over the raw
     #                                                     records of the bytes tail_window itself read (2026-11-12), never atoms
+    "_asm_doc_summaries_by_owner",                      # a compaction summary's text, off the RAW transcript record it reads
+    #                                                     past its boundary's offset (2026-11-12)
 }
 SDK_BACKEND_ALLOWED = None        # the backend builds live atoms and reads raw records only: every site allowed, listed for the record
 

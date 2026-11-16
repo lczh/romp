@@ -4979,6 +4979,27 @@ class FileAdapter:
         out += self._absorbed(self.qatts, kept, st, rompuuid, postal_index)
         return out
 
+    def _summary_owner(self, u):
+        """The compact_boundary that compaction summary `u` hangs off through attachment records alone (its raw parent, then
+        each attachment's), or None when the chain meets anything else first. A restored adapter follows a chain that
+        crosses its cut through the document's rows: their types and the attachments' raw parents (_seed_from_doc), the
+        same raw links a whole adapter reads off its records, so the two name one owner."""
+        types = (self.seed or {}).get("types") or {}
+        att_parent = (self.seed or {}).get("att_parent") or {}
+        p, seen = (self.by_uuid.get(u) or {}).get("parentUuid"), set()
+        while p and p not in seen and len(seen) < 256:
+            seen.add(p)
+            r = self.by_uuid.get(p)
+            kind = (r.get("type"), r.get("subtype")) if r is not None else types.get(p)
+            if kind is None:
+                return None
+            if kind[0] == "system" and kind[1] == "compact_boundary":
+                return p
+            if kind[0] != "attachment":
+                return None
+            p = r.get("parentUuid") if r is not None else att_parent.get(p)
+        return None
+
     def _prepass(self, order, st):
         """Fold the cross-record facts of `order` (kept records, ascending (t, seq)) into the
         carry `st`: replay classification, boundary summaries, Skill payload ids, command twins,
@@ -5033,14 +5054,23 @@ class FileAdapter:
                 # dedup, and this summary's text landed on the manual card). The fallback serves a
                 # summary whose boundary is not on record here: a restored assembly entry holds only
                 # the tail's records and carries last_boundary from its checkpoint.
-                bp = self.parent_of.get(u)
-                br = self.by_uuid.get(bp) if bp else None
-                own = bp if (br is not None and br.get("type") == "system"
-                             and br.get("subtype") == "compact_boundary") else last_boundary
+                # The CLI now writes most automatic compactions with attachments between the two
+                # (instructions, session context, date) and the summary hung under the last of them,
+                # stamped seconds BEFORE its boundary (2026-11-12, structure only: 618 of 695 summaries
+                # on one machine's live sessions), so the parent test failed, the walk had not reached
+                # the boundary yet, and every such summary landed on the PREVIOUS compaction's card.
+                # The owner is the boundary the summary's attachment chain hangs off, by structure,
+                # never by stamp (_summary_owner); its parent being the boundary is the chain of none,
+                # so the older shape keeps the owner it had.
+                own = self._summary_owner(u)
+                if own is None:
+                    bp = self.parent_of.get(u)
+                    br = self.by_uuid.get(bp) if bp else None
+                    own = bp if (br is not None and br.get("type") == "system"
+                                 and br.get("subtype") == "compact_boundary") else last_boundary
                 stext = _text_of(_content(r.get("message")))
                 if own and stext:                      # attach to its own boundary; cap for transport
-                    summaries[own] = stext[:SUMMARY_CAP] + (
-                        "\n\n…(summary truncated)" if len(stext) > SUMMARY_CAP else "")
+                    summaries[own] = _summary_capped(stext)
                 if own and own not in self._adopted:
                     # the restore burst starts HERE — the summary is what the CLI writes before it
                     # replays the recent tail verbatim — and ends at the next assistant. An ADOPTED
@@ -8197,6 +8227,8 @@ def _asm_patch_pre_cut_summaries(desired, rows_of, index, prefix):
             continue                                       # no atom, or the frozen summary is the one the pass leaves: no decode
         if index is not None:
             row = index._row(k)
+            if row.get("r") is None or index.records[row["r"]][0] != u:
+                continue                                   # the row the map names is not this boundary's: never patch another atom
             sc = dict(row.get("s") or {})
             if sc.get("summary") == want:
                 continue
@@ -8210,6 +8242,254 @@ def _asm_patch_pre_cut_summaries(desired, rows_of, index, prefix):
             prefix[k]["summary"] = want
             patched += 1
     return patched
+
+
+_ASM_SUMOWNER_MEMO = {}            # (document path, its write stamp, its leaf cut) -> the pre-cut summaries by owner a restore of a
+_ASM_SUMOWNER_MEMO_MAX = 512        #  document without `sumOwner` derived (_asm_doc_summaries_by_owner): its pre-cut bytes never change
+_SUMMARY_KEY = b'"isCompactSummary"'
+
+
+def _asm_scan_summary_lines(path, end):
+    """Every line of `path` before byte `end` that names isCompactSummary, decoded as the reader decodes a line (stripped
+    with bytes.strip, which takes a form feed and a vertical tab at its edges as it takes a space, then bad bytes
+    replaced), as {line number: record}; how many newline-ended lines lie before `end`; whether those bytes hold a bare CR,
+    which the reader also splits a line at (bytes.splitlines); and how many lines naming the key did not decode. Such a
+    line is never skipped: the caller refuses on it (the final review of 2026-11-12: a summary line ending in a form feed
+    was a record to the reader and no hit here, so the line count agreed and the summary was dropped unseen; the count
+    proves the lines are records, not that this decode read each as the reader did). One pass in 8 MiB blocks, the key,
+    the newlines and the CRs found by the bytes methods, so only the lines naming the key are decoded; counted as read."""
+    hits, n, pos, rest, cr, crlf, undecoded = {}, 0, 0, b"", 0, 0, 0
+    with open(path, "rb") as fh:
+        while pos < end:
+            block = fh.read(min(8 << 20, end - pos))
+            if not block:
+                break
+            pos += len(block)
+            data = rest + block if rest else block
+            whole = data.rfind(b"\n") + 1                  # complete lines only; a line split across blocks rides to the next
+            j, counted, nl = data.find(_SUMMARY_KEY, 0, whole), 0, n
+            while j >= 0:
+                start = data.rfind(b"\n", 0, j) + 1
+                stop = data.find(b"\n", j) + 1
+                nl += data.count(b"\n", counted, start)    # the newlines before this line, counted once across the block
+                counted = start
+                try:
+                    hits[nl] = json.loads(data[start:stop].strip().decode("utf-8", "replace"))
+                except Exception:                          # noqa: BLE001 — a hit this decode cannot read: counted, never skipped
+                    undecoded += 1
+                j = data.find(_SUMMARY_KEY, stop, whole)
+            n += data.count(b"\n", 0, whole)
+            cr += data.count(b"\r", 0, whole)              # a CR pair never straddles `whole`: the block ends at its LF
+            crlf += data.count(b"\r\n", 0, whole)
+            rest = data[whole:]
+    _count_read(str(path), pos)
+    return hits, n, cr != crlf, undecoded
+
+
+def _asm_sumowner_witness(doc, leaf_path):
+    """What a saved derivation stands on (_asm_doc_summaries_by_owner): the document file's (size, mtime_ns), and each
+    lineage file's inode and the bytes the scan read (its cut, or its whole size when wholly before the cut). None when a
+    stat fails."""
+    cp = _asm_ckpt_file(leaf_path)
+    srcs = _source_files(doc["files"])
+    try:
+        dst = cp.stat()
+        files = {}
+        for fsid, f in doc["files"].items():
+            end = int(f["size"]) if f.get("skip") else int((f.get("cut") or [0])[0])
+            files[fsid] = [os.stat(srcs[fsid]).st_ino, end]
+    except (OSError, KeyError, TypeError, AttributeError):
+        return None
+    return {"doc": [dst.st_size, dst.st_mtime_ns], "files": files}
+
+
+def _asm_sumowner_saved(doc, leaf_path):
+    """The derivation saved in the sidecar, when its witness still stands: the same document file, and each lineage file
+    the same inode, still holding the bytes scanned (a file grows past its cut; the document's own guard proves those bytes
+    unchanged). None otherwise."""
+    cp = _asm_ckpt_file(leaf_path)
+    if cp is None:
+        return None
+    try:
+        text = cp.with_name(cp.name + ".meta").read_bytes()
+        d = json.loads(text.decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    saved = d.get("sumOwnerScan") if isinstance(d, dict) else None
+    now = _asm_sumowner_witness(doc, leaf_path)
+    if not isinstance(saved, dict) or now is None or saved.get("doc") != now["doc"]:
+        return None
+    srcs = _source_files(doc["files"])
+    for fsid, (ino, end) in now["files"].items():
+        was = (saved.get("files") or {}).get(fsid)
+        try:
+            if was != [ino, end] or os.stat(srcs[fsid]).st_size < end:
+                return None
+        except OSError:
+            return None
+    out = saved.get("summaries")
+    return dict(out) if isinstance(out, dict) else None
+
+
+def _asm_sumowner_save(doc, leaf_path, summaries):
+    """Save a derivation in the document's sidecar with its witness: the sidecar is re-read just before the write, so a field
+    another writer put there since stays, and replaced through a tmp of its own. The caller holds the leaf's writer key lock
+    (the restore runs under it), as the settle's and the converge pass's writer, the sidecar refresh and the refusal mark
+    do. A refresh or a rebuild does not: it writes from a private parse under no key lock, so its sidecar can land between
+    the re-read and the replace here, and the older sidecar, with this field added, then stands beside the newer document
+    until its next write. The field is never read there: a refresh's or a rebuild's document carries `sumOwner`, and only
+    the restore of a document without it asks for a saved derivation. Best-effort: a failure leaves the next restore to
+    derive again."""
+    cp = _asm_ckpt_file(leaf_path)
+    witness = _asm_sumowner_witness(doc, leaf_path)
+    if cp is None or witness is None:
+        return False
+    meta = cp.with_name(cp.name + ".meta")
+    try:
+        d = json.loads(meta.read_bytes().decode("utf-8"))
+        if not isinstance(d, dict):
+            return False                                   # no sidecar of the document's own to add to
+        d["sumOwnerScan"] = dict(witness, summaries=dict(summaries))
+        mtmp = _writer_tmp(meta, "sumowner.")
+        mtmp.write_text(json.dumps(d))
+        os.replace(mtmp, meta)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _asm_doc_summaries_by_owner(doc, leaf_path, index, prefix, carry=None, persist=False):
+    """The pre-cut summaries as the pre-pass now assigns them ({boundary uuid: text}) for a document written before the
+    owner was the boundary a summary's attachment chain hangs off (no `sumOwner`, 2026-11-12): its carry and frozen atoms hold
+    the older assignment, which gave most summaries the CLI writes now to the previous compaction. Neither the rows nor the
+    atoms flag a summary (a summary emits no atom), so the pre-cut bytes of each file are read once for the lines naming
+    isCompactSummary, and each kept user row is a summary exactly when the line at its record index in its file is one: the
+    complete set, chainless summaries included (a summary whose parent chain meets no boundary through attachments keeps
+    the last boundary walked under both rules, and one assigned there before a summary that moves away is that boundary's
+    value under the newer rule; the review of 2026-11-12 found the candidate walk alone missed it). Line numbers are record
+    indexes only when every line before the cut is a record, which the file's pre-cut line count against the document's
+    record count proves, once the bytes hold no bare CR (the reader splits a line there too, so a blank line and a line of
+    two records would keep the count and shift the indexes). The derivation is saved in the document's sidecar (with
+    `persist`, the restore's call, made under the leaf's writer key lock) against the document file's stat and each lineage
+    file's inode and scanned bytes, so the read is paid once per document, not at every boot until the next write replaces
+    it. The older assignment is replayed over the summaries and every assignment in the document's carry
+    must be one of it (the carry may hold FEWER: a document written before the parent-link rule of 2026-09-19 left a
+    transcript's first summary unassigned). Returns the assignment, or None when it cannot be established exactly (a line
+    count that disagrees, a line naming the key that the scan could not decode, a row whose line is another record's, a
+    carry the replay contradicts, a window that may change which records are replays): the restore then refuses the
+    document."""
+    rows = doc["records"]
+    key = (os.path.realpath(str(leaf_path)), doc.get("t"), int(((doc["files"].get(Path(leaf_path).stem) or {}).get("cut") or [0])[0]))
+    with _ASM_CKPT_LOCK:
+        hit = _ASM_SUMOWNER_MEMO.get(key)
+    if hit is not None:
+        return dict(hit)
+    hit = _asm_sumowner_saved(doc, leaf_path)
+    if hit is not None:
+        _asm_stat("restore:summaryOwnerSaved")             # the derivation an earlier process saved beside the document
+        with _ASM_CKPT_LOCK:
+            _ASM_SUMOWNER_MEMO[key] = dict(hit)
+        return hit
+    carry = dict(carry if carry is not None else ((_carry_decode(doc["carry"]).get("summaries")) or {}))   # the restore's own decode
+    at = {r[0]: i for i, r in enumerate(rows)}
+    kept = [i for i, r in enumerate(rows) if r[1] in ("a", "b", "e")]
+    bounds = sorted((rows[i][5] or 0, rows[i][4], i) for i in kept if rows[i][3] == "compact_boundary")   # chrono: (stamp, seq)
+    if not bounds:
+        return carry
+    srcs = _source_files(doc["files"])
+    fsids = list(doc.get("fsids") or [])
+    lines_of = {}                                          # file index -> {line number: record} of the lines naming the key
+    for fi, fsid in enumerate(fsids):
+        f, path = doc["files"].get(fsid) or {}, srcs.get(fsid)
+        if path is None:
+            return None
+        end = int(f["size"]) if f.get("skip") else int((f.get("cut") or [0])[0])
+        try:
+            hits, n_lines, bare_cr, undecoded = _asm_scan_summary_lines(path, end)
+        except OSError:
+            return None
+        if bare_cr or undecoded or n_lines != int(f.get("pre") or 0):
+            return None                                    # a bare CR, or a blank or undecodable line, before the cut: a line
+        #                                                    number is not a record index there; or a line naming the key that
+        #                                                    the scan could not decode, whatever the count says
+        lines_of[fi] = hits
+    found = []                                             # (stamp, seq, row index, structural owner uuid, text)
+    for i in kept:
+        if rows[i][2] != "u":
+            continue
+        rec = lines_of.get(rows[i][6], {}).get(rows[i][7])
+        if rec is None:
+            continue
+        if not isinstance(rec, dict) or rec.get("uuid") != rows[i][0]:
+            return None                                    # the line at the row's index is another record's
+        if rec.get("type") != "user" or rec.get("isCompactSummary") is not True:
+            continue
+        own, p, hops = None, rows[i][9], 0                 # the attachment chain, as FileAdapter._summary_owner walks it
+        while p is not None and hops < 256:
+            j = at.get(p)
+            if j is None:
+                break
+            if rows[j][3] == "compact_boundary":
+                own = rows[j][0]
+                break
+            if rows[j][2] != "t":
+                break
+            p, hops = rows[j][9], hops + 1
+        stext = _text_of(_content(rec.get("message")))
+        found.append((rows[i][5] or 0, rows[i][4], i, own, _summary_capped(stext) if stext else None))
+    found.sort()
+    par = lambda i: at.get(rows[i][9])
+    old_owner = lambda i, own_new, last: rows[i][9] if (par(i) is not None and rows[par(i)][3] == "compact_boundary") else last
+    new_owner = lambda i, own_new, last: own_new if own_new is not None else old_owner(i, own_new, last)
+
+    def replay(owner_of):
+        out, owners, bi, last = {}, [], 0, None
+        for ts_, sq_, i, own_new, text in found:
+            while bi < len(bounds) and (bounds[bi][0], bounds[bi][1]) < (ts_, sq_):
+                last = rows[bounds[bi][2]][0]
+                bi += 1
+            own = owner_of(i, own_new, last)
+            owners.append(own)
+            if own and text:
+                out[own] = text
+        return out, owners
+    older, old_owners = replay(old_owner)
+    if any(older.get(b) != v for b, v in carry.items()):
+        return None                                        # an assignment the writer carried that the summaries do not make
+    newer, new_owners = replay(new_owner)
+    # A summary whose owner changed changes whether the restore window opens there when exactly one of the two owners
+    # arms it (none: the older rule found no owner for a transcript's first compaction; or an adopted boundary, which never
+    # arms), and the window decides which records after it are replays. The rows cannot say which records the window would
+    # drop, so such a summary must be followed, in the walk's order over the kept rows, by an assistant record before any
+    # other user record and before the cut; otherwise no exact derivation
+    adopted = set()                                        # a live manual /compact's boundary: its atom row carries its emit `seq`
+    rows_of = _asm_boundary_rows(doc, index, prefix)
+    for b in bounds:
+        k_ = (rows_of.get(rows[b[2]][0]) or (None,))[0]
+        if k_ is not None and "seq" in (index._row(k_) if index is not None else json.loads(doc["atoms"][k_])):
+            adopted.add(rows[b[2]][0])
+    arms = lambda own: bool(own) and own not in adopted
+    moved_rows = [f_[2] for f_, o_, n_ in zip(found, old_owners, new_owners) if arms(o_) != arms(n_)]
+    if moved_rows:
+        summary_rows = {f_[2] for f_ in found}
+        ck = lambda i: (rows[i][5] or 0, rows[i][4])
+        for i in moved_rows:
+            k_ = ck(i)
+            reply = min((ck(j) for j in kept if rows[j][2] == "a" and ck(j) > k_), default=None)
+            if reply is None or any(k_ < ck(j) < reply for j in kept if rows[j][2] == "u" and j not in summary_rows):
+                return None
+    with _ASM_CKPT_LOCK:
+        if len(_ASM_SUMOWNER_MEMO) >= _ASM_SUMOWNER_MEMO_MAX:
+            _ASM_SUMOWNER_MEMO.pop(next(iter(_ASM_SUMOWNER_MEMO)))
+        _ASM_SUMOWNER_MEMO[key] = dict(newer)
+    if persist:
+        _asm_sumowner_save(doc, leaf_path, newer)
+    return newer
+
+
+def _summary_capped(stext):
+    """A compaction summary's text as a boundary atom carries it: capped for transport (SUMMARY_CAP)."""
+    return stext[:SUMMARY_CAP] + ("\n\n…(summary truncated)" if len(stext) > SUMMARY_CAP else "")
 
 
 def _tree_identity_of_doc(turns_doc, identity):
@@ -8850,7 +9130,8 @@ _ASM_LAST_WRITE_CUT = {}          # realpath -> the leaf's cut offset of the doc
 #                                   the refusal road reads it after its offered rewrite to tell a rewrite that MOVED the cut (a new tail,
 #                                   proven afresh at the next restore) from one that reproduced the refused cut (marked; stage one b)
 _ASM_CHAIN_REFUSED_PATHS = {}     # realpath -> why the chain proof refused the standing document at this parse ("unproven": the
-#                                   missing bit; "shape": the tail's own shape): parse_session
+#                                   missing bit; "shape": the tail's own shape; "older": a document before `sumOwner` whose summaries
+#                                   could not be derived again exactly, 2026-11-12; only "shape" marks the cut): parse_session
 #                                   rewrites the document from the whole parse that follows, then and there (the writer has the
 #                                   resolved graph in hand and the refusal is the event), never leaving it to the entry's next
 #                                   quiescence drop, which a quiet session reaches slowly or never (T402 follow-up: sixteen of
@@ -9632,7 +9913,9 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                          "skill_use_ids": sorted(ad.skill_use_ids), "src_tool_links": sorted(ad.src_tool_links),
                          "dangling": sorted(ad.dangling)},
                "carry": _carry_encode(st), "identity": identity, "t": time.time(), "tipChildless": bool(tip_childless),
-               "bnd": bnd_rows}                           # optional (2026-11-12): a document without it is scanned at its restore
+               "bnd": bnd_rows,                           # optional (2026-11-12): a document without it is scanned at its restore
+               "sumOwner": 1}                             # summaries keyed on their boundary's attachment chain (2026-11-12): a
+        #                                                   document without it is corrected at its restore (_asm_doc_summaries_by_owner)
         _pst = entry.get("st") or {}
         doc["postalWait"] = bool(_pst.get("postal_miss_rec") or _pst.get("postal_miss_att"))   # a postal author waits on the log
         #                                               (the test the re-seat mark below makes): the document carries the provisional
@@ -10734,10 +11017,13 @@ def _seed_from_doc(doc):
             "dangling": set(doc["gates"]["dangling"]), "seq_ts": doc.get("seqTs"), "last_ts": doc.get("lastTs"), "cuts": {},
             "file_ends": {fsid: (f.get("first"), f.get("last")) for fsid, f in doc["files"].items()}}
     landed = set()
-    for row in doc["records"]:
+    seed["att_parent"] = {}                               # an attachment row's raw parent: the summary-owner walk crosses the
+    for row in doc["records"]:                            #  cut through them (FileAdapter._summary_owner, 2026-11-12)
         u, v, tc, sub = row[0], row[1], row[2], row[3]
         seed["verdicts"][u] = verdict_of.get(v, "broken")
         seed["types"][u] = (type_of.get(tc), sub)
+        if tc == "t":
+            seed["att_parent"][u] = row[9]
         if row[8]:
             landed.add(u)
     for fsid, f in doc["files"].items():
@@ -11029,6 +11315,21 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
             with _ASM_CKPT_LOCK:
                 _ASM_CHAIN_REFUSED_PATHS[rp_] = ("shape", cut_off_)
             return None
+        if not doc.get("sumOwner"):
+            # A document written before summaries were keyed on their boundary's attachment chain (2026-11-12): its carry
+            # and its frozen boundary atoms hold the older assignment, which put most summaries the CLI writes now on the
+            # previous compaction's card. The pre-cut assignment is derived again and the pre-pass continues from it; every
+            # pre-cut boundary atom is then held to the result below, as for any document: corrected on its restore, never
+            # refused for it (a version bump would have parsed 163 of the live host's 232 sessions whole)
+            fixed = _asm_doc_summaries_by_owner(doc, leaf_path, index, prefix, st["summaries"], persist=True)
+            if fixed is None:
+                _asm_stat("restore:summaryOwnerRefused")   # the backstop: no exact derivation (see the helper); the whole parse
+                if index is not None:                      #  serves and offers its document, written with `sumOwner`, which
+                    index.release()                        #  the next restore takes: the refusal is the document's age, not
+                with _ASM_CKPT_LOCK:                       #  the tail's shape, so the same cut is not marked (as for a
+                    _ASM_CHAIN_REFUSED_PATHS[rp_] = ("older", cut_off_)   # document without the childless bit)
+                return None
+            st["summaries"] = dict(fixed)
         ad._prepass(order, st)
         # Every pre-cut boundary atom is held to the summary the pass leaves it (review of 2026-11-12). A summary whose parent
         # is no boundary belongs to the last boundary walked, and the CLI now hangs its summary under attachments and stamps
