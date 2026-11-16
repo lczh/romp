@@ -4268,6 +4268,21 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
     if cut is None:                        # a pin answered and read nothing: the live cut is ours to read
         cut = _pending_cut(fsid)
     key = (pair[0], cut) if pair is not None else None   # the frame's pair shape; sdk_human is the slot's tree pick (stage 2)
+    held = _PARSE_FAILED.get((fsid, leaf)) if _PARSE_FAILED else None
+    if held is not None:
+        # a read of these files failed (below). It is not tried again while nothing says it could go differently: the same
+        # key and the same change stamp. Either moving, or a page asking (parse_forget_failed), reads again.
+        if key is not None and held[0] == key and held[1] == _change_stamp(files):
+            if stats is not None:
+                stats["miss"] = False                  # nothing was read: nothing for a caller to book
+                stats["key"] = key
+            if asm_mode_out is not None:
+                asm_mode_out.append("full")
+            if fr is not None:
+                with _frame_lock:
+                    return _frame_pin_parse(fr, fsid, held[2], key)
+            return held[2]
+        _PARSE_FAILED.pop((fsid, leaf), None)
     hit = _parse_slot(fsid, cut, leaf, None if sdk_human is None else bool(sdk_human))
     if key is not None and hit and hit[0] == key:
         _PARSE_HITS[0] += 1
@@ -4280,20 +4295,63 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
             with _frame_lock:              #  return unpinned, so a session already in the cache froze nothing
                 return _frame_pin_parse(fr, fsid, hit[1], key)   # and a mid-pass append reached a later stage
         return hit[1]                      #  only - the two-worlds shape the frame exists to prevent
-    session = em.parse_session(files[0], rompuuid=fsid, candidate_files=list(files),
-                               states=str(states), postal_log=str(MESSAGES), now=now,
-                               sdk_human=(human := bool(sdk_human) if sdk_human is not None else bool(_sdk_owned(fsid))),   # the caller's answer, else the judges', read on a miss
-                               leaf_override=cut or None, asm_mode_out=(_am := asm_mode_out if asm_mode_out is not None else []))
+    with em.read_failures() as _fails:
+        session = em.parse_session(files[0], rompuuid=fsid, candidate_files=list(files),
+                                   states=str(states), postal_log=str(MESSAGES), now=now,
+                                   sdk_human=(human := bool(sdk_human) if sdk_human is not None else bool(_sdk_owned(fsid))),   # the caller's answer, else the judges', read on a miss
+                                   leaf_override=cut or None, asm_mode_out=(_am := asm_mode_out if asm_mode_out is not None else []))
     if stats is not None:
         stats["miss"] = True
         stats["key"] = key                             # the key the fresh tree is stored under (None when a stat failed)
     _PARSE_MISSES[0] += 1                                  # a cold parse (T323: /perf parses)
-    if key is not None:
+    # A transcript that is there and could not be READ (2026-11-16): the readers answer it with no records, so the tree is
+    # an empty session like a new one's. Stored in the shared store under the file's mtime and size it stood for every
+    # later ask at that stat: a file readable again with the same bytes went on parsing as empty until it next changed.
+    # It is kept apart instead (_PARSE_FAILED), marked with why it is empty (`_readFailed`) and what the read had pulled
+    # (`_readPulled`), for a caller that must not take it for the session's word (the kernel's chat build), and under a
+    # finer stamp, so it is tried again when something says it could go differently and not on every ask: a read that
+    # fails near the end of a large file pulled the whole file again each time.
+    _bad = [e for f, e in _fails if f in {str(x) for x in files}]
+    if _bad and isinstance(session, dict):
+        session["_readFailed"] = getattr(_bad[0], "strerror", None) or type(_bad[0]).__name__
+        session["_readPulled"] = sum(int(getattr(e, "pulled", 0) or 0) for e in _bad)
+        if key is not None:
+            _PARSE_FAILED[(fsid, leaf)] = (key, _change_stamp(files), session)
+    elif key is not None:
         _parse_store(fsid, cut, key, session, leaf, human, (_am[-1] if _am else "full"))   # LRU, never a wholesale clear
     if fr is not None:                     # pin under the frame the KEY went into (never a re-read _frame: a
         with _frame_lock:                  #  parse spanning a pass boundary must not land keyless in the next
             return _frame_pin_parse(fr, fsid, session, key)   # frame); a concurrent first toucher wins
     return session
+
+
+# The parses whose read FAILED, kept apart from the store: (fsid, leaf) -> (the key, the files' change stamp, the empty tree
+# marked _readFailed). One entry per session whose transcript cannot be read; dropped by the read that succeeds, by a stat
+# that moved, and by parse_forget_failed.
+_PARSE_FAILED = {}
+
+
+def _change_stamp(files):
+    """What must move before a read of `files` that failed is tried again: each file's mtime, size, inode and INODE CHANGE
+    TIME. The store's key is mtime and size, the facts a file's bytes change with; a file that becomes readable with the
+    same bytes moves neither, but what made it unreadable usually moves the change time when it is undone (permissions
+    restored, a rename back into place). A file that cannot be stat'ed stamps as its error."""
+    out = []
+    for f in sorted(str(x) for x in files):
+        try:
+            st = os.stat(f)
+            out.append((st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns))
+        except OSError as e:
+            out.append((type(e).__name__, e.errno))
+    return tuple(out)
+
+
+def parse_forget_failed(fsid):
+    """A page asked for session `fsid` (it opened the tab, or asked for it whole): a read of its transcript that failed is
+    tried again at the next parse, whatever the file's stat says. This is the retry for a failure that heals with nothing
+    on disk moving (a device error on network storage); bounded by the page's own acts, never the pusher's cycle."""
+    for k in [k for k in list(_PARSE_FAILED) if k[0] == fsid]:
+        _PARSE_FAILED.pop(k, None)
 
 
 def parsed_session_peek(fsid, files, states=None, sdk_human=None):

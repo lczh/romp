@@ -42028,21 +42028,28 @@ def _fold_tasks(session, sid=None):
     memo (a direct call)."""
     prev = _task_fold_memo.get(sid) if sid is not None else None
     cur, parts = {}, []
-    for turn in session["turns"]:
-        atoms = turn["atoms"]
-        fp = _chat_turn_fp(turn)
-        ent = prev.get(id(atoms)) if prev else None
-        if ent is not None and ent[0] is atoms and ent[1] == fp:
-            _chat_memo_bump(_task_fold_stats, "hit")
-            part = ent[2]
-        elif turn.get("pre") and not any(n in ("TaskCreate", "TaskUpdate") for _i, n in turn.get("tools") or ()):
-            part = ({}, set(), [])                       # a restored pre-cut turn with no task call: nothing built (stage 4c)
-        else:
-            _chat_memo_bump(_task_fold_stats, "miss")
-            part = _fold_tasks_turn(atoms)
-        if sid is not None:
-            cur[id(atoms)] = (atoms, fp, part)
-        parts.append(part)
+    n_hit = n_miss = 0                                # counted here and booked ONCE below (2026-11-16): one bump per turn took
+    try:                                              #  the chat fold's lock once per turn, thousands of times a build of a long
+        for turn in session["turns"]:                 #  session, and with several threads building, each wait on it was a
+            atoms = turn["atoms"]                     #  handover of the interpreter (a quarter of the samples of the threads
+            fp = _chat_turn_fp(turn)                  #  that build an ask's tab stood here). The counts are the same.
+            ent = prev.get(id(atoms)) if prev else None
+            if ent is not None and ent[0] is atoms and ent[1] == fp:
+                n_hit += 1
+                part = ent[2]
+            elif turn.get("pre") and not any(n in ("TaskCreate", "TaskUpdate") for _i, n in turn.get("tools") or ()):
+                part = ({}, set(), [])                   # a restored pre-cut turn with no task call: nothing built (stage 4c)
+            else:
+                n_miss += 1
+                part = _fold_tasks_turn(atoms)
+            if sid is not None:
+                cur[id(atoms)] = (atoms, fp, part)
+            parts.append(part)
+    finally:                                          # a scan that raised still books the turns it counted, as the per-turn bumps did
+        if n_hit:
+            _chat_memo_bump(_task_fold_stats, "hit", n_hit)
+        if n_miss:
+            _chat_memo_bump(_task_fold_stats, "miss", n_miss)
     if sid is not None:
         _task_fold_memo[sid] = cur                   # only this session's current turns: the memo shrinks with a rewrite
     out = {}                                          # tool_use_id → result content (a TaskCreate's carries 'Task #N')
@@ -44468,7 +44475,10 @@ def _parse(path, sid, now):
             # parse cost only on a road that walked it from the first record (2026-09-24: a fold reads the appended bytes,
             # a serve or a restore none of the pre-cut transcript, and booking the leaf at every miss read them as whole)
             size = 0
-            if road in _PerfStats.WHOLE_ROADS:
+            if isinstance(session, dict) and session.get("_readFailed"):
+                size = int(session.get("_readPulled") or 0)   # a read that failed (2026-11-16): what it pulled before it did,
+                #                                               nothing for a file that would not open; never the file's size
+            elif road in _PerfStats.WHOLE_ROADS:
                 try:
                     size = os.stat(path).st_size
                 except OSError:
@@ -50732,6 +50742,12 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     else:
         parsed = _parse(sess["path"], sid, now) if thread_cut is None or path_override else \
             _thread_parse(sid, sess["path"], thread_cut[0], thread_cut[1], now)   # a thread's popover: its own records alone
+        if getattr(_BUILD_READ_STRICT, "on", False) and not path_override and thread_cut is None:
+            # the push roads' builds fail HERE when the transcript could not be read (_transcript_read_failed): a build that
+            # went on returned whatever live cards the session carries, with no transcript under them
+            _lost = _transcript_read_failed(sess["path"], parsed, sid)
+            if _lost:
+                raise TranscriptUnreadable(_lost)
     tm0 = live_map.get(sid)
     compacting_now = (False if _dark else
                       _compacting(sid, (tm0 or {}).get("state", ""), parsed, now, (tm0 or {}).get("since")))
@@ -65175,25 +65191,31 @@ def _repair_warm(sid):
 
 
 def _repair_ask(handler, client, sid):
+    jd.parse_forget_failed(sid)                       # the page asks: a read of its transcript that failed is tried again (2026-11-16)
     if client.get("lane") is None:
         handler._push_one(client, only={sid})
         return
     stage = getattr(_STAGE_TL, "name", None) or "ws-lane"   # the lane's own mark, so the build lands where it did (T401)
     one = None
     with _client_lock(client):
-        r = client.setdefault("repairs", {"pending": [], "running": 0, "building": set()})
+        # `running` counts the ordinary threads, which serve every waiting ask until none is left; `oneShot` the thread
+        # started for the tab on screen beside two of them, which serves that one ask. Counted apart (2026-11-16, the
+        # review of the change that added it): counted as one of `running`, a one-shot alone made an ask for another tab
+        # start nothing, and it serves only its own, so that ask waited for the pusher's cycle and stayed listed here
+        r = client.setdefault("repairs", {"pending": [], "running": 0, "building": set(), "oneShot": 0})
         if sid not in r["pending"]:
             r["pending"].append(sid)                  # an ask for a tab already waiting is answered by that one build
         on_screen = str(client.get("active") or "") == sid
         start = r["running"] == 0 or (r["running"] == 1 and on_screen and sid not in r["building"])
-        third = not start and on_screen and sid not in r["building"] and 2 <= r["running"] < REPAIR_BUILDS_MAX
+        third = (not start and on_screen and sid not in r["building"]
+                 and r["running"] + r.get("oneShot", 0) < REPAIR_BUILDS_MAX)
         if start:
             r["running"] += 1
     if third and _repair_warm(sid):                   # read with no lock held; then the state is read again
         with _client_lock(client):
-            if (r["running"] < REPAIR_BUILDS_MAX and sid in r["pending"] and sid not in r["building"]
+            if (r["running"] + r.get("oneShot", 0) < REPAIR_BUILDS_MAX and sid in r["pending"] and sid not in r["building"]
                     and str(client.get("active") or "") == sid):
-                r["running"] += 1
+                r["oneShot"] = r.get("oneShot", 0) + 1
                 start, one = True, sid
     if start:
         threading.Thread(target=_stage_marked(stage)(_repair_worker), args=(handler, client, one), daemon=True, name="ws-repair").start()
@@ -65208,7 +65230,7 @@ def _repair_worker(handler, client, one=None):
         with _client_lock(client):
             pend = [x for x in r["pending"] if x not in r["building"] and (one is None or x == one)]
             if not pend or not client.get("alive", True):
-                r["running"] -= 1
+                r["oneShot" if one is not None else "running"] -= 1
                 return
             act = str(client.get("active") or "")
             sid = act if act in pend else pend[0]
@@ -72412,6 +72434,56 @@ def _note_chat_divergence(sid, name, chat_state, row_state, now):
         pass
 
 
+class TranscriptUnreadable(Exception):
+    """The chat build's read of the session's transcript failed (_transcript_read_failed): the build stops at the read."""
+
+
+# A FAILED READ FAILS THE BUILD (2026-11-16, the final review of the unwatched tabs). The readers answer a transcript they
+# cannot read as they answer an absent one, with no records, and the build went on: with nothing else to show it was an
+# empty build, which the empty-build guard holds back from a page that has content (_empty_build_regresses); with a live
+# card to show (an API-error card, a queued message) it was a build of that card and the head card, which no guard saw,
+# and the page's transcript was replaced by them, 251 events by 2 cards, for a watched tab and for a tab at rest alike.
+# The two push roads now build under this flag, and build_session stops at the read: nothing is sent, the page keeps
+# what it holds, and the episode is said once (_chat_build_fault). Thread-confined and set around the one call, so no
+# other reader of build_session (a history page, an episode render, a subagent's view) changes.
+_BUILD_READ_STRICT = threading.local()
+
+
+def _transcript_read_failed(path, parsed, sid=None):
+    """Why the display parse `parsed` of the transcript at `path` is not the session's word, or None. Two facts, each read
+    where it is recorded: the parse says a read of a file that exists raised (`_readFailed`, jd.parsed_session); or the
+    file is not there and the kernel holds a parse WITH turns of this very file, so it was read with content and is gone
+    (moved aside, a mount that dropped). A file that was never read is a session that has not written yet, and a /clear
+    or a resume names a NEW file: neither is a failure, and their display (the head cards, the clear's boundary card, a
+    queued message) is built as before. Nor is a session being MOVED to another folder (the review of the change that
+    added this): the CLI renames the transcript and the session's record is written just after, so for a moment the old
+    path is gone and a parse of it is held. The registry says so: `cwdPending` while the move is under way, and once the
+    record is written it names the transcript's new place, which the path in hand, taken before, is not."""
+    if not isinstance(parsed, dict):
+        return None
+    why = parsed.get("_readFailed")
+    if why:
+        return "its transcript cannot be read (%s)" % why
+    if parsed.get("turns") or not path or os.path.exists(str(path)):
+        return None
+    try:
+        ent = jd.parse_entry_for_leaf(str(path))
+    except Exception:
+        ent = None
+    if not (ent is not None and isinstance(ent[1], dict) and ent[1].get("turns")):
+        return None
+    if sid:
+        try:
+            if _thread_reg(str(sid)).get("cwdPending"):
+                return None                               # a move in progress: the file is on its way to its new folder
+            row = _session_row(str(sid))
+            if row and row.get("path") and str(row["path"]) != str(path):
+                return None                               # the record names another file now: this path is the one before
+        except Exception:
+            pass
+    return "its transcript is missing"
+
+
 _chat_build_faults = {}   # sid -> the fault text of its CURRENT chat-build episode; ONE stderr traceback + bell row per episode
 _chat_build_faults_lock = threading.Lock()   # the pusher and a connect push both run _push, on their own threads
 
@@ -72430,6 +72502,15 @@ def _chat_build_fault(s, exc):
         if _chat_build_faults.get(sid) == text:       # the same session must not both speak
             return
         _chat_build_faults[sid] = text
+    if isinstance(exc, TranscriptUnreadable):         # a read that failed, not a fault in the build: one line, in plain words
+        sys.stderr.write("push build: chat %s: %s (%s); nothing is sent for it until a read succeeds\n"
+                         % (sid[:8], exc, s.get("path") or "no path"))
+        try:
+            _sync_notice("chat: %s is not updating: %s. Its tab keeps what it shows until a read succeeds"
+                         % (s.get("name") or sid[:8], exc), ok=False, kind="refused")
+        except Exception:
+            pass
+        return
     sys.stderr.write("push build: chat %s: %s\n" % (sid[:8], traceback.format_exc()))
     try:
         _sync_notice("chat: the pane for %s cannot be built (%s); it keeps its last frame until a build succeeds"
@@ -72938,9 +73019,11 @@ def _push(targets, connect=False, live_map=None, only=None):
                 else:
                     _VIEW_STATS["chatBuildActive" if is_active else "chatBuildBg"] += 1
                     _t0 = time.monotonic()
+                    _BUILD_READ_STRICT.on = True         # a read that fails stops this build (TranscriptUnreadable)
                     try:
                         m = build_session(s["sid"], now, live_map)
                     except Exception as e:
+                        _BUILD_READ_STRICT.on = False
                         # One session's failed chat build costs that session's frame this cycle, not every
                         # client's whole push: the cycle-level catch below ("push build:") would return
                         # before the feed and the timeline were built, and a build that fails the same way
@@ -72949,9 +73032,12 @@ def _push(targets, connect=False, live_map=None, only=None):
                         # that stopped updating is not a silent degrade (review find, 2026-09-08).
                         _chat_build_fault(s, e)
                         _chat_dep_scope.deps = None      # the failed build's record is nobody's
+                        if isinstance(e, TranscriptUnreadable) and hit is not None:
+                            chat_sessions.append(hit[1])     # the Outline row stays, from the cached build's ledger
                         if _claimed:
                             _chat_inflight_done(s["sid"])   # the waiters build their own, as before this change
                         continue
+                    _BUILD_READ_STRICT.on = False
                     _chat_build_ok(s["sid"])             # a build that succeeds ends its fault episode
                     # The full serialization is LAZY (the 2026-08-10 CPU fix, round two): steady state
                     # sends only chatTail suffixes, so an eager json.dumps of the WHOLE payload — multi-MB
@@ -73839,9 +73925,14 @@ def _push_session_now(sid):
         # this road's faces.
         _seen = _prev_chat_events.get(sid)
         _t0 = time.monotonic()
+        _BUILD_READ_STRICT.on = True                 # a read that fails stops this build, as the pusher's
         try:
             m = build_session(sid, now, live_map)
+        except TranscriptUnreadable as e:            # nothing is sent; said once per episode, as the pusher says it
+            _chat_build_fault({"sid": sid, "name": _name_of(sid) or sid[:8], "path": _path}, e)
+            return
         finally:
+            _BUILD_READ_STRICT.on = False
             _chat_dep_scope.deps = None              # a targeted push caches nothing: its record is nobody's, and a
         _dt = time.monotonic() - _t0                 # later reader on this thread must not append to it
         try:
@@ -92699,6 +92790,7 @@ class Handler(BaseHTTPRequestHandler):
                 _relay_active_chat(client, msg.get("id"), msg.get("nonce"))   # …and the window's feed learns which session is focused (T347), the announcement number echoed (T416)
             if msg.get("id"):
                 em.asm_rebuild_prefer(str(msg["id"]))   # …and its document, if it waits for a rebuild, is rebuilt first (2026-11-12)
+                jd.parse_forget_failed(str(msg["id"]))  # …and a read of its transcript that failed is tried again (2026-11-16)
             return
         if msg and msg.get("type") == "needSlot" and msg.get("slot") in _DELTA_SLOTS:
             # The shim could not apply a view delta (its base revision did not match what it holds — a

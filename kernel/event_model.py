@@ -2837,7 +2837,11 @@ def _scan_jsonl_stream(fh, base_offset, offsets=None, limit=None, crc=None):
     consumed = 0                                          # bytes of complete lines: what the next read resumes after
     remaining = limit
     while True:
-        line = fh.readline() if remaining is None else fh.readline(remaining)   # the bound is in the read itself: a growing
+        try:
+            line = fh.readline() if remaining is None else fh.readline(remaining)   # the bound is in the read itself: a growing
+        except OSError as e:                              # a read that failed AFTER bytes were pulled: what this scan had read
+            e.pulled = getattr(e, "pulled", 0) + seen     #  rides the error, so the reader's caller books those bytes and not
+            raise                                         #  the file's size (_note_read_fail, 2026-11-16)
         if not line:                                                            #  line with no newline yet cannot be pulled past
             break                                                               #  the captured end, nor keep the reader busy there
         if not line.endswith(b"\n"):
@@ -2929,6 +2933,36 @@ def _read_jsonl_incremental(path, on_fail=None):
 
 
 _TAIL_OK = threading.local()      # .flag: the calling fold accepts a tail entry (set by fold_records around its read)
+_READ_FAILS = threading.local()   # .log: the list this thread collects its failed reads into (read_failures), or None
+
+
+class read_failures:
+    """`with read_failures() as fails:` collects, for the calling thread, every reader read inside the block that failed on
+    a file that EXISTS (a stat, an open or a read that raised any OSError but FileNotFoundError), as (path, error) pairs.
+    The readers answer such a read as they answer an absent file, with no records, and a parse built over that answer is
+    an empty tree like any other: the caller that must tell a transcript it could not read from one with nothing in it
+    asks here (jd.parsed_session, 2026-11-16: the shared store kept the empty tree under the file's stat, so a file that
+    became readable again with the same bytes went on parsing as empty until it next changed). Nests: the inner block
+    collects its own."""
+    def __enter__(self):
+        self._prev = getattr(_READ_FAILS, "log", None)
+        self.log = _READ_FAILS.log = []
+        return self.log
+
+    def __exit__(self, *exc):
+        _READ_FAILS.log = self._prev
+        return False
+
+
+def _note_read_fail(path, e):
+    """A reader read of `path` raised `e`: the bytes it had pulled before it did (`e.pulled`, _scan_jsonl_stream) count like
+    every reader byte, and the failure joins the calling thread's collection when one is open (read_failures)."""
+    n = int(getattr(e, "pulled", 0) or 0)
+    if n:
+        _count_read(path, n)
+    log = getattr(_READ_FAILS, "log", None)
+    if log is not None and not isinstance(e, FileNotFoundError):
+        log.append((str(path), e))
 _READER_TRACE = bool(os.environ.get("ROMP_READER_TRACE"))   # one stderr line per read that pulled bytes (a diagnosis aid)
 _WHOLE_READ_KINDS = ("zero", "rewrite", "guard", "shrunk", "upgrade")   # the reader's kinds that pull a file whole (T384's counter)
 _READ_STAGE_FN = [None]           # T401: the kernel's answer to "which stage is the calling thread in" (its stage mark: a job or push
@@ -3021,6 +3055,7 @@ def _read_jsonl_entry(path, on_fail=None, tail_ok=False, tail_from=None):
     except OSError as e:
         with _JSONL_CACHE_LOCK:
             _cache_pop_locked(path)
+        _note_read_fail(path, e)
         if on_fail is not None and not isinstance(e, FileNotFoundError):
             on_fail(e)
         return None
@@ -3056,6 +3091,7 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
     except OSError as e:
         with _JSONL_CACHE_LOCK:
             _cache_pop_locked(path)
+        _note_read_fail(path, e)
         if on_fail is not None and not isinstance(e, FileNotFoundError):
             on_fail(e)
         return None
@@ -3173,6 +3209,7 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
     except OSError as e:
         with _JSONL_CACHE_LOCK:
             _cache_pop_locked(path)
+        _note_read_fail(path, e)
         if on_fail is not None and not isinstance(e, FileNotFoundError):
             on_fail(e)
         return None
