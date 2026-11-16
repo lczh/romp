@@ -92433,7 +92433,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if msg and msg.get("type") == "activeTab":
             client["active"] = msg.get("id")   # tab switch → next push builds the now-active tab first
-            _note_tab_shown(client, msg.get("id"))   # …and it is the newest of the tabs this page watches (2026-11-15)
+            _note_tab_shown(client, msg.get("id"))
             if msg.get("id"):
                 _release_skeleton(client, str(msg["id"]))   # a skeleton tab clicked: its full rides that push (2026-09-07)
             _pusher_wake.set()                 # …and that push starts when the in-flight cycle ends, not
