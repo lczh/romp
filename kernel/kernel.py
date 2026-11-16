@@ -65191,6 +65191,7 @@ def _repair_warm(sid):
 
 
 def _repair_ask(handler, client, sid):
+    jd.parse_forget_failed(sid)                       # the page asks: a read of its transcript that failed is tried again (2026-11-16)
     if client.get("lane") is None:
         handler._push_one(client, only={sid})
         return
@@ -92814,7 +92815,6 @@ class Handler(BaseHTTPRequestHandler):
             # ask inside its window and, with the page's awaitingFull still set, the tab then discarded every later delta
             # and never re-asked until a reconnect (round two MEDIUM). A legit repeat gets the frame again.
             _client_reset_chat_sid(client, sid)               # …and drop the dedup slot (and a stale held-tail key), so the full send lands
-            jd.parse_forget_failed(sid)                       # the page asks: a read that failed is tried again (2026-11-16)
             if msg.get("heldTailFirst"):
                 # the page's tail run FIRST key for THIS ask (2026-09-19), stored AFTER the reset cleared any stale one:
                 # the repair full below serves from it (a superset) or, if the turns are gone, sets them aside via `rebased`.
