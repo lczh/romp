@@ -7,10 +7,15 @@ arrive meanwhile wait in the listen queue. With socketserver's default backlog o
 of redials from one dashboard, and the system dropped every connection past it: the browser's dial hung and was retried
 on the system's own schedule, long after the stall had ended. _LoopbackServer sets request_queue_size to 128.
 
-Pinned three ways: the class attribute (with the stock class's 5 as the control); the value listen() is actually called
-with when the server is built (recorded, the stock class's call as the control); and, on Linux, the behavior itself: a
-burst of dials at a server that accepts nothing completes every handshake against the kernel's class and stalls past
-the backlog against the stock class. Synthetic: ephemeral loopback servers that never serve a request.
+Pinned three ways: the class attribute, set on the kernel's class itself (with a backlog of 5 as the control); the value
+listen() is actually called with when the server is built (recorded, a server of 5's call as the control); and, on
+Linux, the behavior itself: a burst of dials at a server that accepts nothing completes every handshake against the
+kernel's class and stalls past the backlog against a server of 5. Synthetic: ephemeral loopback servers that never
+serve a request.
+
+The control is a class that asks for 5 by name (_Five), not the stock class (2026-11-16): 5 is socketserver's default
+through 3.14, and 3.15 asks for the system's maximum instead (socket.SOMAXCONN), so there the stock server held the
+whole burst and every control here failed, the kernel's class unchanged.
 """
 import os
 import select
@@ -36,12 +41,17 @@ load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
 load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 km = load_source("romp_kernel_listen_backlog", os.path.join(BIN, "romp-kernel"))
 
-BURST = 24   # more than the stock backlog lets through (5 + 1 on Linux), well under 128
+BURST = 24   # more than a backlog of 5 lets through (5 + 1 on Linux), well under 128
 
 
 class _Quiet(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+
+class _Five(ThreadingHTTPServer):
+    """The control: the stock server with the backlog socketserver gave it through 3.14, asked for by name (the header)."""
+    request_queue_size = 5
 
 
 def _build(cls):
@@ -90,14 +100,15 @@ def _handshakes_completed(port, n, deadline_s=2.0):
 
 
 class ListenBacklog(unittest.TestCase):
-    def test_the_class_asks_for_128_where_the_stock_class_asks_for_5(self):
-        self.assertEqual(ThreadingHTTPServer.request_queue_size, 5, "the control: socketserver's default")
-        self.assertEqual(km._LoopbackServer.request_queue_size, 128)
+    def test_the_class_asks_for_128_itself_whatever_the_stock_class_asks_for(self):
+        self.assertEqual(vars(km._LoopbackServer).get("request_queue_size"), 128,
+                         "set on the kernel's class, not inherited: the stock default is 5 through 3.14 and the system's maximum from 3.15")
+        self.assertEqual(_Five.request_queue_size, 5, "the control asks for 5")
 
     def test_listen_is_called_with_the_backlog_when_the_server_is_built(self):
-        srv, backlogs = _build(ThreadingHTTPServer)
+        srv, backlogs = _build(_Five)
         srv.server_close()
-        self.assertEqual(backlogs, [5], "the control: the stock server listens with 5")
+        self.assertEqual(backlogs, [5], "the control: a server that asks for 5 listens with 5")
         srv, backlogs = _build(km._LoopbackServer)
         srv.server_close()
         self.assertEqual(backlogs, [128], "the kernel's server listens with 128")
@@ -110,7 +121,7 @@ class ListenBacklog(unittest.TestCase):
                     self.skipTest("somaxconn caps the backlog below the burst on this host")
         except (OSError, ValueError):
             pass
-        stock, _ = _build(ThreadingHTTPServer)
+        stock, _ = _build(_Five)
         try:
             got = _handshakes_completed(stock.server_address[1], BURST)
         finally:
