@@ -1551,8 +1551,13 @@ class LogHelpers(unittest.TestCase):
     def test_a_recursing_handler_yields_one_bounded_problem_line(self):
         be = _backend()
         s = _session(be)
-        def rec(msg, *a):
-            return rec(msg, *a)
+        # The handler calls itself with its arguments named, never as `rec(msg, *a)`: the line under test is the report of
+        # a RecursionError, and CPython 3.15.2 raises none for a function that calls itself through *args or **kwargs
+        # (default and free-threaded builds alike: such a call reached a depth of 200,000 under the limit of 1,000, where
+        # 3.10 to 3.14 stop it at the limit). Written that way, this handler recursed until the machine ran out of
+        # memory, and took the 3.15 cells' runners down with it (2026-11-16)
+        def rec(msg, a, b, c):
+            return rec(msg, a, b, c)
         s._on_message = rec
         self.assertFalse(s._handle_stream_message(_ResultMessage(), _AssistantMessage, _ResultMessage, _SystemMessage))
         probs = _problems(be)
