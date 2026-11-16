@@ -3712,7 +3712,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   record index is, the line count before the cut against the document's record
   count proving the lines are the records once the bytes hold no bare CR,
   which the reader also splits a line at; a line is decoded as the reader
-  decodes it, bad bytes replaced), every summary is assigned again before the
+  decodes it, stripped and bad bytes replaced, and one naming the key that
+  still does not decode refuses), every summary is assigned again before the
   pass, chainless ones included, with no version bump and no whole parse; the
   result is saved in the document's sidecar against the document file's stat
   and each lineage file's inode and scanned bytes, so the read is paid once

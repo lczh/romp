@@ -8136,12 +8136,15 @@ _SUMMARY_KEY = b'"isCompactSummary"'
 
 
 def _asm_scan_summary_lines(path, end):
-    """Every line of `path` before byte `end` that names isCompactSummary, decoded as the reader decodes a line (bad bytes
-    replaced; an undecodable line is no record), as {line number: record}; how many newline-ended lines lie before `end`; and
-    whether those bytes hold a bare CR, which the reader also splits a line at (bytes.splitlines). One pass in 8 MiB
-    blocks, the key, the newlines and the CRs found by the bytes methods, so only the lines naming the key are decoded;
-    counted as read."""
-    hits, n, pos, rest, cr, crlf = {}, 0, 0, b"", 0, 0
+    """Every line of `path` before byte `end` that names isCompactSummary, decoded as the reader decodes a line (stripped
+    with bytes.strip, which takes a form feed and a vertical tab at its edges as it takes a space, then bad bytes
+    replaced), as {line number: record}; how many newline-ended lines lie before `end`; whether those bytes hold a bare CR,
+    which the reader also splits a line at (bytes.splitlines); and how many lines naming the key did not decode. Such a
+    line is never skipped: the caller refuses on it (the final review of 2026-11-12: a summary line ending in a form feed
+    was a record to the reader and no hit here, so the line count agreed and the summary was dropped unseen; the count
+    proves the lines are records, not that this decode read each as the reader did). One pass in 8 MiB blocks, the key,
+    the newlines and the CRs found by the bytes methods, so only the lines naming the key are decoded; counted as read."""
+    hits, n, pos, rest, cr, crlf, undecoded = {}, 0, 0, b"", 0, 0, 0
     with open(path, "rb") as fh:
         while pos < end:
             block = fh.read(min(8 << 20, end - pos))
@@ -8157,16 +8160,16 @@ def _asm_scan_summary_lines(path, end):
                 nl += data.count(b"\n", counted, start)    # the newlines before this line, counted once across the block
                 counted = start
                 try:
-                    hits[nl] = json.loads(data[start:stop].decode("utf-8", "replace"))
-                except Exception:                          # noqa: BLE001 — as the reader: an undecodable line is no record
-                    pass
+                    hits[nl] = json.loads(data[start:stop].strip().decode("utf-8", "replace"))
+                except Exception:                          # noqa: BLE001 — a hit this decode cannot read: counted, never skipped
+                    undecoded += 1
                 j = data.find(_SUMMARY_KEY, stop, whole)
             n += data.count(b"\n", 0, whole)
             cr += data.count(b"\r", 0, whole)              # a CR pair never straddles `whole`: the block ends at its LF
             crlf += data.count(b"\r\n", 0, whole)
             rest = data[whole:]
     _count_read(str(path), pos)
-    return hits, n, cr != crlf
+    return hits, n, cr != crlf, undecoded
 
 
 def _asm_sumowner_witness(doc, leaf_path):
@@ -8217,8 +8220,12 @@ def _asm_sumowner_saved(doc, leaf_path):
 def _asm_sumowner_save(doc, leaf_path, summaries):
     """Save a derivation in the document's sidecar with its witness: the sidecar is re-read just before the write, so a field
     another writer put there since stays, and replaced through a tmp of its own. The caller holds the leaf's writer key lock
-    (the restore runs under it), as every sidecar writer does. Best-effort: a failure leaves the next restore to derive
-    again."""
+    (the restore runs under it), as the settle's and the converge pass's writer, the sidecar refresh and the refusal mark
+    do. A refresh or a rebuild does not: it writes from a private parse under no key lock, so its sidecar can land between
+    the re-read and the replace here, and the older sidecar, with this field added, then stands beside the newer document
+    until its next write. The field is never read there: a refresh's or a rebuild's document carries `sumOwner`, and only
+    the restore of a document without it asks for a saved derivation. Best-effort: a failure leaves the next restore to
+    derive again."""
     cp = _asm_ckpt_file(leaf_path)
     witness = _asm_sumowner_witness(doc, leaf_path)
     if cp is None or witness is None:
@@ -8254,8 +8261,9 @@ def _asm_doc_summaries_by_owner(doc, leaf_path, index, prefix, carry=None, persi
     it. The older assignment is replayed over the summaries and every assignment in the document's carry
     must be one of it (the carry may hold FEWER: a document written before the parent-link rule of 2026-09-19 left a
     transcript's first summary unassigned). Returns the assignment, or None when it cannot be established exactly (a line
-    count that disagrees, a row whose line is another record's, a carry the replay contradicts, a window that may change
-    which records are replays): the restore then refuses the document."""
+    count that disagrees, a line naming the key that the scan could not decode, a row whose line is another record's, a
+    carry the replay contradicts, a window that may change which records are replays): the restore then refuses the
+    document."""
     rows = doc["records"]
     key = (os.path.realpath(str(leaf_path)), doc.get("t"), int(((doc["files"].get(Path(leaf_path).stem) or {}).get("cut") or [0])[0]))
     with _ASM_CKPT_LOCK:
@@ -8283,12 +8291,13 @@ def _asm_doc_summaries_by_owner(doc, leaf_path, index, prefix, carry=None, persi
             return None
         end = int(f["size"]) if f.get("skip") else int((f.get("cut") or [0])[0])
         try:
-            hits, n_lines, bare_cr = _asm_scan_summary_lines(path, end)
+            hits, n_lines, bare_cr, undecoded = _asm_scan_summary_lines(path, end)
         except OSError:
             return None
-        if bare_cr or n_lines != int(f.get("pre") or 0):
+        if bare_cr or undecoded or n_lines != int(f.get("pre") or 0):
             return None                                    # a bare CR, or a blank or undecodable line, before the cut: a line
-        #                                                    number is not a record index there
+        #                                                    number is not a record index there; or a line naming the key that
+        #                                                    the scan could not decode, whatever the count says
         lines_of[fi] = hits
     found = []                                             # (stamp, seq, row index, structural owner uuid, text)
     for i in kept:

@@ -1658,6 +1658,90 @@ class CompactionRestore(Harness):
         self.assertSameTree(got, cold, "the restore")
         self.assertEqual((modes, moved.get("full", 0)), (["restore"], 0), "restored: %s" % moved)
 
+    def test_an_older_document_whose_summary_line_has_a_form_feed_or_a_vertical_tab_at_its_edge_restores_exact(self):
+        """The last review of this change: the reader strips each line with bytes.strip, which takes a form feed and a vertical
+        tab at a line's edge as it takes a space, and keeps the record; the scan decoded the line unstripped, met the error and
+        dropped the hit, and the line count still agreed, since the reader had counted the record. A form feed after b40's
+        own summary left b40's card empty (the new-shape summary moved off it and nothing took its place); a vertical tab
+        before the new-shape summary refused a document that restores. The scan now strips as the reader does."""
+        ran = []
+        for name, uuid, edge in (("ff-after-old", "s40", lambda ln: ln[:-1] + b"\x0c\n"), ("vt-before-new", "es_mixed", lambda ln: b"\x0b" + ln)):
+            with self.subTest(edge=name):
+                recs = self._mixed_records()
+                lines = [(json.dumps(r) + "\n").encode("utf-8") for r in recs]
+                i = next(k for k, r in enumerate(recs) if r.get("uuid") == uuid)
+                self.assertIs(recs[i].get("isCompactSummary"), True, "the premise: the edited line is a summary's")
+                lines[i] = edge(lines[i])
+                path = self._older_document_bytes("older-" + name, b"".join(lines))
+                got, modes, moved = self._restore_counted(path)
+                cold = self.cold(path)
+                self.assertTrue((self._summary_of(cold, "b40") or "").startswith("summary so far: "),
+                                "the premise: a cold parse reads the edited line and b40's card carries its own summary")
+                self.assertTrue((self._summary_of(cold, "eb_mixed") or "").startswith(self.NEW_SUMMARY), "and the new one its own")
+                self.assertSameTree(got, cold, "the restore")
+                self.assertEqual((modes, moved.get("full", 0), moved.get("restore:summaryOwnerRefused", 0)), (["restore"], 0, 0),
+                                 "restored, not refused: %s" % moved)
+                ran.append(name)
+        self.assertEqual(len(ran), 2, "both edges ran: %s" % ran)
+
+    def test_the_summary_scan_reads_each_line_as_the_reader_does_and_counts_a_hit_it_cannot_decode(self):
+        """The scan against the reader's reference scanner over the same bytes: a form feed, a vertical tab, spaces and a CRLF
+        at a summary line's edges decode to the records the reader keeps, at the reader's record indexes; a line naming the key
+        that is no JSON is counted, never passed over, and the line count holds it."""
+        recs = [G.compact_summary_line(NOW, "sc_a", "sb_a", text="summary so far: the notes-api search is wired"),
+                G.compact_summary_line(NOW + 1, "sc_b", "sb_b", text="summary so far: the notes-api search pages by cursor"),
+                G.uline(NOW + 2, "a prompt between the summaries", "sc_u", "sc_b"),
+                G.compact_summary_line(NOW + 3, "sc_c", "sb_c", text="summary so far: the notes-api search ranks titles first")]
+        ln = [json.dumps(r).encode("utf-8") for r in recs]
+        good = ln[0] + b"\x0c\n" + b"\x0b" + ln[1] + b"\n" + ln[2] + b"\n" + b" \t" + ln[3] + b" \x0c\r\n"
+        d_ = self.td / "scan-edges"
+        d_.mkdir()
+        p = d_ / (SID + ".jsonl")
+        p.write_bytes(good)
+        hits, n, bare_cr, undecoded = em._asm_scan_summary_lines(str(p), len(good))
+        read, _end = em._scan_jsonl_bytes(good, 0)
+        self.assertEqual([r.get("uuid") for r in read], ["sc_a", "sc_b", "sc_u", "sc_c"], "the premise: the reader keeps all four")
+        self.assertEqual(({k: v.get("uuid") for k, v in hits.items()}, n, bare_cr, undecoded),
+                         ({0: "sc_a", 1: "sc_b", 3: "sc_c"}, 4, False, 0), "every summary line, at the reader's indexes")
+        self.assertEqual([hits[k] for k in sorted(hits)], [r for r in read if r.get("isCompactSummary") is True], "decoded as the reader's")
+        bad = ln[0] + b"\n" + b'{"type":"user","isCompactSummary":true,"uuid":"sc_cut' + b"\n" + ln[3] + b"\n"
+        p.write_bytes(bad)
+        hits, n, bare_cr, undecoded = em._asm_scan_summary_lines(str(p), len(bad))
+        self.assertEqual(({k: v.get("uuid") for k, v in hits.items()}, n, bare_cr, undecoded), ({0: "sc_a", 2: "sc_c"}, 3, False, 1),
+                         "a line naming the key that does not decode is counted")
+
+    def test_a_line_naming_the_key_that_the_scan_cannot_decode_refuses_the_older_document(self):
+        """The same review: a hit the scan cannot decode is never passed over, whatever the line count says. In a transcript
+        as the reader reads it today such a line is no record either, so the count already disagrees and refuses; the form
+        feed above is how a line can be a record to the reader and nothing to the scan while the count agrees, and the rule
+        must not rest on there being no second way. Pinned with the count made to agree: an undecodable line naming the key
+        written just before the document's cut (no record's index shifts), and the document's record count for the file
+        raised by one. The restore refuses once (restore:summaryOwnerRefused) and the whole parse's document restores after."""
+        recs = self._mixed_records()
+        lines = [(json.dumps(r) + "\n").encode("utf-8") for r in recs]
+        clean = self._older_document_bytes("older-undecodable-clean", b"".join(lines))
+        pre_n = int(_doc(clean)["files"][SID]["cut"][1])
+        self.assertTrue(0 < pre_n < len(recs), "the premise: the document cuts inside the transcript")
+        broken = b'{"type":"user","isCompactSummary":true,"uuid":"cut-short' + b"\n"
+        path = self._older_document_bytes("older-undecodable", b"".join(lines[:pre_n]) + broken + b"".join(lines[pre_n:]))
+        d = _doc(path)
+        f = d["files"][SID]
+        self.assertEqual((int(f["cut"][1]), int(f["cut"][0]), int(f["pre"])), (pre_n, sum(len(x) for x in lines[:pre_n]) + len(broken), pre_n),
+                         "the premise: the same cut, the undecodable line the last one before it, and no record to the reader")
+        f["pre"] = pre_n + 1                                         # the count made to agree with the lines before the cut
+        _write_doc(path, d)
+        self.fresh()
+        with em._ASM_CKPT_LOCK:
+            em._ASM_SUMOWNER_MEMO.clear()
+        got, modes, moved = self._restore_counted(path)
+        self.fresh()
+        boot, boot_modes, _m = self._restore_counted(path)
+        cold = self.cold(path)
+        self.assertSameTree(got, cold, "the whole parse")
+        self.assertSameTree(boot, cold, "the next restart")
+        self.assertEqual((modes, moved.get("restore:summaryOwnerRefused", 0)), (["full"], 1), "refused once: %s" % moved)
+        self.assertEqual(boot_modes, ["restore"], "the rewritten document restores")
+
     def test_an_older_documents_derivation_is_saved_beside_it_for_the_next_process(self):
         """The final review of 2026-11-12: the derivation reads the pre-cut bytes (2.2 s for the live host's 1 GB document), and
         an older document is replaced only by its next write, so every boot paid it again. The restore saves the derivation in
