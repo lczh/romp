@@ -44475,7 +44475,10 @@ def _parse(path, sid, now):
             # parse cost only on a road that walked it from the first record (2026-09-24: a fold reads the appended bytes,
             # a serve or a restore none of the pre-cut transcript, and booking the leaf at every miss read them as whole)
             size = 0
-            if road in _PerfStats.WHOLE_ROADS:
+            if isinstance(session, dict) and session.get("_readFailed"):
+                size = int(session.get("_readPulled") or 0)   # a read that failed (2026-11-16): what it pulled before it did,
+                #                                               nothing for a file that would not open; never the file's size
+            elif road in _PerfStats.WHOLE_ROADS:
                 try:
                     size = os.stat(path).st_size
                 except OSError:
@@ -50742,7 +50745,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         if getattr(_BUILD_READ_STRICT, "on", False) and not path_override and thread_cut is None:
             # the push roads' builds fail HERE when the transcript could not be read (_transcript_read_failed): a build that
             # went on returned whatever live cards the session carries, with no transcript under them
-            _lost = _transcript_read_failed(sess["path"], parsed)
+            _lost = _transcript_read_failed(sess["path"], parsed, sid)
             if _lost:
                 raise TranscriptUnreadable(_lost)
     tm0 = live_map.get(sid)
@@ -72445,13 +72448,16 @@ class TranscriptUnreadable(Exception):
 _BUILD_READ_STRICT = threading.local()
 
 
-def _transcript_read_failed(path, parsed):
+def _transcript_read_failed(path, parsed, sid=None):
     """Why the display parse `parsed` of the transcript at `path` is not the session's word, or None. Two facts, each read
     where it is recorded: the parse says a read of a file that exists raised (`_readFailed`, jd.parsed_session); or the
     file is not there and the kernel holds a parse WITH turns of this very file, so it was read with content and is gone
     (moved aside, a mount that dropped). A file that was never read is a session that has not written yet, and a /clear
     or a resume names a NEW file: neither is a failure, and their display (the head cards, the clear's boundary card, a
-    queued message) is built as before."""
+    queued message) is built as before. Nor is a session being MOVED to another folder (the review of the change that
+    added this): the CLI renames the transcript and the session's record is written just after, so for a moment the old
+    path is gone and a parse of it is held. The registry says so: `cwdPending` while the move is under way, and once the
+    record is written it names the transcript's new place, which the path in hand, taken before, is not."""
     if not isinstance(parsed, dict):
         return None
     why = parsed.get("_readFailed")
@@ -72463,9 +72469,18 @@ def _transcript_read_failed(path, parsed):
         ent = jd.parse_entry_for_leaf(str(path))
     except Exception:
         ent = None
-    if ent is not None and isinstance(ent[1], dict) and ent[1].get("turns"):
-        return "its transcript is missing"
-    return None
+    if not (ent is not None and isinstance(ent[1], dict) and ent[1].get("turns")):
+        return None
+    if sid:
+        try:
+            if _thread_reg(str(sid)).get("cwdPending"):
+                return None                               # a move in progress: the file is on its way to its new folder
+            row = _session_row(str(sid))
+            if row and row.get("path") and str(row["path"]) != str(path):
+                return None                               # the record names another file now: this path is the one before
+        except Exception:
+            pass
+    return "its transcript is missing"
 
 
 _chat_build_faults = {}   # sid -> the fault text of its CURRENT chat-build episode; ONE stderr traceback + bell row per episode
@@ -92774,6 +92789,7 @@ class Handler(BaseHTTPRequestHandler):
                 _relay_active_chat(client, msg.get("id"), msg.get("nonce"))   # …and the window's feed learns which session is focused (T347), the announcement number echoed (T416)
             if msg.get("id"):
                 em.asm_rebuild_prefer(str(msg["id"]))   # …and its document, if it waits for a rebuild, is rebuilt first (2026-11-12)
+                jd.parse_forget_failed(str(msg["id"]))  # …and a read of its transcript that failed is tried again (2026-11-16)
             return
         if msg and msg.get("type") == "needSlot" and msg.get("slot") in _DELTA_SLOTS:
             # The shim could not apply a view delta (its base revision did not match what it holds — a
@@ -92798,6 +92814,7 @@ class Handler(BaseHTTPRequestHandler):
             # ask inside its window and, with the page's awaitingFull still set, the tab then discarded every later delta
             # and never re-asked until a reconnect (round two MEDIUM). A legit repeat gets the frame again.
             _client_reset_chat_sid(client, sid)               # …and drop the dedup slot (and a stale held-tail key), so the full send lands
+            jd.parse_forget_failed(sid)                       # the page asks: a read that failed is tried again (2026-11-16)
             if msg.get("heldTailFirst"):
                 # the page's tail run FIRST key for THIS ask (2026-09-19), stored AFTER the reset cleared any stale one:
                 # the repair full below serves from it (a superset) or, if the turns are gone, sets them aside via `rebased`.

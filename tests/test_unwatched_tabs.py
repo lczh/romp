@@ -1558,6 +1558,115 @@ class AsksAndReads(_Base):
         self.assertIsNone(km._transcript_read_failed(fresh, km._parse(fresh, sid, now)),
                           "the session's next transcript, not written yet: its head cards and boundary card are its display")
 
+    def test_75_a_read_that_fails_midway_is_not_repeated_every_cycle_and_is_tried_again_at_an_event(self):
+        # the review of the change above: a read that fails AFTER it pulled bytes (a device error near the end of a large
+        # file on network storage) was repeated whole at every ask and every cycle. A failed read is remembered under the
+        # file's stat with its inode change time, and tried again when that moves or when a page asks for the tab
+        import errno
+        em = km.em
+        sid = "11111111-2222-3333-4444-121212121275"
+        path = os.path.join(self.tmp, sid + ".jsonl")
+        self._transcript(path, sid, 400)
+        size = os.path.getsize(path)
+        fail_at = size - 40                                  # the read fails inside the last record
+        pulled, broken = [0], [True]
+        real_open = open
+
+        class Failing:
+            """The transcript's file object: every byte it hands out is counted, and while `broken` a read that reaches
+            `fail_at` raises as a failing device does."""
+            def __init__(self, fh):
+                self.fh = fh
+
+            def _take(self, data):
+                if broken[0] and self.fh.tell() >= fail_at:
+                    raise OSError(errno.EIO, "Input/output error")
+                pulled[0] += len(data)
+                return data
+
+            def readline(self, *a):
+                return self._take(self.fh.readline(*a))
+
+            def read(self, *a):
+                return self._take(self.fh.read(*a))
+
+            def __getattr__(self, name):
+                return getattr(self.fh, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.fh.close()
+                return False
+
+        def fake_open(file, mode="r", *a, **kw):
+            fh = real_open(file, mode, *a, **kw)
+            return Failing(fh) if str(file) == path and "b" in mode else fh
+        em.open = fake_open
+        self.addCleanup(lambda: em.__dict__.pop("open", None))
+        now = int(time.time())
+        km._PERF_STATS.reset()
+        first = km._parse(path, sid, now)
+        self.assertEqual(km._transcript_read_failed(path, first, sid), "its transcript cannot be read (Input/output error)")
+        once = pulled[0]
+        self.assertGreater(once, size // 2, "the read pulled most of the file before it failed: %d of %d" % (once, size))
+        for _ in range(10):                                  # ten cycles over the same failing file
+            self.assertTrue(km._parse(path, sid, now).get("_readFailed"))
+        self.assertEqual(pulled[0], once, "not read again: %d bytes over ten cycles beyond the first attempt's %d" % (pulled[0] - once, once))
+        whole = km._PERF_STATS.snapshot()["parses"]["wholeBytes"]
+        self.assertLessEqual(whole, once, "/perf books what the one attempt pulled (%d), not the file's size per attempt: %d" % (once, whole))
+        self.assertGreater(whole, size // 2)
+        # EVENT: a page opens the tab (its activeTab, its needFull): one more attempt
+        c = self._client()
+        km.Handler._dispatch_ws(_Self(), {"type": "activeTab", "id": sid}, c)
+        self.assertTrue(km._parse(path, sid, now).get("_readFailed"))
+        after_open = pulled[0]
+        self.assertGreater(after_open, once, "the page's open tries the read again")
+        self.assertLessEqual(after_open, 3 * once, "one attempt (the fold of the file, then the whole read it falls back to)")
+        for _ in range(10):
+            km._parse(path, sid, now)
+        self.assertEqual(pulled[0], after_open, "and the cycles after it read nothing")
+        km.Handler._dispatch_ws(_Self(), {"type": "needFull", "id": sid, "why": "rest-open"}, c)   # its ask is such an act too
+        self.assertTrue(km._parse(path, sid, now).get("_readFailed"))
+        self.assertGreater(pulled[0], after_open)
+        # EVENT: the file's stat moves with the SAME bytes (its permissions restored, a rename back: the inode change time)
+        broken[0] = False
+        self.assertTrue(km._parse(path, sid, now).get("_readFailed"), "nothing moved yet: the remembered failure stands")
+        os.chmod(path, 0o644)
+        good = km._parse(path, sid, now)
+        self.assertFalse(good.get("_readFailed"))
+        self.assertTrue(good.get("turns"), "read again at once, with no append")
+        self.assertIsNone(km._transcript_read_failed(path, good, sid))
+        self.assertIs(km._parse(path, sid, now), good, "and a read that succeeded is kept as before")
+
+    def test_76_a_session_being_moved_is_not_a_missing_transcript(self):
+        # a move renames the transcript and writes the session's folder record just after: between the two the old path
+        # is gone and the kernel holds a parse of it. The registry marks the move (cwdPending), and once the record is
+        # written it names the transcript's new place
+        sid = "11111111-2222-3333-4444-121212121276"
+        old = os.path.join(self.tmp, sid + ".jsonl")
+        self._transcript(old, sid, 6)
+        now = int(time.time())
+        self.assertTrue(km._parse(old, sid, now).get("turns"))
+        moved = os.path.join(self.tmp, "moved-" + sid + ".jsonl")
+        os.rename(old, moved)                                # the CLI moved the file
+        gone = km._parse(old, sid, now)
+        saved = (km._thread_reg, km._session_row)
+        try:
+            km._thread_reg = lambda tsid: {"sid": tsid, "cwd": "~/proj", "cwdPending": "~/proj-next"}
+            km._session_row = lambda tsid, now=None: {"sid": tsid, "path": old}
+            self.assertIsNone(km._transcript_read_failed(old, gone, sid), "the move is under way: not a failure")
+            km._thread_reg = lambda tsid: {"sid": tsid, "cwd": "~/proj-next"}
+            km._session_row = lambda tsid, now=None: {"sid": tsid, "path": moved}
+            self.assertIsNone(km._transcript_read_failed(old, gone, sid),
+                              "the record is written and names the new place: the path in hand is last cycle's")
+            km._session_row = lambda tsid, now=None: {"sid": tsid, "path": old}
+            self.assertEqual(km._transcript_read_failed(old, gone, sid), "its transcript is missing",
+                             "no move, and the record still names this file: it is gone")
+        finally:
+            km._thread_reg, km._session_row = saved
+
     # ── 5: a /clear on a tab at rest ──
     def test_73_a_cleared_sessions_new_display_reaches_a_tab_at_rest(self):
         c = self._client(active=S1)

@@ -133,7 +133,7 @@ CENSUS = {
     "_parked_clear_op": ("pure", "over a parked op and the owning backend's identity (the row's backend, fixed for the session's life): the drain's rule that a one-line Codex command op by a clear head is a clear, read by the clearing fold too (2026-09-19)"),
     "_op_paths": ("pure", "over a parked op (its attachment list, T373 fold)"),
     "_parse": ("sig", "transcript", "memoized on the transcript's (mtime, size), the pending cut (cut) and the states file (states)"),
-    "_transcript_read_failed": ("sig", "transcript", "whether the parse just taken is the session's word (2026-11-16): the parse's own mark of a read that raised, the leaf's presence on disk, and the parse store's entry for that leaf; it decides only whether the build stops, and a build that stops returns and caches nothing"),
+    "_transcript_read_failed": ("sig", "transcript", "whether the parse just taken is the session's word (2026-11-16): the parse's own mark of a read that raised, the leaf's presence on disk, the parse store's entry for that leaf, and for a file that is gone the session's record (a move under way, or a record that names another file: reg); it decides only whether the build stops, and a build that stops returns and caches nothing"),
     "TranscriptUnreadable": ("pure", "the exception a build raises at a failed read; no payload leaves a build that raises"),
     "_thread_parse": ("sig", "transcript", "a comment thread's own records past its cut (thread_cut, _thread_events), memoized on the "
                                            "transcript's version and the states file (states); else _parse"),

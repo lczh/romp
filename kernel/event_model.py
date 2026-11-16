@@ -2837,7 +2837,11 @@ def _scan_jsonl_stream(fh, base_offset, offsets=None, limit=None, crc=None):
     consumed = 0                                          # bytes of complete lines: what the next read resumes after
     remaining = limit
     while True:
-        line = fh.readline() if remaining is None else fh.readline(remaining)   # the bound is in the read itself: a growing
+        try:
+            line = fh.readline() if remaining is None else fh.readline(remaining)   # the bound is in the read itself: a growing
+        except OSError as e:                              # a read that failed AFTER bytes were pulled: what this scan had read
+            e.pulled = getattr(e, "pulled", 0) + seen     #  rides the error, so the reader's caller books those bytes and not
+            raise                                         #  the file's size (_note_read_fail, 2026-11-16)
         if not line:                                                            #  line with no newline yet cannot be pulled past
             break                                                               #  the captured end, nor keep the reader busy there
         if not line.endswith(b"\n"):
@@ -2951,6 +2955,11 @@ class read_failures:
 
 
 def _note_read_fail(path, e):
+    """A reader read of `path` raised `e`: the bytes it had pulled before it did (`e.pulled`, _scan_jsonl_stream) count like
+    every reader byte, and the failure joins the calling thread's collection when one is open (read_failures)."""
+    n = int(getattr(e, "pulled", 0) or 0)
+    if n:
+        _count_read(path, n)
     log = getattr(_READ_FAILS, "log", None)
     if log is not None and not isinstance(e, FileNotFoundError):
         log.append((str(path), e))
