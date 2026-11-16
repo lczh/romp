@@ -189,9 +189,16 @@ if (target) {
   const third = R.rested.filter((id) => id !== R.watched && id !== target)[0] || null;
   R.third = third;
   if (third) {
+    // The frames are marked BEFORE the click (2026-11-16): the click is the moment the first tab leaves the set, and it is
+    // taken back at the first cycle that finds its transcript past its cached build. That can be the turn appended below,
+    // or, on a slow runner, the turn appended for the flip above, which the cycle had not built for it yet: its rest frame
+    // then lands while this road is still waiting for the third tab, ahead of a mark read after that wait, and no second
+    // one follows (a tab is taken back once). Marked after the wait, the road timed out on a frame that had already come
+    // (main's CI on the merge of PR 473; the reopen below still showed the tab catching up)
+    const fr2 = await page.evaluate(() => window.__frames.length);
     await page.click(`#tabs .tab[data-id="${third}"]`);
     R.thirdFresh = await page.waitForFunction(() => !document.querySelector("#statusline .catching-up-line") && document.querySelector("#content")?.textContent.includes("restmark-6"), null, { timeout: 60000 }).then(() => true, timedOut);
-    const fr2 = await page.evaluate(() => window.__frames.length);
+    R.displacedBeforeAppend = await page.evaluate(([n, id]) => window.__frames.slice(n).some((f) => f.type === "status" && f.rest && f.id === id), [fr2, R.watched]);   // for the record: which of the two moves took it back
     appendAll("restmark-7");
     R.displacedRested = await page.waitForFunction(([n, id]) => window.__frames.slice(n).some((f) => f.type === "status" && f.rest && f.id === id), [fr2, R.watched], { timeout: 60000 }).then(() => true, timedOut);
     R.keptAfterThird = !(await page.evaluate(([n, id]) => window.__frames.slice(n).some((f) => f.type === "status" && f.rest && f.id === id), [fr2, target]));
@@ -385,7 +392,8 @@ class UnwatchedTabsInABrowser(unittest.TestCase):
     def test_a_third_tab_displaces_the_oldest_which_is_taken_back_and_catches_up_when_opened_again(self):
         r = self._result()
         self.assertTrue(r["third"] and r["thirdFresh"], "a third tab opened and caught up")
-        self.assertTrue(r["displacedRested"], "the first tab is no longer among the last two shown: taken back at its next move")
+        self.assertTrue(r["displacedRested"], "the first tab is no longer among the last two shown: taken back at its next move "
+                        "(the frame counted from the click that displaced it, whichever turn that move was)")
         self.assertTrue(r["keptAfterThird"], "the second stays watched")
         self.assertFalse(r["displacedTab"]["skeleton"], "…and stays a loaded tab on the strip")
         re_ = r["reopened"]
