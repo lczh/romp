@@ -306,6 +306,7 @@ OFF_FEED = (
     "_page_sig",                   # the chat history page's signature: forkedFrom
     "_writer_row",                 # the document writer's converge pass, whose writer is mid-turn on a thread's file: threadOf
     "_reg_launched_login",         # the spend detail's session rows (_spend_detail_local): launchedLogin
+    "_transcript_read_failed",     # the chat build's read check (build_session under the push roads' flag): cwdPending
     "_reported_model_ids",         # the learned model versions: liveModelId
     "_session_row",                # the /sessions row and the fork, comment and rewind handlers: cwd, name
     "_settle_event_key",           # the nudge and compaction ticks: lastStopAt
