@@ -150,6 +150,25 @@ def traced():
     return tracemalloc.get_traced_memory()[0]
 
 
+def baseline():
+    """The reading a measurement starts from: traced(), repeated until a collection gives nothing more back.
+
+    One collection is not enough on a free-threaded build. Its collector defers the frees of what it collects and keeps
+    the bookkeeping for them, traced like any other memory, until a later collection; a default build frees as it
+    collects. The first collection after tracing starts is also the one that meets every cycle the tests before this
+    one left, so a baseline read after it stood several hundred kilobytes high, and every later reading, measured
+    against it, that much low: on 3.15t in CI the memo read as holding 0.58 of what it counts, short by the same
+    692,568 bytes at each reading, with the bytes freed at the end matching the count (2026-11-16). Alone, the same
+    collector left 967,472 bytes traced after collecting 60,000 small cycles and 4,952 after the next collection,
+    where a default 3.15 read 800 both times."""
+    low = traced()
+    while True:
+        now = traced()
+        if now >= low:
+            return now
+        low = now
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.td = Path(tempfile.mkdtemp()).resolve()
@@ -204,7 +223,7 @@ class RealUnits(Base):
         if not was:
             tracemalloc.start()
         try:
-            m0 = traced()
+            m0 = baseline()
             b0 = em._HYDRATED_BYTES[0]
             read0 = em._ASM_CKPT_STATS["hydratedAtoms"]
             self.assertEqual(em.hydrate(sets[0], SID, by="test"), len(recs))
@@ -247,6 +266,32 @@ class RealUnits(Base):
         self.assertTrue(0.8 <= m["freed"] / counted <= 1.25, "once no atom holds them, the eviction has freed what it "
                         "counted: " + said)
         return m
+
+    def test_the_baseline_is_read_once_a_collection_gives_nothing_back(self):
+        """Cycles standing when tracing starts, as the tests before this one leave them: after baseline() a further
+        collection lowers the traced figure by nothing that matters. Read after one collection alone, a free-threaded
+        build's figure fell by most of a megabyte at the next (baseline's docstring)."""
+        gc.collect()
+        gc.disable()                                   # the cycles below wait for the baseline's own collection
+        try:
+            junk = []
+            for i in range(60000):
+                d = {"i": i, "l": [i, i + 1]}
+                d["self"] = d
+                junk.append(d)
+            del junk, d
+            was = tracemalloc.is_tracing()
+            if not was:
+                tracemalloc.start()
+            try:
+                m0 = baseline()
+                after = traced()
+            finally:
+                if not was:
+                    tracemalloc.stop()
+        finally:
+            gc.enable()
+        self.assertLess(m0 - after, 64 << 10, "a collection after the baseline gave back %d bytes" % (m0 - after))
 
     def test_non_ascii_text_counts_its_decoded_size_not_its_line(self):
         """Non-ASCII text as the CLI writes it, raw UTF-8, is three bytes a character on disk for a dash or an ellipsis and
@@ -345,7 +390,7 @@ class RealUnits(Base):
                 if not was:
                     tracemalloc.start()
                 try:
-                    m0 = traced()
+                    m0 = baseline()
                     atoms = [lazy_atom(r, path, at, kind, own_uuid=True) for r, at in zip(recs, offs)]
                     self.assertEqual(em.hydrate(atoms, SID, by="test"), len(recs))
                     counted = em._HYDRATED_BYTES[0]

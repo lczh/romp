@@ -34,6 +34,7 @@ Synthetic only: invented frame text, no session data.
 """
 import base64
 import contextlib
+import http.client
 import io
 import json
 import os
@@ -538,6 +539,22 @@ def upgrade(port, extensions=None, wid="w-deflate", app="feed", path=None):
     return status, headers, s, rest
 
 
+def header_line_limit(ceiling=1024):
+    """The most header lines the running interpreter's http.client parse takes, found by handing that parse more lines
+    until it refuses: the parse http.server reads a request's head with, so the hub's limit and the remote's alike. Asked,
+    not assumed, because the number moved: through 3.14 the blank line that ends the head counts against the parse's 100
+    and 99 header lines is the most it takes; 3.15 stopped counting it, and takes 100. None if it takes `ceiling` lines,
+    which is an interpreter with no limit to sit at."""
+    def taken(n):
+        head = b"".join(b"X-Pad%d: 1\r\n" % i for i in range(n)) + b"\r\n"
+        try:
+            http.client.parse_headers(io.BytesIO(head))
+        except http.client.HTTPException:
+            return False
+        return True
+    return next((n for n in range(ceiling) if not taken(n + 1)), None)
+
+
 def kernel_client(wid, timeout=5.0):
     """The kernel's record of the pane that dialed with `wid`, once the handler has registered it."""
     t0 = time.time()
@@ -780,21 +797,27 @@ class RelayExecuted(unittest.TestCase):
         self.assertEqual(inflate(payload).decode("utf-8"), text)
 
     def test_no_more_lines_reach_the_remote_than_the_browser_sent(self):
-        # http.client's parse takes at most 99 header lines (it counts the blank line that ends the head against its 100),
-        # at the hub and at the remote alike, and this request sends exactly 99: the upgrade helper's Host line and four
-        # others, then 94 Extensions lines, the offer last. The relay forwards its own Host line in place of the browser's,
-        # the same four, and each Extensions line once, so the remote gets 99 too; a relay that forwarded one line twice
-        # (the branch falling through after the per-line forward and sending the first line again) puts the remote at 100
-        # and gets 431 Too many headers where the direct dial upgrades (2026-09-24). Invented extension names
-        offer = ["x-pad%d" % i for i in range(93)] + ["permessage-deflate; client_max_window_bits"]
-        # the controls, dialed direct: the remote takes these 99 lines and refuses one more, so the request is at the limit
+        # http.client's parse takes a bounded number of header lines, at the hub and at the remote alike, and this request
+        # sends exactly that many: the upgrade helper's Host line and four others, then Extensions lines to fill the rest,
+        # the offer last. The relay forwards its own Host line in place of the browser's, the same four, and each
+        # Extensions line once, so the remote gets as many; a relay that forwarded one line twice (the branch falling
+        # through after the per-line forward and sending the first line again) puts the remote one past the limit and
+        # gets 431 Too many headers where the direct dial upgrades (2026-09-24). The limit is the running interpreter's,
+        # 99 lines through 3.14 and 100 from 3.15 (header_line_limit): written here as 99, the request sat one line under
+        # 3.15's limit, where the over-the-limit control below upgraded and a doubled line would have too (2026-11-16).
+        # Invented extension names
+        limit = header_line_limit()
+        self.assertIsNotNone(limit, "http.client's parse refuses no head by its line count on this interpreter, so no request sits at a limit")
+        fixed = 5                                             # the upgrade helper's header lines before the Extensions ones
+        offer = ["x-pad%d" % i for i in range(limit - fixed - 1)] + ["permessage-deflate; client_max_window_bits"]
+        # the controls, dialed direct: the remote takes these lines and refuses one more, so the request is at the limit
         status, headers, s, _ = upgrade(self.remote.server_address[1], offer, wid="w-count-direct")
         self.socks.append(s)
         self.assertEqual(status, 101)
         self.assertEqual(headers.get("sec-websocket-extensions"), ACCEPT)
         status, _, s, _ = upgrade(self.remote.server_address[1], ["x-pad-over"] + offer, wid="w-count-over")
         self.socks.append(s)
-        self.assertEqual(status, 431, "one line past the 99 the parse takes is refused, or this case no longer sits at the limit")
+        self.assertEqual(status, 431, "one line past the %d the parse takes is refused, or this case no longer sits at the limit" % limit)
         wid = "w-relay-count"
         status, headers, s, _ = upgrade(self.hub.server_address[1], offer, path="/remote/gpu1/ws?app=feed&wid=%s&token=%s" % (wid, km.TOKEN))
         self.socks.append(s)
