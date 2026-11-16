@@ -1330,9 +1330,10 @@ class AfterTheFinalReview(_Base):
                 self.assertEqual(self._frames(c, "session", S2) + self._frames(c, "session", S3), [])
                 self.assertEqual(km.REPAIR_BUILDS_MAX, 3)
                 deadline = time.time() + 5
-                while time.time() < deadline and c["repairs"]["running"] != 2:
+                while time.time() < deadline and c["repairs"].get("oneShot"):
                     time.sleep(0.02)
-                self.assertEqual(c["repairs"]["running"], 2, "the third thread answered that one ask and ended: it takes no ask for a tab the page left")
+                self.assertEqual((c["repairs"]["running"], c["repairs"].get("oneShot")), (2, 0),
+                                 "the third thread answered that one ask and ended: it takes no ask for a tab the page left")
             else:
                 self.assertEqual(self._frames(c, "session", S4), [], "a tab never parsed waits for one of the two, as before")
                 self.assertEqual(c["repairs"]["running"], 2)
@@ -1354,6 +1355,258 @@ class AfterTheFinalReview(_Base):
             while time.time() < deadline and (c.get("repairs") or {}).get("running"):
                 time.sleep(0.02)
             NAMES.pop(S4, None)
+
+
+S5 = "11111111-2222-3333-4444-121212121215"   # ops: a fifth tab
+
+
+class AsksAndReads(_Base):
+    """What the review of the change above found (2026-11-16): an ask left to the pusher behind the one-shot thread; a
+    transcript that cannot be read building to its live cards; a failed read remembered under the file's stat; a counter
+    bumped under a lock once per turn; and a /clear on a tab at rest, which must not be held back."""
+
+    def setUp(self):
+        super().setUp()
+        self.notices = []
+        self._real_notice = km._sync_notice
+        km._sync_notice = lambda text, ok=True, kind="sync": self.notices.append((text, ok, kind))
+
+    def tearDown(self):
+        km._sync_notice = self._real_notice
+        km._chat_rested.clear()
+        km._chat_build_faults.clear()
+        km._EMPTY_BUILD_NOTED.clear(); km._EMPTY_BUILD_BELLED.clear()
+        for sid in (S4, S5):
+            NAMES.pop(sid, None)
+        super().tearDown()
+
+    def _more_tabs(self, **names):
+        """Tabs beside the base's three: {sid: name}. Returns the strip's rows."""
+        for sid, name in names.items():
+            path = os.path.join(self.tmp, sid + ".jsonl")
+            with open(path, "w") as f:
+                f.write("x" * 100)
+            self.paths[sid], self.n[sid] = path, 4
+            NAMES[sid] = name
+            self.live[sid] = dict(self.live[S1])
+        rows = [{"sid": sid, "name": NAMES[sid], "path": self.paths[sid], "anchor": sid} for sid in TAB_ORDER + list(names)]
+        km._chat_tab_sessions = lambda now, live_map: list(rows)
+        return rows
+
+    def _wait(self, cond, seconds=10):
+        deadline = time.time() + seconds
+        while time.time() < deadline and not cond():
+            time.sleep(0.02)
+        return cond()
+
+    # ── 1: an ask is never left behind the one-shot thread ──
+    def test_70_an_ask_that_arrives_while_only_the_one_shot_thread_runs_gets_a_thread_of_its_own(self):
+        import threading
+        self._more_tabs(**{S4: "docs", S5: "ops"})
+        real_warm = km._repair_warm
+        km._repair_warm = lambda sid: sid == S4              # the kernel holds a parse of docs
+        self.addCleanup(setattr, km, "_repair_warm", real_warm)
+        c = self._client(active=S1)
+        km._clients[:] = [c]
+        km._push([c])
+        for sid in (S2, S3, S4, S5):
+            self._move(sid)
+        km._push([c])                                        # the four others at rest
+        self.assertEqual(sorted(f["id"] for f in self._frames(c, "status") if f.get("rest")), [S2, S3, S4, S5])
+        c["_frames"].clear()
+        gates = {sid: threading.Event() for sid in (S2, S3, S4)}
+        started = {sid: threading.Event() for sid in (S2, S3, S4)}
+        real = km.build_session
+
+        def slow(sid, now, live_map=None, **kw):
+            if sid in gates and not gates[sid].is_set():     # each of these builds takes as long as the test lets it
+                started[sid].set()
+                gates[sid].wait(30)
+            return real(sid, now, live_map, **kw)
+        km.build_session = slow
+        lane = km._ws_arm_lane(c)
+        try:
+            put = lambda msg: km._lane_put(lane, msg["type"], lambda: km.Handler._dispatch_ws(_Self(), msg, c))
+            for sid in (S2, S3, S4):                         # two clicks, then a third on a tab the kernel holds a parse of
+                put({"type": "activeTab", "id": sid}); put({"type": "needFull", "id": sid, "why": "rest-open"})
+                self.assertTrue(started[sid].wait(10), "its build is under way")
+            r = c["repairs"]
+            self.assertEqual((r["running"], r.get("oneShot")), (2, 1), "two ordinary threads and the one for the tab on screen")
+            gates[S2].set(); gates[S3].set()                 # the first two builds end; their threads find nothing waiting and end
+            self.assertTrue(self._wait(lambda: r["running"] == 0), "only the one-shot thread is left: %r" % r)
+            self.assertEqual(r.get("oneShot"), 1)
+            # an ask for a tab the page is NOT showing (its idle prefetch, a second column's): the real dispatch
+            put({"type": "needFull", "id": S5, "why": "prefetch"})
+            self.assertTrue(self._wait(lambda: bool(self._frames(c, "session", S5)), 5),
+                            "answered by a thread of its own while the one-shot is still building: not left to the pusher's next cycle")
+            self.assertEqual(self._frames(c, "session", S4), [], "…which it still is")
+            self.assertTrue(self._wait(lambda: S5 not in r["pending"] and r["running"] == 0), "and nothing stays listed: %r" % r)
+            gates[S4].set()
+            self.assertTrue(self._wait(lambda: bool(self._frames(c, "session", S4))))
+            self.assertTrue(self._wait(lambda: not r.get("oneShot") and not r["pending"]))
+        finally:
+            for g in gates.values():
+                g.set()
+            km.build_session = real
+            km._lane_close(c)
+            c.pop("lane", None); c.pop("closing", None)
+            self._wait(lambda: not (c.get("repairs") or {}).get("running") and not (c.get("repairs") or {}).get("oneShot"), 5)
+
+    # ── 2: a read that fails stops the build, whatever cards the session carries ──
+    def _cards_only(self, sid):
+        """What a build of a transcript that could not be read came to when it went on: the head card and the live card."""
+        return {"type": "session", "id": sid, "name": NAMES[sid],
+                "events": [{"kind": "system", "uuid": "system:head", "model": "", "cwd": "~/proj"},
+                           {"kind": "apiError", "uuid": "apiError", "text": "the agent backend is not installed"}],
+                "status": {"state": "blocked", "sinceEpoch": None},
+                "ledger": {"summary": "", "tree": [], "current": None, "recent": [], "workingNote": "", "needsInput": None}}
+
+    def test_71_a_transcript_that_cannot_be_read_sends_nothing_for_a_tab_at_rest_or_a_watched_one_and_is_said_once(self):
+        c = self._client()
+        self._warm(c)
+        km.Handler._dispatch_ws(_Self(), {"type": "activeTab", "id": S1}, c)   # web on screen: among the tabs the page watches
+        self._move(S2)
+        km._push([c])                                        # api at rest; web holds its base, 5 events on the page
+        self.assertEqual([f.get("rest") for f in self._frames(c, "status", S2)], [True])
+        c["_frames"].clear()
+        unreadable, strict = set(), []
+        real = km.build_session
+
+        def build(sid, now, live_map=None, **kw):
+            if sid in unreadable:
+                strict.append(bool(getattr(km._BUILD_READ_STRICT, "on", False)))
+                if strict[-1]:                               # the real build stops at the read under the push roads' flag…
+                    raise km.TranscriptUnreadable("its transcript cannot be read (Permission denied)")
+                return self._cards_only(sid)                 # …and without it went on to the live cards (what main sent)
+            return real(sid, now, live_map, **kw)
+        km.build_session = build
+        try:
+            unreadable.update((S1, S2))
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                km.Handler._dispatch_ws(_Self(), {"type": "activeTab", "id": S2}, c)
+                km.Handler._dispatch_ws(_Self(), {"type": "needFull", "id": S2, "why": "rest-open"}, c)   # the tab at rest, opened
+                for _ in range(3):
+                    self._move(S1); self._move(S2)
+                    km._push([c])                            # …and the cycles, for it and for the tab watched all along
+                km._push_session_now(S1)                     # the per-session road too
+            self.assertTrue(strict and all(strict), "both push roads build under the flag: %r" % strict)
+            self.assertEqual([f for f in c["_frames"] if f["type"] in ("session", "chatTail") and f.get("id") in (S1, S2)], [],
+                             "no frame for either: the page keeps the transcript it holds, not two cards in its place")
+            self.assertIn(S2, c.get("askedFull") or (), "the ask stands, so the tab at rest goes on saying it is catching up")
+            self.assertIn(S1, c["echat"], "and the watched tab keeps its base")
+            for sid, name in ((S1, "web"), (S2, "api")):
+                mine = [n for n in self.notices if n[0].startswith("chat: %s is not updating" % name)]
+                self.assertEqual(len(mine), 1, "said once for %s, not once per cycle: %r" % (name, self.notices))
+                self.assertEqual(mine[0][1:], (False, "refused"))
+                self.assertIn("cannot be read (Permission denied)", mine[0][0]); self.assertIn("until a read succeeds", mine[0][0])
+            self.assertEqual(err.getvalue().count("push build: chat"), 2, "one stderr line each, and no traceback: %r" % err.getvalue()[:300])
+            self.assertNotIn("Traceback", err.getvalue())
+            # the read succeeds: the tab at rest gets its full, the watched one its delta, and a later failure is said anew
+            unreadable.clear()
+            self._move(S1); self._move(S2)
+            km._push([c])
+            self.assertEqual(len(self._frames(c, "session", S2)), 1)
+            self.assertEqual(len(self._frames(c, "chatTail", S1)), 1)
+            self.assertNotIn(S1, km._chat_build_faults); self.assertNotIn(S2, km._chat_build_faults)
+        finally:
+            km.build_session = real
+
+    # ── 2 and 3, at the read itself: real files, the real parse ──
+    def _transcript(self, path, sid, upto):
+        prev = None
+        with open(path, "w") as f:
+            for i in range(1, upto + 1):
+                u = "11111111-2222-3333-4444-7%011d" % i
+                f.write(json.dumps({"type": "user" if i % 2 else "assistant", "uuid": u, "parentUuid": prev, "sessionId": sid,
+                                    "timestamp": "2026-11-01T00:00:%02dZ" % i,
+                                    "message": ({"role": "user", "content": "question %d about the notes api" % i} if i % 2 else
+                                                {"role": "assistant", "content": [{"type": "text", "text": "answer %d" % i}]})}) + "\n")
+                prev = u
+
+    def test_72_a_failed_read_is_named_by_the_parse_not_kept_and_a_file_never_read_is_not_a_failure(self):
+        sid = "11111111-2222-3333-4444-121212121272"       # a private sid: the parse store is the kernel's own
+        path = os.path.join(self.tmp, sid + ".jsonl")
+        now = int(time.time())
+        self._transcript(path, sid, 6)
+        tree = km._parse(path, sid, now)
+        self.assertTrue(tree.get("turns"), "the transcript parses")
+        self.assertIsNone(km._transcript_read_failed(path, tree))
+        if os.geteuid() != 0:                                # (a superuser reads through any mode)
+            self._transcript(path, sid, 8)                   # the session wrote more, and the file cannot be read
+            os.chmod(path, 0)
+            try:
+                bad = km._parse(path, sid, now)
+                self.assertFalse(bad.get("turns"))
+                self.assertEqual(km._transcript_read_failed(path, bad), "its transcript cannot be read (Permission denied)",
+                                 "the parse names the read that failed: an empty tree is not the session's word")
+                self.assertEqual(km._transcript_read_failed(path, km._parse(path, sid, now)), "its transcript cannot be read (Permission denied)")
+            finally:
+                os.chmod(path, 0o644)
+            # readable again with the SAME bytes, so the same mtime and size: the failed read was not kept under them
+            again = km._parse(path, sid, now)
+            self.assertTrue(again.get("turns"), "a later read is tried, and reads")
+            self.assertIsNone(km._transcript_read_failed(path, again))
+        # moved aside: a file this kernel read with content is gone
+        os.rename(path, path + ".aside")
+        gone = km._parse(path, sid, now)
+        self.assertFalse(gone.get("turns"))
+        self.assertEqual(km._transcript_read_failed(path, gone), "its transcript is missing")
+        os.rename(path + ".aside", path)
+        self.assertIsNone(km._transcript_read_failed(path, km._parse(path, sid, now)))
+        # a file never read is a session that has not written yet, and a /clear or a resume names a NEW file: no failure
+        fresh = os.path.join(self.tmp, "11111111-2222-3333-4444-121212121273.jsonl")
+        self.assertIsNone(km._transcript_read_failed(fresh, km._parse(fresh, sid, now)),
+                          "the session's next transcript, not written yet: its head cards and boundary card are its display")
+
+    # ── 5: a /clear on a tab at rest ──
+    def test_73_a_cleared_sessions_new_display_reaches_a_tab_at_rest(self):
+        c = self._client(active=S1)
+        self._warm(c)
+        self._move(S2)
+        km._push([c])
+        self.assertGreater(km._chat_rested.get(S2) or 0, 2, "the record of what its pages held: more than the cleared display has")
+        c["_frames"].clear()
+        real = km.build_session
+
+        def cleared(sid, now, live_map=None, **kw):
+            if sid != S2:
+                return real(sid, now, live_map, **kw)
+            m = real(sid, now, live_map, **kw)               # the session after /clear: the boundary card and the head card,
+            m["events"] = [{"kind": "clear", "uuid": "clear:11111111-2222-3333-4444-7000000000c1", "episodes": 2},   # no turn yet
+                           {"kind": "system", "uuid": "system:head", "model": "", "cwd": "~/proj"}]
+            return m
+        km.build_session = cleared
+        try:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                km.Handler._dispatch_ws(_Self(), {"type": "activeTab", "id": S2}, c)
+                km.Handler._dispatch_ws(_Self(), {"type": "needFull", "id": S2, "why": "rest-open"}, c)
+        finally:
+            km.build_session = real
+        full = self._frames(c, "session", S2)
+        self.assertEqual(len(full), 1, "the cleared conversation is the session's word: sent, not held back as a failed read")
+        self.assertEqual([e["kind"] for e in full[0]["events"]], ["clear", "system"])
+        self.assertNotIn(S2, c.get("askedFull") or ())
+        self.assertEqual(self.notices, []); self.assertNotIn("EMPTY", err.getvalue())
+
+    # ── 4: the task fold books its counts once a build ──
+    def test_74_the_task_fold_takes_the_fold_lock_once_a_build_not_once_a_turn(self):
+        sid = "11111111-2222-3333-4444-121212121274"
+        turns = [{"id": "t%d" % i, "atoms": [{"uuid": "11111111-2222-3333-4444-8%011d" % i, "t": i, "kind": "assistant"}]} for i in range(60)]
+        saved = (dict(km._task_fold_stats), km._chat_memo_bump)
+        calls = []
+        km._chat_memo_bump = lambda stats, key, n=1: (calls.append((key, n)), saved[1](stats, key, n))[1]
+        for k in km._task_fold_stats:
+            km._task_fold_stats[k] = 0
+        try:
+            self.assertIsNone(km._fold_tasks({"turns": turns}, sid))          # sixty turns scanned
+            self.assertEqual((calls, dict(km._task_fold_stats)), ([("miss", 60)], {"hit": 0, "miss": 60}), "one booking, the same count")
+            del calls[:]
+            km._fold_tasks({"turns": turns}, sid)                               # the same turns: every one served from the memo
+            self.assertEqual((calls, dict(km._task_fold_stats)), ([("hit", 60)], {"hit": 60, "miss": 60}))
+        finally:
+            km._chat_memo_bump = saved[1]
+            km._task_fold_stats.clear(); km._task_fold_stats.update(saved[0])
+            km._task_fold_memo.pop(sid, None)
 
 
 class WhatNeverReadABackgroundBuild(_Base):

@@ -4280,15 +4280,24 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
             with _frame_lock:              #  return unpinned, so a session already in the cache froze nothing
                 return _frame_pin_parse(fr, fsid, hit[1], key)   # and a mid-pass append reached a later stage
         return hit[1]                      #  only - the two-worlds shape the frame exists to prevent
-    session = em.parse_session(files[0], rompuuid=fsid, candidate_files=list(files),
-                               states=str(states), postal_log=str(MESSAGES), now=now,
-                               sdk_human=(human := bool(sdk_human) if sdk_human is not None else bool(_sdk_owned(fsid))),   # the caller's answer, else the judges', read on a miss
-                               leaf_override=cut or None, asm_mode_out=(_am := asm_mode_out if asm_mode_out is not None else []))
+    with em.read_failures() as _fails:
+        session = em.parse_session(files[0], rompuuid=fsid, candidate_files=list(files),
+                                   states=str(states), postal_log=str(MESSAGES), now=now,
+                                   sdk_human=(human := bool(sdk_human) if sdk_human is not None else bool(_sdk_owned(fsid))),   # the caller's answer, else the judges', read on a miss
+                                   leaf_override=cut or None, asm_mode_out=(_am := asm_mode_out if asm_mode_out is not None else []))
     if stats is not None:
         stats["miss"] = True
         stats["key"] = key                             # the key the fresh tree is stored under (None when a stat failed)
     _PARSE_MISSES[0] += 1                                  # a cold parse (T323: /perf parses)
-    if key is not None:
+    # A transcript that is there and could not be READ (2026-11-16): the readers answer it with no records, so the tree is
+    # an empty session like a new one's. Stored under the file's stat it stood for every later ask at that stat: a file
+    # readable again with the same bytes went on parsing as empty until it next changed. It is not stored, so the next ask
+    # reads again, and the tree says why it is empty (`_readFailed`), for a caller that must not take it for the session's
+    # word (the kernel's chat build, build_session).
+    _failed = next((e for f, e in _fails if f in {str(x) for x in files}), None)
+    if _failed is not None and isinstance(session, dict):
+        session["_readFailed"] = getattr(_failed, "strerror", None) or type(_failed).__name__
+    if key is not None and _failed is None:
         _parse_store(fsid, cut, key, session, leaf, human, (_am[-1] if _am else "full"))   # LRU, never a wholesale clear
     if fr is not None:                     # pin under the frame the KEY went into (never a re-read _frame: a
         with _frame_lock:                  #  parse spanning a pass boundary must not land keyless in the next
