@@ -99,6 +99,7 @@ function page(typed = "ship the release notes") {
     const registerOptimistic = () => {}, previewKind = () => null;
     const isClearCmd = () => false, isNewCmd = () => false;
     const clearConfirmDetail = () => null, openTopTitles = () => [], ledgers = new Map();
+    const clearDetailBehind = (sid, detail) => detail;   // no tab in this world is at rest: the clear's detail as it stands
     const openMcpPanel = () => {}, setComposerAskMode = () => {};
     const vscodeApi = { postMessage: () => { throw new Error("a normal send leaves by flushStaged in this world"); } };
     const pendingRewind = new Map(), reconcileRewind = () => {}, appendActive = () => {};

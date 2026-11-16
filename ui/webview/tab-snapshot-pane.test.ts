@@ -21,6 +21,7 @@ import { sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
 import { snapshotModel, snapshotHeading, rowWords, type SnapModel } from "./tab-snapshot";
 import { statusChip } from "./status-chip";
 import { rowStillOpen, installSnapshotEscape, reconcileRows } from "./tab-snapshot-view";
+import { newSkeletonState, onFull, onRest, type SkeletonState } from "./skeleton-tabs";
 
 const requireCjs = createRequire(__filename);
 const ui = (...p: string[]) => fs.readFileSync(path.resolve(process.cwd(), "..", "ui", ...p), "utf8");
@@ -130,6 +131,7 @@ const CLICKS: FakeEl[] = [];
 type Hooks = {
   content: FakeEl; bar: FakeEl; composer: FakeEl; sendBtn: FakeEl;
   sessions: Map<string, any>; ledgers: Map<string, any>; tabMeta: Map<string, any>; closingTabs: Map<string, number>; views: Map<string, any>;
+  skeletonTabs: SkeletonState;   // render.ts's skeleton set: a member in it is read from the kernel's status (snapSessionOf, 2026-11-15)
   lastStripItems: StripItem[]; order: string[]; collapsed: Set<string>; nowMs: number; pickerOpen: boolean;
   calls: string[]; delegates: Array<{ root: FakeEl; handlers: Record<string, (node: FakeEl, ev: Event) => void> }>;
   winCap: Function[]; winBub: Function[]; writes: any[];
@@ -171,6 +173,7 @@ function lift(): (H: Hooks) => Api {
     const settings = { stripGroupRows: true };
     let order = H.order, lastStripItems = H.lastStripItems, collapsedTabIds = H.collapsed;
     const sessions = H.sessions, ledgers = H.ledgers, tabMeta = H.tabMeta, closingTabs = H.closingTabs, views = H.views;
+    const skeletonTabs = H.skeletonTabs;
     const el = (tag, cls) => new H.FakeEl(tag, cls);
     const document = {
       get activeElement() { return H.doc.activeElement; },
@@ -258,7 +261,7 @@ function world(active = "web", groups = parseTabGroups(null), ids = ["web", "api
     ["api", { summary: "Designing the notes schema", needsInput: true, tree: [] }],
   ]);
   const H: Hooks = { content, bar, composer, sendBtn: new FakeEl("button"), sessions, ledgers, tabMeta: new Map([["tests", { name: "tests", color: null }]]),
-    closingTabs: new Map(), views: new Map(), lastStripItems: plan.items, order: ids, collapsed: plan.folded, nowMs: T0 * 1000, pickerOpen: false,
+    closingTabs: new Map(), views: new Map(), skeletonTabs: newSkeletonState(), lastStripItems: plan.items, order: ids, collapsed: plan.folded, nowMs: T0 * 1000, pickerOpen: false,
     calls: [], delegates: [], winCap: [], winBub: [], writes: [], FakeEl, doc: DOC,
     snapshotModel, snapshotHeading, rowWords, statusChip, rowStillOpen, installSnapshotEscape, reconcileRows, homeSectionOf, neighborOfFolded, setSectionCollapsed,
     headWords, sectionPip, sectionPipMembers, sectionPipTitle, groups, views0: V, viewTagUnion, menus: [], navDeps: null, ...opts };
@@ -794,4 +797,44 @@ test("executed: the guide describes the fold rule and the view", () => {
   // the paragraph's chip word (plans/needs-you.md; the docs restoration moved the paragraph here with the old word once)
   assert.match(REF, prose("with the same words and colours: **Needs you** when the feed shows one of the session's cards under Needs you or the session is stopped on a prompt"));
   assert.match(REF, prose("the **Needs you** chip follows the feed, one refresh behind it at most"));
+});
+
+test("executed: a member at rest is painted from the copy the page holds with the kernel's status over it: the row turns to Needs you, keeps its last message as the one loaded here, and a full puts the session's own row back", () => {
+  // 2026-11-15: a tab nobody is watching is no longer rebuilt, so on a busy board most members of a section are at rest.
+  // The page keeps each copy; render.ts lays every status frame over the copy's status (noteHeldStatus), which is what
+  // this test does by hand, and marks the row behind.
+  const { H, api, content } = world();
+  api.set({ snapView: "infra" });
+  api.renderSnapshot();
+  const host = content.byId("tab-snapshot")!;
+  const row = (id: string) => rowsOf(host).find((n) => n.dataset.id === id)!.children[0];
+  assert.ok(row("web").querySelector(".snap-pip")!.has("working"));
+  assert.equal(row("web").querySelector(".snap-now")!.textContent, "Add the notes list page");
+  // the kernel takes web back: its transcript moved while this page was on another tab. The copy stays; its status is the frame's
+  onFull(H.skeletonTabs, "web");
+  assert.equal(onRest(H.skeletonTabs, "web", { state: "needsInput" }, true), "behind");
+  const web = H.sessions.get("web");
+  web.status = { ...web.status, state: "needsInput", sinceEpoch: (T0 - 5) * 1000, needsYou: true, provisional: true };
+  api.renderSnapshot();
+  assert.ok(row("web").querySelector(".snap-pip")!.has("awaiting"), "the pip is the kernel's word for it now");
+  assert.equal(row("web").querySelector(".chip")!.text(), "Needs you");
+  assert.equal(row("web").querySelector(".snap-now")!.textContent, "", "what the stale ledger said it was doing is withheld");
+  assert.equal(row("web").title, "Last message loaded here: Adding the list page.\nIt has written more since. Click to open it and catch up.");
+  assert.equal(row("web").querySelector(".snap-when")!.dataset.t, String(T0 - 5), "the time is the state's start, later than the copy's last event");
+  // a tab the page holds NO copy of (a skeleton) is a row from the kernel's status alone
+  H.skeletonTabs.ids.add("tests"); H.skeletonTabs.order.push("tests");
+  H.skeletonTabs.status.set("tests", { state: "working", sinceEpoch: (T0 - 2) * 1000, needsYou: false });
+  api.set({ snapView: "qa" }); api.renderSnapshot();
+  const qa = content.byId("tab-snapshot")!;
+  const tests = rowsOf(qa).find((n) => n.dataset.id === "tests")!.children[0];
+  assert.ok(tests.querySelector(".snap-pip")!.has("working"));
+  assert.equal(tests.title, "Not loaded here.\nClick to open this session.");
+  // the click's full arrives for web: the session's own row again
+  api.set({ snapView: "infra" });
+  onFull(H.skeletonTabs, "web");
+  web.status = { state: "working", sinceEpoch: (T0 - 30) * 1000 };
+  api.renderSnapshot();
+  const again = rowsOf(content.byId("tab-snapshot")!).find((n) => n.dataset.id === "web")!.children[0];
+  assert.equal(again.querySelector(".snap-now")!.textContent, "Add the notes list page");
+  assert.match(again.title, /^Last message: Adding the list page\./);
 });

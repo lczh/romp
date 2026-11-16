@@ -15,7 +15,9 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 test("the row type carries the flag, and a provisional session's section wears the light mark with a title that says why", () => {
   assert.match(SRC, /interface FleetSession \{(?:[^}]|\{[^}]*\})*provisional\?: boolean;/, "the kernel's flag on the row");
   assert.match(SRC, /if \(s\.provisional\) \{ sec\.classList\.add\("fl-prov-sess"\);/, "the section's mark");
-  assert.match(SRC, /head\.title = s\.provisional \? "Open this session: its transcript has not been loaded since the restart, so its goals are read from the store and their jumps wait for the tab" : "Open this session";/, "the head says so, and still opens");
+  // the words fit both rows the kernel sends provisional (2026-11-15): a tab not built since the restart, and a tab nobody is
+  // watching, which is no longer rebuilt; "since the restart" was false for the second
+  assert.match(SRC, /head\.title = s\.provisional \? "Open this session: its transcript is not loaded right now, so its goals are read from the store and their jumps wait until it is opened" : "Open this session";/, "the head says so, and still opens");
   assert.match(CSS, /\n\.fl-prov-sess \.fl-name \{ border-bottom: 1px dashed rgba\(255, 255, 255, 0\.25\); \}/, "the light mark: the provisional cards' dashed underline on the name");
 });
 

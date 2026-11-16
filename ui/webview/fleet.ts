@@ -638,7 +638,7 @@ function render() {
           : "this session neither sends nor receives peer mail";
         head.appendChild(mo);
       }
-      head.title = s.provisional ? "Open this session: its transcript has not been loaded since the restart, so its goals are read from the store and their jumps wait for the tab" : "Open this session";
+      head.title = s.provisional ? "Open this session: its transcript is not loaded right now, so its goals are read from the store and their jumps wait until it is opened" : "Open this session";
       head.dataset.act = "open"; head.dataset.sid = s.sid;   // click-safe: action lives on the #fleet-list delegate
       head.tabIndex = 0; head.setAttribute("role", "button");   // focusable: Enter opens, the menu key or Shift+F10 opens the row's menu (2026-09-16)
       sec.appendChild(head);

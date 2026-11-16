@@ -481,8 +481,16 @@ class SkeletonReconnect(unittest.TestCase):
                         "nested in the status branch, ahead of the guard the fall-through still meets")
         self.assertEqual(_owners(inspect.getsource(km), '"askedFull"'),
                          {"_client_reset_chat_sid", "_client_reset_chat_base", "_resolve_reconnect", "_held_as_skeleton_by_all",
-                          "_send_chat_or_status", "_send_chat_proto2", "_send_chat_locked"},
+                          "_send_chat_or_status", "_send_chat_proto2", "_send_chat_locked",
+                          "_rest_blocker_locked"},       # a READER (2026-11-15): a tab a client asked for whole is never taken back to rest
                          "the mark is touched only in these, each under the client's slot lock")
+        # …and that reader is reached only from the rest's two passes, each inside the client's slot lock
+        self.assertEqual(_owners(inspect.getsource(km), "_rest_blocker_locked("), {"_rest_blocked", "_rest_unwatched"})
+        for fn in (km._rest_blocked, km._rest_unwatched):    # the read-only pass, and the pass that rests
+            src = inspect.getsource(fn)
+            self.assertEqual(src.count("_rest_blocker_locked(c, sid, k)"), 1, fn.__name__)   # k: the count of watched tabs its push read
+            at = src.index("_rest_blocker_locked(c, sid, k)")
+            self.assertIn("with _client_lock(c):", src[src.rfind("for c in clients:", 0, at):at], fn.__name__ + " holds the lock")
         # the byte windows tests/test_chat_delta_resync.py and ui/webview/chat-delta-resync.test.ts read still hold their pins
         src = inspect.getsource(km)
         j = src.find("def _client_reset_chat_sid(client, sid):")
@@ -711,13 +719,14 @@ class SkeletonReconnect(unittest.TestCase):
                           "_held_as_skeleton_by_all",   # the cold-tab gate's reader (2026-09-14), under the lock
                           "_send_light_status",         # ...and its status send, membership re-checked under the lock (round three)
                           "_held_in_some_form",         # a needFull repair's read of what the page holds in any form, under the lock (2026-10-10)
+                          "_rest_unwatched",            # a second WRITER (2026-11-15): a tab nobody watches joins the set of each client that held it whole
                           "_tab_order_frame", "_send_chat_or_status", "_send_tab_order",
                           # the two READERS of the connect query's skeleton=1 term (a later chat column's dial,
                           # 2026-09-11): _ws sets the client's `reconnect` and `skeletonOnReady` flags from it, and
                           # _shim writes the term; neither touches the client's set
                           "_ws", "_shim"},
                          "the set is touched only in its helpers — a new site must join this list AND take the lock")
-        for name in ("_client_reset_chat_base", "_resolve_reconnect", "_send_chat_or_status", "_send_tab_order"):
+        for name in ("_client_reset_chat_base", "_resolve_reconnect", "_send_chat_or_status", "_send_tab_order", "_rest_unwatched"):
             s = inspect.getsource(getattr(km, name))
             self.assertLess(s.index("with _client_lock("), s.index('"skeleton"'), name + ": the lock comes first")
         # the two lock-free helpers are reached only from bodies that hold the lock

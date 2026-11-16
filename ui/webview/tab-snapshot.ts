@@ -24,6 +24,13 @@ export interface SnapColor { bg: string; fg: string }
 export interface SnapSessionLike {
   name?: string; color?: SnapColor | null; status?: SnapStatusLike | null;
   events?: ReadonlyArray<SnapshotEventLike> | null;
+  /** the page holds NO copy of this session to show (a skeleton tab, skeleton-tabs.ts): `status` is the kernel's own
+   *  word for it, sent every cycle, and there is no tail to read */
+  resting?: boolean;
+  /** the copy the page holds is BEHIND (a tab at rest: its transcript moved while no page was watching it, and the
+   *  kernel stopped sending it): `status` is still the kernel's, laid over the copy's, and the tail is the copy's, so
+   *  the row's last message is said to be the one loaded here */
+  behind?: boolean;
 }
 export interface SnapLedgerLike {
   summary?: string | null; workingNote?: string | null;
@@ -78,6 +85,11 @@ export interface SnapRow {
   closed: boolean;
   /** no session frame yet (a placeholder tab): name and color from the strip's meta alone */
   loading: boolean;
+  /** a session the page holds no copy of (SnapSessionLike.resting): its state is the kernel's, its last message and
+   *  what it is doing are not shown, and the hover says it is not loaded here */
+  resting: boolean;
+  /** the copy read is behind (SnapSessionLike.behind): the hover says its last message is the one loaded here */
+  behind: boolean;
 }
 
 export interface SnapModel { name: string; color: string; rows: SnapRow[] }
@@ -206,12 +218,18 @@ export function snapshotRow(id: string, s: SnapSessionLike | null | undefined, l
     chip,
     now: nowLine(lg),
     note: noteLine(lg),
-    lastT: s ? lastActivity(s) : null,
-    lastMsg: s ? lastMessage(s) : "",
+    // a resting session hands no tail: the state's start, from the kernel's status. A copy that is behind hands an old
+    // one: the later of its newest event and the state's start, which the kernel keeps current
+    lastT: s ? (s.behind ? laterOf(lastActivity(s), s.status?.sinceEpoch ? Math.floor(s.status.sinceEpoch / 1000) : null) : lastActivity(s)) : null,
+    lastMsg: s && !s.resting ? lastMessage(s) : "",
     closed: st.closed,
     loading: !s,
+    resting: !!s?.resting,
+    behind: !!s?.behind,
   };
 }
+
+const laterOf = (a: number | null, b: number | null): number | null => (a == null ? b : b == null ? a : Math.max(a, b));
 
 const sameChip = (a: ChipWords | null, b: ChipWords | null): boolean =>
   a === b || (!!a && !!b && a.state === b.state && a.text === b.text
@@ -220,7 +238,7 @@ const sameChip = (a: ChipWords | null, b: ChipWords | null): boolean =>
 const sameRow = (a: SnapRow, b: SnapRow): boolean =>
   a.id === b.id && a.name === b.name && a.pip === b.pip && a.state === b.state
   && a.needsYou === b.needsYou && a.waiting === b.waiting && sameChip(a.chip, b.chip) && a.now === b.now && a.note === b.note
-  && a.lastT === b.lastT && a.lastMsg === b.lastMsg && a.closed === b.closed && a.loading === b.loading
+  && a.lastT === b.lastT && a.lastMsg === b.lastMsg && a.closed === b.closed && a.loading === b.loading && a.resting === b.resting && a.behind === b.behind
   && (a.color === b.color || (!!a.color && !!b.color && a.color.bg === b.color.bg && a.color.fg === b.color.fg));
 
 export function sameModel(a: SnapModel | null | undefined, b: SnapModel): boolean {
@@ -260,6 +278,7 @@ export function rowWords(r: SnapRow): { label: string; title: string } {
   if (stateWord) parts.push(stateWord);
   if (r.now) parts.push(r.now);
   if (r.note) parts.push(`its note: ${r.note}`);
-  const title = (r.lastMsg ? `Last message: ${r.lastMsg}` : r.loading ? "opening…" : "No messages yet.") + "\nClick to open this session.";
+  const title = (r.lastMsg ? `${r.behind ? "Last message loaded here" : "Last message"}: ${r.lastMsg}` : r.loading ? "opening…" : r.resting ? "Not loaded here." : "No messages yet.")
+    + (r.behind ? "\nIt has written more since. Click to open it and catch up." : "\nClick to open this session.");
   return { label: parts.join("; "), title };
 }

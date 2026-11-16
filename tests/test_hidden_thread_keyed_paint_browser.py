@@ -13,6 +13,12 @@ transcript grows. On the hidden thread:
   3. switching to the tab shows the thread as it now stands with no rebuild: nothing painted while it was hidden is removed.
 Compact mode (the default) and normal mode. SYNTHETIC fixtures only (a notes-api dashboard with sessions named web and api);
 skips loudly without the extension deps or a Playwright browser.
+
+Since 2026-11-15 the kernel sends a hidden tab's frames to this page only while SOME connected page is watching that tab: a tab
+nobody watches goes to rest instead (tests/test_unwatched_tabs.py; its real-browser half is tests/test_unwatched_tabs_browser.py).
+So the lab opens a second socket that names `api` its active tab, the stand-in for a second page (a phone, a split's other
+column) showing it, and the page under test, which holds `api` hidden, goes on receiving its frames: the case the keyed paint
+of a hidden thread is for.
 """
 import json
 import os
@@ -115,6 +121,8 @@ const waitFor = async (fn, arg, ms) => { try { await page.waitForFunction(fn, ar
 const painted = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 0)))));
 const idle = async () => { await painted(); await page.evaluate(() => new Promise((r) => (window.requestIdleCallback || setTimeout)(() => r(), { timeout: 2000 }))); await page.waitForTimeout(300); await painted(); };
 const out = {};
+// a second page is watching api (the header's last paragraph): a bare socket that names it active, held open for the run
+await page.evaluate((u) => new Promise((res, rej) => { const w = new WebSocket(u); window.__apiWatcher = w; w.onopen = () => res(null); w.onerror = () => rej(new Error("the watcher's socket did not open")); }), cfg.watcher);
 // the hidden api thread, built in idle from its full frame
 out.hiddenBuilt = await waitFor((sid) => { const th = document.querySelector('#content .thread[data-session="' + sid + '"]');
   return !!th && th.style.display === "none" && !!th.querySelector(".turn.turn-user") && !!th.querySelector(":scope > .tx-spacer-top"); }, cfg.api, 20000);
@@ -198,7 +206,9 @@ class ServedHiddenThreadKeyedPaint(unittest.TestCase):
         Path(console_log).write_text("")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "web": WEB, "api": API, "compact": self.COMPACT,
-                       "apiTranscript": self.transcripts[API], "t0": self.t0, "consoleLog": console_log, "out": os.path.join(self.lab, "result.json")}, f)
+                       "apiTranscript": self.transcripts[API], "t0": self.t0, "consoleLog": console_log, "out": os.path.join(self.lab, "result.json"),
+                       # the second page's socket: a chat client whose active tab is api (the header's last paragraph)
+                       "watcher": "ws://127.0.0.1:%d/ws?app=chat&iid=lab-api-watcher&active=%s&token=%s" % (self.port, API, self.token)}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)

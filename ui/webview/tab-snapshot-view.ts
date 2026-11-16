@@ -13,10 +13,10 @@
  *  frame yet, `loading`) needs its meta, or the frame that landed meanwhile; a tab the user closed
  *  (closingTabs) is neither. `row` is the model row the click landed on; none (never expected) defers to
  *  the session. */
-export function rowStillOpen(row: { loading: boolean } | undefined, hasSession: boolean, hasMeta: boolean, closing: boolean): boolean {
+export function rowStillOpen(row: { loading: boolean; resting?: boolean } | undefined, hasSession: boolean, hasMeta: boolean, closing: boolean): boolean {
   if (closing) return false;
   if (hasSession) return true;
-  return !!row?.loading && hasMeta;
+  return (!!row?.loading || !!row?.resting) && hasMeta;   // a resting row may hold no session at all (a tab withheld since the page loaded): its meta is its tab
 }
 
 /** What installSnapshotEscape needs of the page: `showing` (the view is up), `typing` (the target keeps its

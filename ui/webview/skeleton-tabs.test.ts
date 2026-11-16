@@ -6,6 +6,7 @@ import * as assert from "node:assert/strict";
 import { onHostSocketUp } from "./skeleton-tabs";
 import { newSkeletonState, applyTabOrderSkeleton, onStatus, holdStatus, onFull, onDismiss, onSocketUp, nextPrefetch,
          renderKind, type SkeletonState } from "./skeleton-tabs";
+import { onRest } from "./skeleton-tabs";
 
 const A = "11111111-2222-3333-4444-aaaaaaaaaaaa";
 const B = "11111111-2222-3333-4444-bbbbbbbbbbbb";
@@ -198,4 +199,70 @@ test("a relay's reopen forgets what loaded for that host on the dead relay socke
   assert.ok(st.loaded.has(L1), "the local tab's stays: its socket did not move");
   applyTabOrderSkeleton(st, [R1, R2], [L1, R1, R2]);
   assert.deepEqual([...st.ids].sort(), [R1, R2].sort(), "the restarted kernel's list is adopted: the tabs are skeletons, so the page asks for their frames");
+});
+
+// ── a tab at REST (2026-11-15): the kernel takes back a tab this page had loaded, because its transcript moved while
+// no connected page was watching it (kernel.py _rest_unwatched; tests/test_unwatched_tabs.py drives the kernel half).
+// The page keeps the copy and shows it; `rested` says the copy is behind ──
+
+test("a rest frame for a tab the page holds marks its copy behind and keeps it a loaded tab: no skeleton, whatever the strips list", () => {
+  const st = newSkeletonState();
+  applyTabOrderSkeleton(st, [B], [A, B, C]);
+  onFull(st, B);                                    // the page loaded B (its click, the prefetch)
+  assert.equal(onRest(st, B, { state: "working", provisional: true }, true), "behind");
+  assert.equal(st.rested.has(B), true, "the copy is behind");
+  assert.equal(renderKind(st, B, true), "loaded", "…and still what the strip draws and a click shows: nothing is hidden");
+  assert.equal(st.ids.has(B), false);
+  // the kernel holds B as a skeleton from here and its strips say so; the page does not adopt that while it holds the copy,
+  // on this socket or the next (a redial's first strip lists every tab but the one on screen)
+  assert.equal(applyTabOrderSkeleton(st, [B], [A, B, C]), false, "the list names it: nothing changes on the page");
+  onSocketUp(st);
+  applyTabOrderSkeleton(st, [B, C], [A, B, C]);
+  assert.deepEqual(held(st), [C], "a tab never rested is a skeleton after a redial, as before; the rested one keeps its copy on show");
+  assert.equal(renderKind(st, B, true), "loaded");
+  // the full is the answer: the copy is current again, and nothing brings the mark back but a new rest frame
+  assert.equal(onFull(st, B), false, "it was not a skeleton: the caller appends in place, it does not re-show");
+  assert.equal(st.rested.has(B), false);
+  // a tab torn down while at rest leaves no record behind
+  onRest(st, B, { state: "working" }, true);
+  onDismiss(st, B);
+  assert.deepEqual([st.ids.has(B), st.rested.has(B), st.loaded.has(B)], [false, false, false]);
+});
+
+test("a rest frame for a tab the page holds NO copy of makes it a skeleton like any other: its status stored, fetched once in idle", () => {
+  const st = newSkeletonState();
+  assert.equal(onRest(st, C, { state: "working" }, false), "skeleton");
+  assert.equal(renderKind(st, C, false), "skeleton");
+  assert.deepEqual(st.status.get(C), { state: "working" });
+  assert.equal(st.rested.has(C), false, "nothing is behind: there is no copy");
+  assert.equal(nextPrefetch(st, A, none, false, all), C);
+  assert.equal(onFull(st, C), true);
+});
+
+test("the idle prefetch never fetches a tab at rest: it fills a tab this page never held, once, and a tab that went behind is brought up to date when it is opened", () => {
+  const st = newSkeletonState();
+  applyTabOrderSkeleton(st, [B, C, D], [A, B, C, D]);
+  // the chain fills B, C and D, one per idle, each once
+  const fetched: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const next = nextPrefetch(st, A, none, false, all);
+    if (!next) break;
+    fetched.push(next);
+    onFull(st, next);
+  }
+  assert.deepEqual(fetched, [B, C, D], "one build per tab the page had never held");
+  // every one of them is working: each goes behind the moment it lands, and the kernel takes it back and lists it
+  for (let round = 0; round < 5; round++) {
+    for (const id of [B, C, D]) onRest(st, id, { state: "working" }, true);
+    applyTabOrderSkeleton(st, [B, C, D], [A, B, C, D]);
+    assert.equal(nextPrefetch(st, A, none, false, all), null, "round " + round + ": nothing is fetched again in idle");
+    assert.deepEqual(held(st), [], "…and none of them is a skeleton: each shows the copy it has");
+  }
+  // a new socket changes nothing for them (their copies are still behind and still shown)
+  onSocketUp(st);
+  applyTabOrderSkeleton(st, [B, C, D], [A, B, C, D]);
+  assert.equal(nextPrefetch(st, A, none, false, all), null);
+  // a caller that put a rested id in the set all the same is still not asked for it
+  st.ids.add(B); st.order.push(B);
+  assert.equal(nextPrefetch(st, A, none, false, all), null);
 });

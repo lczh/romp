@@ -53,19 +53,21 @@ import { flash } from "./actions";   // its own line: the import above is pinned
 import { awaitWord, awaitBreakdown, groupRows, rowIds, waitsNote, listBreakdown, keptWord, GROUP_TITLE, ROW_KINDS, workingFor, type AwaitRow } from "./spin-caption";
 import { CHIP_LABEL, chipWords, statusChip, type ChipState } from "./status-chip";   // the session status chip: its words and its classes, the one builder the bar and the tag overview's rows share (T322b)
 import { isClearCmd, isNewCmd, openTopTitles, clearConfirmDetail, endConfirmDetail, RENAME_SUBLINE, END_SESSION_STANDING } from "./clear-confirm";
+import { withBehindNote, CLEAR_BEHIND_DETAIL } from "./clear-confirm";   // a confirm that lists cards from a copy that is behind says so (2026-11-15)
 import { addRestartRow, settleRestart } from "./restart-row";   // the one Restart session row, shared with the Sessions pane's menu
 import { applyNowOffered, applyNowSub, requestApplyNow, APPLY_NOW_LABEL, type WaitingPick } from "./apply-now";   // the Apply now row a waiting pick's control offers (2026-10-01)
 import { prebuildPlan, type ViewState } from "./prebuild";
 import { historyMarks, historyBands, windowSpans, HIST_H, HIST_GAP } from "./glow-history";
 import { newSkeletonState, applyTabOrderSkeleton, onStatus, holdStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind } from "./skeleton-tabs";
 import { onHostSocketUp } from "./skeleton-tabs";   // the relay's reopen forgets what loaded on the dead relay socket (2026-09-23)
+import { onRest } from "./skeleton-tabs";   // a tab the kernel takes back because nobody is watching it (2026-11-15)
 import { reconcileTabOrder, adoptArrival } from "./tab-order";
 import { applyViewOrder, hearSharedOrder, readViewOrder, setViewOrderPublisher, writeViewOrder } from "./view-order";   // the read: a page with no federation manager arranges its own strip (applyTabOrder, frame-listener.ts paneArranges)
 import { planStrip, readTabGroups, writeTabGroups, setSectionCollapsed, sectionRef, isPinned, setPinned, prunePinned, reachableFrom, headWords,
          carrySectionToName, forgetSection, restoreSection,
          followAdoption, reorderTagOrder, homeSectionOf, neighborOfFolded, revealedTabs, phoneStandIns, hearSharedFolds, flowGroups,
          setFoldsPublisher, TABGROUPS_KEY, TABGROUPS_SHARED_KEY, TABGROUPS_EVENT, type TabSection, type StripItem, type PaintItem } from "./tab-groups";
-import { snapshotModel, snapshotHeading, rowWords, type SnapModel, type SnapRow } from "./tab-snapshot";
+import { snapshotModel, snapshotHeading, rowWords, type SnapModel, type SnapRow, type SnapSessionLike, type SnapLedgerLike } from "./tab-snapshot";
 import { rowStillOpen, installSnapshotEscape, reconcileRows } from "./tab-snapshot-view";
 import { tabStateClass, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
 import { composeTabWidgets, composeTabRing, applyTabBadgeMode, needsYouPhrase, ringSwitch, tabHotkey, miniChord, needsYouWidgetOn } from "./tab-widgets";   // the tab-title widgets (T379): the dot, the context bar and the hot-key keycap compose onto every tab from the registry, and the rings too, one class at a time; miniChord is the chord the strip signature reads; needsYouWidgetOn gates the keycap-room strip class
@@ -1047,6 +1049,20 @@ let skeletonLoading: string | null = null;
 // this exists to make impossible.
 function liveSession(id: string | null | undefined): Session | undefined {
   return id && !skeletonTabs.ids.has(id) ? sessions.get(id) : undefined;
+}
+// Whether what this page holds of `id` is not current: a skeleton (nothing loaded), or a tab at rest (a copy that is
+// behind, skeleton-tabs.ts `rested`). A reader that lists something from the copy says so (the confirms' open cards).
+function tabBehind(id: string | null | undefined): boolean {
+  return !!id && (skeletonTabs.ids.has(id) || skeletonTabs.rested.has(id));
+}
+// The clear confirm's detail for a tab that is behind: the cards it lists are the page's copy of the session's board, so
+// the list may miss one opened since and says so; with nothing listed it still asks, since what is open is not known
+// here yet. `text` is the typed command: one that clears nothing here (sendComposer's own two tests) and a current tab's
+// detail pass through.
+function clearDetailBehind(sid: string, detail: string | null, text: string): string | null {
+  const clearing = isClearCmd(text) || (liveSession(sid)?.status?.backend === "codex" && isNewCmd(text));
+  if (!clearing || !tabBehind(sid)) return detail;
+  return detail ? withBehindNote(detail, true) : CLEAR_BEHIND_DETAIL;
 }
 // The romp identity palette for the tab right-click color picker (the user 2026-06-29). Fetched once from the
 // kernel's /palette so the client holds no color literals; empty until it lands (the menu just omits the row).
@@ -6800,6 +6816,7 @@ function postTabDropTag(d: TabDrop, id: string): boolean {
 // current-top-goal recency-coloured "(Xm ago)". One shared element, repositioned under the hovered tab and
 // clamped on-screen.
 let tabTipEl: HTMLElement | null = null;
+const TIP_BEHIND_NOTE = "Summary and Recent are from when this tab was last open here.";
 function hideTabTip(): void { if (tabTipEl) tabTipEl.style.display = "none"; }
 function showTabTip(tab: HTMLElement, s: Session): void {
   if (draggedId) return;   // a drag owns the strip — the info popover pinned open through the whole gesture, occluding the row below (the user's recording, 2026-08-28)
@@ -6938,6 +6955,13 @@ function showTabTip(tab: HTMLElement, s: Session): void {
       list.appendChild(item);
     }
     r.appendChild(k); r.appendChild(list); tip.appendChild(r);
+  }
+  if (tabBehind(s.id) && (lg?.summary || recentItems.length)) {
+    // a tab at rest (2026-11-15): the rows above this one are the kernel's, current on every status; the Summary and the
+    // Recent list are the page's copy, as of the tab's last full, and the tip says so in the labels' own dim
+    const r = el("div", "tab-tip-row tab-tip-behind");
+    const k = el("span", "tab-tip-k"); const v = el("span", "tab-tip-v"); v.textContent = TIP_BEHIND_NOTE;
+    r.appendChild(k); r.appendChild(v); tip.appendChild(r);
   }
   if (!tip.childElementCount) { tip.style.display = "none"; return; }
   tip.style.display = "block";
@@ -9052,7 +9076,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     state: st?.state,
     titles: openTopTitles(ledgers.get(id)?.tree),
     icon: ctxIcon("restart", false),
-    confirm: (title, detail, buttons, cb) => showConfirm(title, detail, buttons, cb),
+    confirm: (title, detail, buttons, cb) => showConfirm(title, withBehindNote(detail, tabBehind(id)), buttons, cb),   // the list is the page's copy: behind for a tab at rest, and said so
     post: () => { vscodeApi?.postMessage({ type: "restartSession", id }); },
   });
   // ── 5. FILES: Browse files (web only). A different kind of thing, it opens another surface; last and
@@ -16539,6 +16563,27 @@ installSnapshotEscape(window, {
   layerOpen: () => paneLayerOpen() || !!openCommentKey,
   leave: leaveSnapshot,
 });
+/** What a row of the section view reads for `id`. A SKELETON member (skeleton-tabs.ts: withheld after a reconnect, never
+ *  loaded here) is read from the kernel's status frames, the strip's own source for it: no status yet reads as no session
+ *  (the loading row). A member AT REST (its copy held, and behind since its transcript moved with no page watching it,
+ *  which is where most tabs of a busy board sit) is read from that copy, marked behind: its status is the kernel's (laid
+ *  over the copy's as it arrives), its last message the one the copy holds, said to be so. The ledger of either is not
+ *  current, so its now and note lines are withheld; the one field the row needs from it, whether a card of the session
+ *  is filed under needs-you, rides the status (`needsYou`, the feed's verdict). */
+function snapSessionOf(id: string): SnapSessionLike | null {
+  if (skeletonTabs.rested.has(id)) { const held = sessions.get(id); return held ? { ...held, behind: true } : null; }
+  if (!skeletonTabs.ids.has(id)) return sessions.get(id) ?? null;
+  const st = skeletonTabs.status.get(id) as Status | undefined;
+  if (!st) return null;
+  const m = tabMeta.get(id), held = sessions.get(id);
+  return { name: m?.name || held?.name, color: m?.color || held?.color || null, status: st, events: [], resting: true };
+}
+function snapLedgerOf(id: string): SnapLedgerLike | null {
+  const rested = skeletonTabs.rested.has(id);
+  if (!rested && !skeletonTabs.ids.has(id)) return ledgers.get(id) ?? null;
+  const st = (rested ? sessions.get(id)?.status : skeletonTabs.status.get(id)) as Status | undefined;
+  return st && typeof st.needsYou === "boolean" ? { needsInput: st.needsYou } : null;
+}
 /** Paint (or refresh) the view of `snapView`. False when that section is not on the strip any more: snapView
  *  is cleared and the caller shows the transcript; the section's absence is the event. */
 function renderSnapshot(): boolean {
@@ -16548,7 +16593,7 @@ function renderSnapshot(): boolean {
   const host = snapshotHost();
   if (!host) return false;
   const now = Date.now() / 1000;
-  const next = snapshotModel(head.head, (id) => sessions.get(id) ?? null, (id) => ledgers.get(id) ?? null, snapModel, (id) => tabMeta.get(id) ?? null);
+  const next = snapshotModel(head.head, snapSessionOf, snapLedgerOf, snapModel, (id) => tabMeta.get(id) ?? null);
   if (next === snapModel && host.childElementCount) {
     // nothing a row shows changed: the times tick in place, the DOM stands
     for (const w of host.querySelectorAll<HTMLElement>(".snap-when[data-t]")) {
@@ -16869,6 +16914,7 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   }
   document.getElementById("tab-loading")?.remove();   // the payload landed — the real view takes over in place
   skeletonLoading = null;                              // …so nothing is loading in the reader's face any more
+  if (activeId && skeletonTabs.rested.has(activeId)) catchUp(activeId);   // a tab at rest: the copy shows at once, and its full is asked for (2026-11-15)
   if (empty) empty.style.display = "none";
   restoreActiveDraftOnce();   // after a reload, drop the active tab's persisted draft back into the box (once)
   // A closed (dead) session is READ-ONLY: disable the composer so a message can't be black-holed into
@@ -20657,6 +20703,14 @@ function updateStatusline() {
   }
   if (!s) { sl.replaceChildren(); return; }   // no tab at all, or the UNFOCUSED pane (T357): the line says nothing, not the last session's chips
   sl.replaceChildren();
+  if (activeId && skeletonTabs.rested.has(activeId)) {
+    // the transcript above is the copy this page held, and it is behind (catchUp): said first on the line, in the loading
+    // line's dress, until the full lands. The chips after it are the kernel's own status, which is current.
+    const cu = openingLine(CATCHING_UP);
+    cu.classList.add("catching-up-line");
+    cu.title = CATCHING_UP_TITLE;
+    sl.appendChild(cu);
+  }
   if (s.sub) {
     // a subagent viewer has no session state, model or context to show — the header above the
     // transcript says what it is; the statusline just says the pane is read-only
@@ -22974,7 +23028,7 @@ function clearRefusedLatch(id: string): void {
 // counts asks by it — a nobase on a reconnect row means the skeleton branch missed a frame type.
 // resync = a delta whose base fingerprint disagreed with the page's tail run (chat-resync.ts); stale-full = the full this page
 // asked for was older than what it holds, asked once more (2026-09-23)
-type NeedFullWhy = "gap" | "nobase" | "skeleton-click" | "prefetch" | "skeleton-delta" | "resync" | "stale-full";   // (reattach retired with the detached client, T386 stage 2)
+type NeedFullWhy = "gap" | "nobase" | "skeleton-click" | "prefetch" | "skeleton-delta" | "resync" | "stale-full" | "rest-open";   // (reattach retired with the detached client, T386 stage 2)
 /** The page's resident TAIL run's first event key for `id`, sent with a needFull so the kernel serves the repair full
  *  from the held base (a superset, nothing dropped) or, when those turns are gone from the transcript, sets them aside
  *  via `rebased` (CONTENT THAT EXISTS NEVER GETS DROPPED, the user 2026-09-19). undefined when the page holds no tail run. */
@@ -23862,12 +23916,60 @@ function awaitKey(st: Status | undefined): string {
                          //   section field or a badge moving repaints the box; the kernel keys the same fields (_chat_build_sig)
 }
 
+// The copy of a skeleton tab the page still holds keeps the kernel's STATUS current (2026-11-15), never its events. The
+// bookkeeping readers of `sessions` read that status for tabs that are not on screen (a folded section's pip, the
+// mention roster, the retry tick's set, the tab's own menu), and a tab now rests for as long as nobody opens it: a
+// status frozen at the moment of the rest hid a session that had since stopped on a question behind its section's
+// fold. The frame's fields go OVER the copy's: a skeleton's status is the kernel's short one (the state, the needs-you
+// mark, the gauge, the model and effort), and what it does not carry (the billing the tab's menu offers, the
+// directory) stays as the last build said it. Display paths still read through liveSession, so nothing paints the
+// copy's events as current, and the full that loads the tab replaces the whole entry.
+function noteHeldStatus(id: string, status: unknown): void {
+  const held = sessions.get(id);
+  if (held && status) held.status = { ...held.status, ...(status as Status) };
+}
+
+// A tab at rest is ON SCREEN (2026-11-15): the copy the page holds is behind. Ask for the full (one ask per outstanding
+// load: requestFullSession's latch) and repaint the line above the message box, which says the transcript is catching up
+// while `rested` holds the id (updateStatusline). Nothing is hidden and nothing moves: the full that answers replaces
+// the copy through the ordinary upsert, which keeps the reader's place, and takes the line down (onFull).
+function catchUp(id: string): void {
+  if (!skeletonTabs.rested.has(id)) return;
+  requestFullSession(id, "rest-open");
+  updateStatusline();
+}
+// The line's words, and what its hover says (the same dress as the loading line: the accent and its three dots).
+const CATCHING_UP = "Catching up";
+const CATCHING_UP_TITLE = "This is the session as it was when it was last open here. Its newer turns are loading.";
+
 function statusOnly(msg: any) {
   // A SKELETON tab's status (2026-09-07): the kernel withholds its transcript and sends this instead, so the
   // chip stays honest. Store it and repaint the strip ONCE per animation frame (sixteen of these land in one
   // burst after a redial) — never the no-base repair below, which would ask for the full and defeat the
   // skeleton for every tab within a cycle.
-  if (onStatus(skeletonTabs, msg.id, msg.status) === "skeleton") { scheduleRenderTabs(); return; }
+  if (onStatus(skeletonTabs, msg.id, msg.status) === "skeleton") { noteHeldStatus(msg.id, msg.status); scheduleRenderTabs(); return; }
+  // A tab the kernel takes BACK (2026-11-15, skeleton-tabs.ts onRest): this page had loaded it, no connected page was
+  // watching it when its transcript moved, so the kernel stopped rebuilding it and will send this page no chat frame for
+  // it until the page asks. The copy the page holds stays, and stays a loaded tab: it is BEHIND from this frame on
+  // (`rested`), its status the kernel's from here (laid over the copy's: noteHeldStatus), and opening it shows the copy at
+  // once and asks for the full (showActive, catchUp). If it is the tab ON SCREEN (a click that landed while this frame
+  // was on the wire), the ask goes now and the line above the message box says it is catching up; nothing is hidden.
+  // With no copy held, the tab is a skeleton like any other: the loader, when it is the one on screen.
+  if (msg.rest === true && typeof msg.id === "string") {
+    const how = onRest(skeletonTabs, msg.id, msg.status, sessions.has(msg.id));
+    noteHeldStatus(msg.id, msg.status);
+    if (msg.id === activeId) { if (how === "behind") catchUp(msg.id); else showActive(); }
+    scheduleRenderTabs();
+    return;
+  }
+  // …and every status after it, while the tab rests: the kernel's short status, laid over the copy's (the state, the
+  // needs-you mark and the gauge move; what the short status does not carry stays as the last build said it)
+  if (skeletonTabs.rested.has(msg.id)) {
+    noteHeldStatus(msg.id, msg.status);
+    scheduleRenderTabs();
+    if (msg.id === activeId) updateStatusline();
+    return;
+  }
   const s = sessions.get(msg.id);
   if (!s) {
     // A status for a session this page holds NOTHING of, which the set does not list: a skeleton tab's whose strip has
@@ -25527,8 +25629,9 @@ function setupComposer() {
     const dropDetail = isClearCmd(text) ? clearConfirmDetail(openTopTitles(ledgers.get(sid)?.tree)) : null;
     const newDetail = (liveSession(sid)?.status?.backend === "codex" && isNewCmd(text)) ? clearConfirmDetail(openTopTitles(ledgers.get(sid)?.tree)) : null;
     const detail = dropDetail || newDetail;
-    if (detail) {
-      showConfirm("Clear this conversation?", detail,
+    const asks = clearDetailBehind(sid, detail, text);
+    if (asks) {
+      showConfirm("Clear this conversation?", asks,
         [{ label: "Cancel", value: "cancel" }, { label: "Clear anyway", value: "clear", danger: true }],
         (v) => { if (v === "clear") deliver(); });
       return;
@@ -26838,8 +26941,8 @@ function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
       // session holding an open task with no warning — the /clear gate has warned this way since
       // 2026-07-27, and ending drops the cards from the working surfaces the same way)
       showConfirm(`End “${nm}”?`,
-        endConfirmDetail(openTopTitles(ledgers.get(id)?.tree),
-          END_SESSION_STANDING),
+        withBehindNote(endConfirmDetail(openTopTitles(ledgers.get(id)?.tree),
+          END_SESSION_STANDING), tabBehind(id)),
         [{ label: "End session", value: "end", danger: true }, { label: "Cancel", value: "" }],
         (v) => {
           if (v !== "end") return;   // Cancel → nothing

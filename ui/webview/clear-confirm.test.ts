@@ -8,6 +8,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isClearCmd, isNewCmd, openTopTitles, clearConfirmDetail, endConfirmDetail } from "./clear-confirm";
+import { withBehindNote, BEHIND_NOTE, CLEAR_BEHIND_DETAIL } from "./clear-confirm";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
@@ -93,4 +94,16 @@ test("the chat boundary card counts the dropped cards, and hover names them", ()
 
 test("the feed's per-node clear story is src-aware — a romp boundary clear is not blamed on the user", () => {
   assert.match(FEED, /r\.src === "romp" \? "dropped with the cleared conversation" : "you cleared it"/);
+});
+
+test("a list read from a copy that is behind says so: one sentence after the detail, and words of its own for a clear with nothing listed", () => {
+  // 2026-11-15: a tab nobody had open is not kept up to date, so the cards these confirms name can miss one opened since
+  const d = endConfirmDetail(["write the search route"], "Its history stays.");
+  assert.equal(withBehindNote(d, false), d, "a current tab's confirm is unchanged");
+  assert.equal(withBehindNote(d, true), d + " " + BEHIND_NOTE);
+  assert.match(BEHIND_NOTE, /not up to date here/);
+  assert.match(BEHIND_NOTE, /may be missing from this list/);
+  assert.equal(clearConfirmDetail([]), null, "the clear confirm itself still asks nothing with no card open…");
+  assert.match(CLEAR_BEHIND_DETAIL, /still catching up/, "…so the caller asks with these words when the tab is behind");
+  assert.match(CLEAR_BEHIND_DETAIL, /not known here yet/);
 });

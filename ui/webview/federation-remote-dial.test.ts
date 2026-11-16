@@ -8,6 +8,8 @@
 // placeholder uuids).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { FederationManager, REMOTE_REDIAL_MS } from "./federation";
 
 const SID = "11111111-2222-3333-4444-555555555555";        // a session TESTHOST owns
@@ -34,7 +36,7 @@ let clock = 1_000_000_000;
 // The page's live dial terms, as the shim's __rompDialTerms would return them: a skeleton posture watching a
 // REMOTE tab (host-prefixed, as the dashboard carries it), proto 2.
 function terms(): any {
-  return { app: "chat", iid: PAGE_IID, active: "TESTHOST:" + SID, col: "", skeleton: 1, provrows: 0, proto: 2, delta: 1 };
+  return { app: "chat", iid: PAGE_IID, active: "TESTHOST:" + SID, col: "", skeleton: 1, provrows: 0, rest: 1, proto: 2, delta: 1 };
 }
 
 async function withManager(fn: (fm: any) => void | Promise<void>, opts: { noWid?: boolean } = {}): Promise<void> {
@@ -144,4 +146,16 @@ test("moving the active off a remote host sends that host an activeTab clear, so
     assert.deepEqual(toHost.map((m) => m.id), [SID, ""], "the host got the bare-sid focus, then a clear when it left");
     fm.conns.get("TESTHOST").closed = true;
   });
+});
+
+test("the dial states that this page takes a loaded tab back (rest=1), so a linked kernel need not rebuild tabs nobody is watching for it", async () => {
+  // 2026-11-15 (kernel.py _rest_unwatched): the term is the chat shim's own, carried like the diet's. Without it a remote
+  // kernel holds this page's tabs built on every cycle, the one page through the relay being the measured case.
+  await withManager((fm) => {
+    fm.outbound({ type: "ready", proto: 2 });
+    fm.openRemote("TESTHOST", true);
+    assert.equal(qOf(FakeWS.made[0].url).get("rest"), "1");
+  });
+  const src = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "federation.ts"), "utf8");
+  assert.match(src, /if \(t\.rest\) url \+= "&rest=1";/, "only when the page's terms say so: a pane of another app dials without it");
 });
