@@ -67,10 +67,34 @@ def _env(tc, key, value):
     tc.addCleanup(lambda: os.environ.__setitem__(key, prev) if prev is not None else os.environ.pop(key, None))
 
 
+class _OwnedLock:
+    """The kernel's catalog lock for a test, remembering which thread holds it, so a models frame can be asked whether
+    ITS SENDER holds the lock. Lock.locked() answers for every thread at once: the boot sends its frame while the
+    listing thread it started may be inside the lock, and a recorder that read locked() then filed the boot's frame as
+    sent under the lock (the first 3.15t run of this file in CI, 2026-11-16: [True, False] for two frames each sent
+    outside it). The lock inside is the kernel's own, so a holder that reached it before the swap still excludes."""
+
+    def __init__(self, real):
+        self._real, self._owner = real, None
+
+    def __enter__(self):
+        self._real.acquire()
+        self._owner = threading.get_ident()
+        return self
+
+    def __exit__(self, *exc):
+        self._owner = None
+        self._real.release()
+
+    def held_here(self):
+        return self._owner == threading.get_ident()
+
+
 class _Catalog(unittest.TestCase):
     """The apply mutates the module's model globals in place; snapshot and restore around each test so an
     installed family never leaks into another test's view of the picker. The store, the env and the two
-    outward seams (the gateway probe, the models frame) are reset too."""
+    outward seams (the gateway probe, the models frame) are reset too. `frames` holds one entry per models frame:
+    whether the thread that sent it held the catalog lock (_OwnedLock)."""
 
     def setUp(self):
         self._choices = [dict(c) for c in km.MODEL_CHOICES]
@@ -93,7 +117,9 @@ class _Catalog(unittest.TestCase):
         self.frames = []
         self._orig_changed = km._models_changed
         self._orig_gw = km._router_gateway_configured
-        km._models_changed = lambda: self.frames.append(km._catalog_lock.locked())
+        self._lock = mock.patch.object(km, "_catalog_lock", _OwnedLock(km._catalog_lock))
+        self._lock.start()
+        km._models_changed = lambda: self.frames.append(km._catalog_lock.held_here())
         km._router_gateway_configured = lambda: (True, None)
         self.err = io.StringIO()
         self._p = mock.patch.object(km.sys, "stderr", self.err)
@@ -107,6 +133,7 @@ class _Catalog(unittest.TestCase):
         self._m.stop()
         self._p.stop()
         km._models_changed = self._orig_changed
+        self._lock.stop()
         km._router_gateway_configured = self._orig_gw
         km.MODEL_CHOICES[:] = self._choices
         km._MODEL_VALUES.clear(); km._MODEL_VALUES.update(self._values)
@@ -668,6 +695,27 @@ class Switch(_Catalog):
 
 
 class Boot(_Catalog):
+    def test_a_frame_is_filed_by_its_senders_hold_not_another_threads(self):
+        # the recorder every [False] in this file reads: a frame sent while ANOTHER thread is inside the lock was sent
+        # outside it, and one sent by the thread inside it was not
+        inside, leave = threading.Event(), threading.Event()
+
+        def hold():
+            with km._catalog_lock:
+                inside.set()
+                leave.wait(10)
+        t = threading.Thread(target=hold, daemon=True)
+        t.start()
+        self.assertTrue(inside.wait(10), "the other thread is inside the lock")
+        try:
+            km._models_changed()
+        finally:
+            leave.set()
+            t.join(10)
+        with km._catalog_lock:
+            km._models_changed()
+        self.assertEqual(self.frames, [False, True])
+
     def test_off_installs_nothing(self):
         _env(self, "ROMP_ROUTER_MODELS", DECLARED)
         self.assertEqual(km._router_models_boot(), [])
