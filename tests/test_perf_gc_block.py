@@ -17,8 +17,8 @@ every later collection in the process was skipped as well (a lab reproduction: t
 collector's tallies empty and an explicit gc.collect() returning 0).
 
 Pinned: the block's keys and a fresh collector's zeros (a); a forced full collection with the hook installed counts under
-generation 2 with a positive pause (b); the deadlock regression, a helper thread allocating past the young threshold under
-the stats lock finishes (c); the split rows carry the cycle's own delta, zero for a cycle with no collection and None for a
+generation 2 with a positive pause (b); the deadlock regression, a helper thread that collects each generation under the
+stats lock finishes (c); the split rows carry the cycle's own delta, zero for a cycle with no collection and None for a
 cycle closed without an opening mark (d); a failing callback counts an error, says the first once on stderr and raises
 nothing (e); the kernel-samples
 row carries the generation-2 tallies (f); main installs the hook before the boot warm (g); the reference names every
@@ -153,32 +153,40 @@ class Counting(_Hooked):
 class LockFree(_Hooked):
     """(c) The deadlock regression: a collection triggered on a thread that holds the stats lock finishes, because the
     callback never waits on that lock. Under the first draft's callback (one that took self.lock) the helper thread below
-    never returns: the collector runs on it, inside the locked region, and the callback blocks on the lock it holds."""
+    never returns: the collector runs on it, inside the locked region, and the callback blocks on the lock it holds.
+
+    The helper starts its collections itself, one per generation, inside the region. Until 2026-11-16 it allocated twice
+    the young threshold there and counted on that to start one, which is a fact about one collector's trigger and not
+    about the hazard: a default build starts a young collection at the threshold (700 through 3.12, 2,000 from 3.13),
+    and a free-threaded build's collector, which also weighs the heap already live, started none in this process, so on
+    3.15t the witness below saw nothing, with the GIL on or off. The hazard is the callback running on a thread that
+    holds the lock, however the collection began. Generation 0 is the one the allocations used to start, and it is still
+    asked for by number, on every build."""
 
     def test_a_collection_triggered_under_the_stats_lock_finishes(self):
         st = self.st
-        gc.collect()                                     # the young count starts near zero, so the region's own allocations cross it
         before = _total(st.snapshot())
-        seen = []                                        # (thread, lock held) at each collection's start: the proof the hazard ran
+        seen = []                                        # (thread, lock held, generation) at each collection's start: the proof the hazard ran
 
         def witness(phase, info):
             if phase == "start":
-                seen.append((threading.current_thread().name, st.lock.locked()))
+                seen.append((threading.current_thread().name, st.lock.locked(), info["generation"]))
         gc.callbacks.append(witness)
         self.addCleanup(lambda: gc.callbacks.remove(witness))
-        n = 2 * gc.get_threshold()[0] + 100              # past the young threshold whatever this interpreter's default (700 on
-                                                         #  3.12, 2000 on 3.13): the collector runs HERE, on this thread, lock held
+
         def body():
             with st.lock:
-                keep = [[i] for i in range(n)]
-            del keep
+                for generation in (0, 1, 2):             # each collection and its callbacks run HERE, on this thread, lock held
+                    gc.collect(generation)
 
         t = threading.Thread(target=body, daemon=True, name="gc-under-lock")
         t.start()
         t.join(10.0)
         self.assertFalse(t.is_alive(), "the callback waited on the lock its own thread holds")
-        self.assertIn(("gc-under-lock", True), seen, "a collection started on the helper thread with the lock held: the hazard was exercised")
-        self.assertGreaterEqual(_total(st.snapshot()) - before, 1)
+        for generation in (0, 1, 2):
+            self.assertIn(("gc-under-lock", True, generation), seen,
+                          "a collection of generation %d started on the helper thread with the lock held: the hazard was exercised" % generation)
+        self.assertGreaterEqual(_total(st.snapshot()) - before, 3, "each of the three was counted when it stopped")
 
     def test_the_callback_names_no_lock_in_its_body(self):
         body = inspect.getsource(km._PerfStats.gc_event).split('"""')[-1]   # after the docstring, which names the lock it avoids
