@@ -15209,12 +15209,15 @@ DOC_WORKER_MEM_PER_RECORD = 8 << 10        #  this per record of them. A review 
 #                                            bytes + 6 to 7 KiB a record (2026-11-12): 9.5 x the bytes at 756 B a record, 5.1 x
 #                                            at 1.7 KB, 3.3 x at 3.8 KB, so no factor of the bytes alone sizes every transcript
 DOC_WORKER_MEM_MARGIN = 1.5                # the admitted figure is the estimate this many times over: MemAvailable must cover it,
-#                                            and it is the worker's address-space limit (RLIMIT_AS), so a worker can never take
-#                                            more than the machine had free when it was admitted
+#                                            and it is how far the worker's address space may grow (RLIMIT_AS over what the
+#                                            worker holds as its parse begins: doc_worker.py, _baseline), so a job can never
+#                                            take more than the machine had free when it was admitted
 DOC_WORKER_AS_GUARD = 256 << 20            # the soft bound sits this far under that limit (a third of the limit at most, so
 #                                            never under the estimate): an allocation up to this size can only fail with the
 #                                            soft bound already passed, so a failure the parser swallowed never reaches a
-#                                            published document
+#                                            published document. (No smaller than 32 MiB, a third of 1.5 x the base: a
+#                                            free-threaded build's allocator asks the OS for that much at a time, once
+#                                            _doc_worker_env has turned its 1 GiB reservation off.)
 DOC_WORKER_SIZING_V = 1                    # the sizing above, by version: a memory verdict filed under another one is moot
 DOC_WORKER_TIME_FLOOR_S = 600              # the backstop on a worker that never answers (a hang has no event to key on): this,
 DOC_WORKER_TIME_RATE = 256 << 10           #  plus a second per this many bytes of transcript, a tenth of the slowest rate the
@@ -15310,7 +15313,9 @@ def _doc_worker_estimate(nbytes, records):
 
 def _doc_worker_bounds(estimate):
     """(limit, soft) for a worker whose estimate is `estimate`: the admitted figure, which is both what MemAvailable must
-    cover and the worker's address-space limit, and the soft bound under it (its peak past that publishes nothing)."""
+    cover and how far the worker's address space may grow, and the soft bound under it (growth past that publishes
+    nothing). Both count from the worker's own baseline, what it holds with the kernel code loaded as the parse is about
+    to begin: what an interpreter holds before any job differs by build and is not the job's."""
     limit = int(DOC_WORKER_MEM_MARGIN * estimate)
     return limit, limit - min(int(DOC_WORKER_AS_GUARD), limit // 3)
 
@@ -15396,11 +15401,12 @@ def _doc_worker_verdict(leaf):
     return v
 
 
-def _doc_worker_verdict_note(leaf, sid, plan, size0, reason, vm_peak):
+def _doc_worker_verdict_note(leaf, sid, plan, size0, reason, vm_peak, vm_base=None):
     """A worker ran past its own memory bound (its soft bound at the replace, a MemoryError, its memory exit code): keep the
     verdict (see _doc_worker_verdict) when the job was sized on an EXACT count of every file it read, since only then does
     the failure say the sizing cannot fit this transcript; the leaf's identity and size as the job began, the sizing it
-    ran under and what was seen. Filed in the error center in plain words, the file's path in the log alone. Never on a
+    ran under and what was seen (the address space's peak, and what it was as the parse began, which the bounds count
+    from). Filed in the error center in plain words, the file's path in the log alone. Never on a
     kill from outside (the OS's memory killer picks the worker when something else on the machine grows: that is a lost
     job, _doc_worker_run). Returns the verdict, or None when none was kept."""
     rp = os.path.realpath(str(leaf))
@@ -15417,7 +15423,7 @@ def _doc_worker_verdict_note(leaf, sid, plan, size0, reason, vm_peak):
     v = {"path": rp, "dev": int(st_.st_dev), "ino": int(st_.st_ino),
          "size": int(min(size0 if size0 is not None else st_.st_size, st_.st_size)), "sv": DOC_WORKER_SIZING_V,
          "bytes": plan["bytes"], "records": plan["records"], "estimate": plan["estimate"], "limit": plan["limit"],
-         "vmPeak": vm_peak, "reason": str(reason or "")[:300], "t": time.time()}
+         "vmBase": vm_base, "vmPeak": vm_peak, "reason": str(reason or "")[:300], "t": time.time()}
     try:
         f.parent.mkdir(parents=True, exist_ok=True)
         tmp = em._writer_tmp(f)
@@ -15544,6 +15550,17 @@ def _doc_worker_argv():
     return [sys.executable, str(ROOT / "bin" / "romp-doc-worker")]
 
 
+def _doc_worker_env():
+    """The worker's environment: this process's, with MIMALLOC_ARENA_RESERVE=0 over it, whatever this process was started
+    with. The worker's limit counts address space, and the allocator a free-threaded build takes its objects from
+    (mimalloc; a default build's too under PYTHONMALLOC=mimalloc) reserves address space 1 GiB at a time unless told not
+    to, so a job would grow by up to a gigabyte with nothing to stop it. Measured on 3.15.2t (2026-11-16): a limit of
+    200 MB over the baseline stopped a heap at 1,173 MB resident, and at 213 MB with the reservation off, the address
+    space then growing 32 MiB at a time as the heap does. A default build stops at 199 MB either way: nothing there reads
+    the variable."""
+    return dict(os.environ, MIMALLOC_ARENA_RESERVE="0")
+
+
 def _doc_worker_signal(match, flag, sig=signal.SIGTERM):
     """Signal the running worker (SIGTERM unless `sig` says) when `match(job)` holds, marking why (`flag`): by pid, under the
     lock, while the job's thread has not begun to reap it. Returns whether a signal was sent."""
@@ -15637,7 +15654,7 @@ def _doc_worker_run(leaf, sid, human, why, plan=None):
     t0 = time.monotonic()
     try:
         proc = subprocess.Popen(_doc_worker_argv(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
-                                cwd=str(ROOT), env=dict(os.environ))
+                                cwd=str(ROOT), env=_doc_worker_env())
     except Exception as e:                                 # noqa: BLE001 - no interpreter, no script, no process slot
         _doc_worker_lost("spawn", leaf, repr(e))
         return None
@@ -15671,8 +15688,8 @@ def _doc_worker_run(leaf, sid, human, why, plan=None):
         if done is not None:
             st["done"][done["outcome"]] = st["done"].get(done["outcome"], 0) + 1
             st["peak"] = {"bytes": plan["bytes"], "records": plan["records"], "estimate": plan["estimate"],
-                          "vmPeak": done.get("vmPeak"), "vmHWM": done.get("vmHWM"), "softBytes": plan["soft"],
-                          "limitBytes": plan["limit"]}
+                          "vmBase": done.get("vmBase"), "rssBase": done.get("rssBase"), "vmPeak": done.get("vmPeak"),
+                          "vmHWM": done.get("vmHWM"), "softBytes": plan["soft"], "limitBytes": plan["limit"]}
             if done["outcome"] != "failed" or done.get("memory"):
                 _DOC_WORKER["lost"] = 0
     if done is not None and done["outcome"] == "failed" and not done.get("memory"):
@@ -15686,7 +15703,8 @@ def _doc_worker_run(leaf, sid, human, why, plan=None):
         reason = (done or {}).get("reason") or "the worker's memory exit (%d)" % DOC_WORKER_EXIT_MEMORY
         with _DOC_WORKER_LOCK:
             _DOC_WORKER_STATS["memory"] += 1
-        _doc_worker_verdict_note(files[0], sid, plan, (ticket["st0"] or (None,))[0], reason, (done or {}).get("vmPeak"))
+        _doc_worker_verdict_note(files[0], sid, plan, (ticket["st0"] or (None,))[0], reason, (done or {}).get("vmPeak"),
+                                 (done or {}).get("vmBase"))
         _doc_worker_fallback("memory", leaf, reason)
         return None
     if done is not None:
@@ -15730,7 +15748,8 @@ def _doc_worker_stats():
     and `stopped` (the kernel was leaving) the jobs that ended without a document and without a fallback; `memory` the
     workers that ran past their own memory bound (each also a `memory` fallback); `verdicts` the memory verdicts filed
     and `verdictHeld` the rebuilds a standing one sent to this kernel; `seconds` the workers' wall time; `peak` the last
-    finished job's transcript bytes and records, estimate, peak address space and resident peak beside its bounds;
+    finished job's transcript bytes and records, estimate, the address space and resident memory the worker began its
+    parse with (`vmBase`, `rssBase`: the bounds count from there), their peaks and the bounds;
     `running` the job in flight. The clock is read for a job in flight alone: a snapshot with none
     reads no clock (the perf collector's own tests count the pusher's reads around one)."""
     sw = _doc_worker_switch()
