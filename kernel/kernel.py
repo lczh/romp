@@ -1387,7 +1387,9 @@ class _PerfStats:
             builds = {k: dict(v) for k, v in self.builds.items()}
             builds["chat"]["bg_miss"] = dict(self.builds["chat"]["bg_miss"])   # the nested map: a copy too
             builds["chat"]["restHeld"] = dict(self.builds["chat"]["restHeld"])   # …and the rest's reasons
-            builds["chat"]["watchedTabs"] = _watched_tabs()   # how many of a page's last shown tabs count as watched (ROMP_WATCHED_TABS)
+            # how many of a page's last shown tabs count as watched, where the count came from (file, env or default), and
+            # why STATE/watched-tabs is not used when it is there and cannot be (read without saying: this runs under the lock)
+            builds["chat"]["watchedTabs"], builds["chat"]["watchedTabsFrom"], builds["chat"]["watchedTabsFault"] = _watched_tabs_setting(say=False)
             builds["chat"]["bySession"] = sorted(              # the per-session timer, sids only, the largest max first
                 ({"sid": sid, **row} for sid, row in self.chat_by_session.items()),
                 key=lambda r: -(r["max"] or 0.0))
@@ -66331,40 +66333,119 @@ def _held_as_skeleton_by_all(sid, clients):
 # activation displaces it or the socket ends (the record goes with the client). An activeTab that names no tab (a page
 # showing none, a relay whose page moved to another machine's tab) displaces nothing. Per socket: each page, each column of
 # a split and each linked machine's relay keeps its own, so a page that works across two kernels keeps up to that many on
-# each. The count is a kernel constant with an environment override, ROMP_WATCHED_TABS (a positive integer), reported as
-# builds.chat.watchedTabs on /perf. A tuple, replaced whole, so a reader on another thread takes one consistent set.
+# each. A tuple, replaced whole, so a reader on another thread takes one consistent set.
+#
+# THE COUNT is read where it is used, never kept (2026-11-16): the file STATE/watched-tabs (a bare integer, beside
+# session-hosts and the other switches), else the environment's ROMP_WATCHED_TABS (a positive integer), else WATCHED_TABS,
+# held to 1..WATCHED_TABS_MAX, and reported with its source on /perf (builds.chat.watchedTabs, watchedTabsFrom). The file is
+# there so the count can be changed on a running kernel: one of the machines this runs on cannot be handed a new
+# environment variable without restarting the manager that keeps its kernel up, and the count is what a watched large
+# session costs (the lab: a cycle of 5.3 s with one watched tab, 9.9 s with four, two 300 MB sessions among them). A push
+# reads it once, one stat (_push hands it down), so a change takes effect at the next cycle: a smaller count leaves a
+# page's older tabs unwatched, and each is taken back at its next move like any tab nobody watches; a larger one keeps
+# more of the tabs the page showed and still holds current. That is why `recent` keeps the page's activations past the
+# count (WATCHED_TABS_MAX of them) and the count is applied at the read (_watched_by); a tab taken back leaves the record
+# (_rest_unwatched), so a larger count never has the kernel build a tab whose page was told its copy is behind: that tab
+# waits until the page opens it.
 WATCHED_TABS = 4
+WATCHED_TABS_MAX = 16                         # the most the count can be set to, and the most activations a client's record keeps
+WATCHED_TABS_FILE = "watched-tabs"            # STATE/watched-tabs: a bare integer, read live
+_WATCHED_FILE = {"slot": (None, None, None),  # (the file's stat key, its count or None, why it cannot be used or None), replaced whole
+                 "said": None}                # the stat key of the unusable file the problem center was last told about
+_WATCHED_FILE_LOCK = threading.Lock()         # the said mark alone: two threads reading one bad file say it once
+
+
+def _watched_tabs_path():
+    return Path(jd.STATE) / WATCHED_TABS_FILE
+
+
+def _watched_tabs_file():
+    """STATE/watched-tabs as (its count held to 1..WATCHED_TABS_MAX or None, why it cannot be used or None, its stat key).
+    Statted per ask and read again only when its stat moves (the tail-first switch's way, _tail_first_mode), so an edit needs
+    no restart and an unchanged file costs one stat. No file is no count and no fault; a file that is there and cannot be
+    read, or holds anything but one whole number, is a fault its caller says."""
+    p = _watched_tabs_path()
+    try:
+        st = os.stat(p)
+        key = (str(p), st.st_mtime_ns, st.st_size, st.st_ino)
+    except (FileNotFoundError, NotADirectoryError):
+        key = (str(p),)
+    except OSError as e:
+        key = (str(p), "stat", e.errno)
+    slot = _WATCHED_FILE["slot"]
+    if slot[0] != key:
+        n, fault = None, None
+        if len(key) == 3:
+            fault = "it cannot be read (%s)" % os.strerror(key[2] or 0)
+        elif len(key) == 4:
+            try:
+                raw = p.read_text(encoding="utf-8").strip()
+            except (OSError, ValueError) as e:
+                raw, fault = None, "it cannot be read (%s)" % (getattr(e, "strerror", None) or type(e).__name__)
+            if raw is not None:
+                m = re.fullmatch(r"([+-]?)(\d+)", raw)
+                if m is None:
+                    fault = "it is empty" if not raw else "it holds %s, not a whole number" % json.dumps(raw[:40])
+                elif m.group(1) == "-":
+                    n = 1
+                else:
+                    n = WATCHED_TABS_MAX if len(m.group(2)) > 6 else min(max(int(m.group(2)), 1), WATCHED_TABS_MAX)
+        slot = _WATCHED_FILE["slot"] = (key, n, fault)
+    return slot[1], slot[2], slot[0]
+
+
+def _watched_tabs_setting(say=True):
+    """(how many of a page's most recently shown tabs count as watched, where the count came from, the state file's fault or
+    None). The file's count when it holds one (`file`), else ROMP_WATCHED_TABS when it names a positive integer (`env`),
+    else WATCHED_TABS (`default`); the environment's is held to the same ceiling. A file that is there and cannot be used
+    falls back to the other two, and says so in the problem center ONCE per version of the file (its stat key), where the
+    person who wrote it looks; `say` False (the /perf snapshot, under its lock) reads without saying."""
+    n, fault, key = _watched_tabs_file()
+    if n is not None:
+        return n, "file", None
+    try:
+        e = int(os.environ.get("ROMP_WATCHED_TABS", "") or 0)
+    except ValueError:
+        e = 0
+    n, src = (min(e, WATCHED_TABS_MAX), "env") if e > 0 else (WATCHED_TABS, "default")
+    if fault is not None and say:
+        with _WATCHED_FILE_LOCK:
+            first = _WATCHED_FILE["said"] != key
+            _WATCHED_FILE["said"] = key
+        if first:
+            _sdk_problem("romp cannot use %s: %s. Each page keeps its last %d tabs up to date (%s) until the file holds a whole "
+                         "number from 1 to %d or is deleted."
+                         % (_watched_tabs_path(), fault, n, "from ROMP_WATCHED_TABS" if src == "env" else "the default", WATCHED_TABS_MAX))
+    return n, src, fault
 
 
 def _watched_tabs():
-    """How many of a page's most recently shown tabs count as watched: ROMP_WATCHED_TABS when it names a positive integer,
-    else WATCHED_TABS. Read at each use (an activation, a /perf snapshot): the environment is the process's own."""
-    try:
-        n = int(os.environ.get("ROMP_WATCHED_TABS", "") or 0)
-    except ValueError:
-        n = 0
-    return n if n > 0 else WATCHED_TABS
+    """How many of a page's most recently shown tabs count as watched, now (_watched_tabs_setting's count)."""
+    return _watched_tabs_setting()[0]
 
 
 def _note_tab_shown(c, sid):
-    """Client `c`'s page activated `sid`: it becomes the newest of the tabs the page watches, and the oldest beyond the
-    count is displaced. A no-op for an activation that names no tab."""
+    """Client `c`'s page activated `sid`: it becomes the newest of the tabs the page showed. The record keeps the last
+    WATCHED_TABS_MAX, more than the count in force, which is applied where the set is read (_watched_by). A no-op for an
+    activation that names no tab."""
     sid = str(sid or "")
     if not sid:
         return
-    c["recent"] = (tuple(x for x in (c.get("recent") or ()) if x != sid) + (sid,))[-_watched_tabs():]
+    c["recent"] = (tuple(x for x in (c.get("recent") or ()) if x != sid) + (sid,))[-WATCHED_TABS_MAX:]
 
 
-def _watched_by(c):
-    """The tabs client `c`'s page watches: the last few it activated (`recent`), its active tab among them whoever set it (a
-    client record made without the set, a test's dict, watches its active tab)."""
-    rec = c.get("recent") or ()
+def _watched_by(c, k=None):
+    """The tabs client `c`'s page watches: the last `k` it activated and still holds (`recent`; the count in force when the
+    caller hands none), its active tab among them whoever set it (a client record made without the set, a test's dict,
+    watches its active tab)."""
+    rec = (c.get("recent") or ())[-(k or _watched_tabs()):]
     act = str(c.get("active") or "")
     return rec if not act or act in rec else rec + (act,)
 
 
-def _rest_blocker_locked(c, sid):
-    """Why client `c` keeps `sid` from going to rest, or None; the caller holds its slot lock. `asked`: it asked for the tab
+def _rest_blocker_locked(c, sid, k=None):
+    """Why client `c` keeps `sid` from going to rest, or None; the caller holds its slot lock. `k` is the count of watched
+    tabs the caller's push read (none: the count in force). `asked`: it asked for the tab
     whole and the answer is on its way. `watched`: the tab is among the last few its page showed (_watched_by; read again
     here, under the lock, beside the caller's read of every client's set: a click can land between the two). `unreported`:
     a page that has named no tab yet, neither by an `?active=` hint at its dial nor by an `activeTab` message. A page's first report at a load with
@@ -66385,7 +66466,7 @@ def _rest_blocker_locked(c, sid):
         return "asked"
     if _held_as_skeleton_by_all(sid, [c]):    # the cold gate's own read of one client (its slot lock is re-entrant)
         return None
-    _watched = _watched_by(c)
+    _watched = _watched_by(c, k)
     if sid in _watched:
         return "watched"
     if c.get("reconnect") or c.get("skeletonOnReady"):
@@ -66423,7 +66504,7 @@ def _say_no_cap(c):
                  "date. The kernel rebuilds every tab it holds on each refresh %s." % (who, how))
 
 
-def _rest_blocked(sid, clients):
+def _rest_blocked(sid, clients, k=None):
     """Why `sid` cannot go to rest for the chat clients in `clients`, or None: the first client's reason
     (_rest_blocker_locked's word), or `noClient` with no chat client connected (the cold gate's own rule: an Outline
     alone is served built rows). Reads only, each client under its own slot lock. The push loop asks this before it
@@ -66433,7 +66514,7 @@ def _rest_blocked(sid, clients):
         return "noClient"
     for c in clients:
         with _client_lock(c):
-            why = _rest_blocker_locked(c, sid)
+            why = _rest_blocker_locked(c, sid, k)
         if why is not None:
             if why == "noCap":
                 _say_no_cap(c)
@@ -66441,24 +66522,28 @@ def _rest_blocked(sid, clients):
     return None
 
 
-def _rest_unwatched(sid, clients, light):
+def _rest_unwatched(sid, clients, light, k=None):
     """Hand `sid` back as a skeleton to every chat client in `clients` that holds it in another form, with `light` as its
     status. Returns None when every client holds it as a skeleton afterwards, else the reason the tab is built as before
     (_rest_blocked's word). Two passes, each client under its own slot lock: the first only reads (_rest_blocked), so a
     tab one client keeps from resting changes nothing for the others; the second rests, and stops at a client whose
     answer changed in between (a click, an ask), leaving the clients before it holding a skeleton of a tab the caller
     then builds, which they are served as any skeleton holder is (a status frame). The frame carries `rest` and is
-    deduped as the plain status it stands for, so the cycles after it send that client nothing until the status moves."""
-    why = _rest_blocked(sid, clients)
+    deduped as the plain status it stands for, so the cycles after it send that client nothing until the status moves. The
+    tab leaves each client's record of the tabs it showed (`recent`): the record is of tabs the page holds current, so a
+    count of watched tabs raised later (STATE/watched-tabs) does not name a tab whose copy the page was told is behind."""
+    why = _rest_blocked(sid, clients, k)
     if why is not None:
         return why
     plain = {"type": "status", "id": sid, "status": light}
     sig = _dedup_sig(plain, json.dumps(plain))
     for c in clients:
         with _client_lock(c):
-            why = _rest_blocker_locked(c, sid)
+            why = _rest_blocker_locked(c, sid, k)
             if why is not None:
                 return why
+            if sid in (c.get("recent") or ()):
+                c["recent"] = tuple(x for x in c["recent"] if x != sid)
             if sid in (c.get("skeleton") or ()) or c.get("reconnect") or c.get("skeletonOnReady"):
                 continue                              # a skeleton already, or the resolve is about to make it one
             c.get("echat", {}).pop(sid, None)         # the base, its view and its dedup slot: as a needFull's reset
@@ -72519,7 +72604,8 @@ def _push(targets, connect=False, live_map=None, only=None):
                 _flagged_outline = any(c.get("app") == "fleet" and c.get("provRows") for c in _clients)     # a reader of the provisional rows is connected: the memo's entries are worth keeping
             _live_scope.chat_floor0 = _chat_floor0_of(_all_chat)
             _gate_chat = _gate_clients(_all_chat)        # the clients the gate asks: not a socket that never said ready
-            _all_watched = {x for c in _all_chat for x in _watched_by(c)}   # every connected column's watched tabs (the last
+            _wk = _watched_tabs()                        # the count of watched tabs for this push: one stat (STATE/watched-tabs)
+            _all_watched = {x for c in _all_chat for x in _watched_by(c, _wk)}   # every connected column's watched tabs (the last
             #                                                                  few its page showed, its active tab among them:
             #                                                                  _watched_by), not this push's targets' alone
             #                                                                  (round two, low 2)
@@ -72645,12 +72731,12 @@ def _push(targets, connect=False, live_map=None, only=None):
                 # with no cached build at all is built once, and rests if that build cannot be cached either.
                 _retry = False                           # this build is the one an uncached unwatched tab gets (_chat_rest_retried)
                 if _unwatched and sig is not None and not (hit is not None and hit[0] == sig):
-                    _why = "plainOutline" if _plain_outline else _rest_blocked(s["sid"], _gate_chat)
+                    _why = "plainOutline" if _plain_outline else _rest_blocked(s["sid"], _gate_chat, _wk)
                     if _why is None and hit is None and s["sid"] not in _chat_rest_retried:
                         _retry, _why = True, "uncached"  # no cached build to have moved past: one build says where it stands
                     if _why is None:
                         _light = _light_status(s["sid"], s["path"], _tm, now)
-                        _why = "noLiveRow" if _light is None else _rest_unwatched(s["sid"], _gate_chat, _light)
+                        _why = "noLiveRow" if _light is None else _rest_unwatched(s["sid"], _gate_chat, _light, _wk)
                     if _why is None:
                         _rest_forget(s["sid"])
                         for c in chat_clients:               # the status, to a holder the rest did not just tell (a client it

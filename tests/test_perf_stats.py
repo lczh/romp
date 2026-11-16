@@ -394,6 +394,8 @@ class Collector(unittest.TestCase):
                                                   "moved": 0, "coldSkipped": 0, "baselineRaced": 0, "baselineRepaired": 0,
                                                   "rested": 0, "restHeld": {},        # an unwatched tab handed back as a skeleton, and why one was built (2026-11-15)
                                                   "watchedTabs": km._watched_tabs(),  # how many of a page's last shown tabs count as watched
+                                                  "watchedTabsFrom": km._watched_tabs_setting()[1],    # …and where that count came from
+                                                  "watchedTabsFault": None,           # …and why STATE/watched-tabs is not used (it is absent here)
                                                   "bg_miss": {k: 0 for k in km._PerfStats.CHAT_MISS},
                                                   "bySession": []})                   # the per-session timer (2026-09-14): no sid handed in, no row
         # …and the two rest counters: one per tab rested, one per reason a tab nobody watches was built after all; the map is a copy

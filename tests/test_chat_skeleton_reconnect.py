@@ -488,8 +488,8 @@ class SkeletonReconnect(unittest.TestCase):
         self.assertEqual(_owners(inspect.getsource(km), "_rest_blocker_locked("), {"_rest_blocked", "_rest_unwatched"})
         for fn in (km._rest_blocked, km._rest_unwatched):    # the read-only pass, and the pass that rests
             src = inspect.getsource(fn)
-            self.assertEqual(src.count("_rest_blocker_locked(c, sid)"), 1, fn.__name__)
-            at = src.index("_rest_blocker_locked(c, sid)")
+            self.assertEqual(src.count("_rest_blocker_locked(c, sid, k)"), 1, fn.__name__)   # k: the count of watched tabs its push read
+            at = src.index("_rest_blocker_locked(c, sid, k)")
             self.assertIn("with _client_lock(c):", src[src.rfind("for c in clients:", 0, at):at], fn.__name__ + " holds the lock")
         # the byte windows tests/test_chat_delta_resync.py and ui/webview/chat-delta-resync.test.ts read still hold their pins
         src = inspect.getsource(km)

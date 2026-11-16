@@ -837,8 +837,20 @@ as its hover tooltip, prefixed with what needs you when a card of it does, until
 
 A page keeps the last four tabs it showed up to date, its current one among
 them, so switching back and forth among a few sessions shows each at once. The
-count is the kernel's, per connected page (and per column of a split): set
-`ROMP_WATCHED_TABS` in the kernel's environment to change it.
+count is the kernel's, per connected page (and per column of a split), from 1
+to 16. To change it on a running kernel, write the number into the file
+`watched-tabs` in the state directory (`~/.local/state/romp/watched-tabs`): it
+is read at every refresh, so no restart is needed. With no file the kernel
+reads `ROMP_WATCHED_TABS` from its environment, else uses four.
+
+Each watched tab is rebuilt whenever its session writes, so a smaller count
+shortens every refresh when large sessions are among a page's recent tabs. A
+smaller count takes effect at the next refresh: a page's older tabs stop being
+watched, and each is taken back the next time its session writes. A larger one
+keeps more of the tabs the page showed and still holds up to date; a tab
+already taken back catches up when it is opened. A file that cannot be read,
+or holds anything but one whole number, is ignored, and the problem center
+says so once.
 
 Any other chat tab, one that no connected page is showing or showed among its
 last four, is not rebuilt while its session
@@ -4499,7 +4511,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   a live row to state its status from (a tab with no live row is built, not skipped); the
   same tab counts again on every later push until the page asks for it, 2026-09-14),
   `watchedTabs` (how many of a page's most recently shown tabs count as watched
-  and stay built: four, or `ROMP_WATCHED_TABS`),
+  and stay built, from 1 to 16), `watchedTabsFrom` (where that count came from:
+  `file` for the state file `watched-tabs`, read at every push with one stat,
+  `env` for `ROMP_WATCHED_TABS`, `default` for four) and `watchedTabsFault`
+  (why the state file is not used, when it is there and cannot be: unreadable,
+  empty, or not a whole number; `null` otherwise),
   `rested` (one count per tab taken back from every chat client
   instead of rebuilt, each page keeping its copy and marking it behind: a tab
   no connected chat client showed among its last

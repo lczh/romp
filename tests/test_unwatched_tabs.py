@@ -161,6 +161,18 @@ class _Base(unittest.TestCase):
         km._PERF_STATS.reset()
 
 
+    def _show(self, c, sid):
+        """The page activates a tab: the message its click sends."""
+        km.Handler._dispatch_ws(_Self(), {"type": "activeTab", "id": sid}, c)
+
+    def _cycle(self, clients, *moved):
+        """Every named session writes, then one pusher cycle. Returns what was built, in order."""
+        del self.built[:]
+        for sid in moved:
+            self._move(sid)
+        km._push(list(clients))
+        return list(self.built)
+
     def _warm_second(self, joining, *others):
         """A page that joins a warm kernel: its own connect push hands it every tab whole."""
         km._clients[:] = list(others) + [joining]
@@ -533,18 +545,6 @@ class TheLastFewTabsAPageShowed(_Base):
         self._env.stop()
         super().tearDown()
 
-    def _show(self, c, sid):
-        """The page activates a tab: the message its click sends."""
-        km.Handler._dispatch_ws(_Self(), {"type": "activeTab", "id": sid}, c)
-
-    def _cycle(self, clients, *moved):
-        """Every named session writes, then one pusher cycle. Returns what was built, in order."""
-        del self.built[:]
-        for sid in moved:
-            self._move(sid)
-        km._push(list(clients))
-        return list(self.built)
-
     def test_30_flipping_between_two_tabs_rests_neither_and_sends_no_skeleton(self):
         c = self._client()
         self._warm(c)
@@ -575,11 +575,12 @@ class TheLastFewTabsAPageShowed(_Base):
         self.assertEqual([f.get("rest") for f in self._frames(c, "status", S3)], [True])
         c["_frames"].clear()
         self._show(c, S3)                                    # the third distinct tab: web, the oldest, is displaced
-        self.assertEqual(c["recent"], (S2, S3))
+        self.assertEqual(km._watched_by(c), (S2, S3))
         km.Handler._dispatch_ws(_Self(), {"type": "needFull", "id": S3, "why": "skeleton-click"}, c)   # the page's ask for the tab it opened
         self.assertEqual(sorted(self._cycle([c], S1, S2, S3)), [S2, S3], "web is not built: nobody is showing it, nor showed it among the last two")
         self.assertEqual([f.get("rest") for f in self._frames(c, "status", S1)], [True], "it is taken back at its next move")
         self.assertEqual(self._frames(c, "status", S2), [], "api, the one before, stays")
+        self.assertEqual(c["recent"], (S2, S3), "a tab taken back leaves the page's record of what it showed")
         # showing a tab already in the set moves it to the newest place and displaces nothing
         self._show(c, S2)
         self.assertEqual(c["recent"], (S3, S2))
@@ -594,7 +595,7 @@ class TheLastFewTabsAPageShowed(_Base):
         self.assertEqual(sorted(self._cycle([a, b], S1, S2, S3)), [S1, S2, S3], "each page's set keeps its tabs built for both")
         self.assertEqual(self._frames(a, "status") + self._frames(b, "status"), [])
         self._show(b, S1); self._show(b, S2)                 # the phone moves on: ITS third and fourth tabs displace tests
-        self.assertEqual((a["recent"], b["recent"]), ((S1, S2), (S1, S2)), "the laptop's set is its own activations alone")
+        self.assertEqual((km._watched_by(a), km._watched_by(b)), ((S1, S2), (S1, S2)), "the laptop's set is its own activations alone")
         self.assertEqual(sorted(self._cycle([a, b], S1, S2, S3)), [S1, S2], "no page showed tests among its last two")
         for c in (a, b):
             self.assertEqual([f.get("rest") for f in self._frames(c, "status", S3)], [True])
@@ -639,18 +640,152 @@ class TheLastFewTabsAPageShowed(_Base):
         self.assertEqual(km.WATCHED_TABS, 4)
         self.assertEqual(km._watched_tabs(), 2, "this class's override")
         self.assertEqual(self._chat()["watchedTabs"], 2, "/perf says the count in force")
-        for raw, want in (("8", 8), ("1", 1), ("", 4), ("0", 4), ("-3", 4), ("four", 4)):
+        for raw, want in (("8", 8), ("1", 1), ("", 4), ("0", 4), ("-3", 4), ("four", 4), ("40", 16)):
             with mock.patch.dict(os.environ, {"ROMP_WATCHED_TABS": raw}):
                 self.assertEqual(km._watched_tabs(), want, raw)
         with mock.patch.dict(os.environ, {"ROMP_WATCHED_TABS": "1"}):   # one: the page's active tab alone, the first cut's rule
             c = self._client()
             self._warm(c)
             self._show(c, S1); self._show(c, S2)
-            self.assertEqual(c["recent"], (S2,))
+            self.assertEqual(km._watched_by(c), (S2,))
             self.assertEqual(self._cycle([c], S1, S2), [S2])
             self.assertEqual([f.get("rest") for f in self._frames(c, "status", S1)], [True])
         doc = open(os.path.join(os.path.dirname(HERE), "docs", "reference.md"), encoding="utf-8").read()
         self.assertIn("`ROMP_WATCHED_TABS`", doc); self.assertIn("`watchedTabs`", doc)
+
+
+class TheCountFromAStateFile(_Base):
+    """The count can be changed on a running kernel (2026-11-16): one of the machines this runs on cannot be handed a new
+    environment variable without restarting the manager that keeps its kernel up, and the lab says the count matters (a
+    cycle of 5.3 s with one watched tab against 9.9 s with four, two large sessions among them). So it is read from
+    STATE/watched-tabs, a bare integer, at each cycle: the file, else ROMP_WATCHED_TABS, else four, held to 1..16. A file
+    that cannot be used falls back and says so once in the problem center."""
+
+    def setUp(self):
+        super().setUp()
+        self._env = mock.patch.dict(os.environ, {"ROMP_WATCHED_TABS": "2"})
+        self._env.start()
+        self.said = []
+        self._real_problem = km._sdk_problem
+        km._sdk_problem = self.said.append
+
+    def tearDown(self):
+        km._sdk_problem = self._real_problem
+        self._env.stop()
+        super().tearDown()
+
+    def _file(self, text):
+        """Publish STATE/watched-tabs as a writer publishes (a temp file renamed into place, so the stat the reader keys on
+        moves however fast the test writes), or take it away (None)."""
+        p = km.jd.STATE / "watched-tabs"
+        if text is None:
+            if p.is_dir():
+                p.rmdir()
+            elif p.exists():
+                p.unlink()
+            return
+        tmp = p.with_name("watched-tabs.tmp")
+        tmp.write_text(text)
+        os.replace(tmp, p)
+
+    def test_50_the_file_overrides_the_environment_and_perf_says_where_the_count_came_from(self):
+        self.assertEqual(km._watched_tabs_path(), km.jd.STATE / "watched-tabs", "beside session-hosts and the other switches")
+        self.assertEqual(km._watched_tabs_setting(), (2, "env", None), "no file: the environment's")
+        self._file("3\n")
+        self.assertEqual(km._watched_tabs_setting(), (3, "file", None), "the file wins")
+        self.assertEqual(km._watched_tabs(), 3)
+        chat = self._chat()
+        self.assertEqual((chat["watchedTabs"], chat["watchedTabsFrom"], chat["watchedTabsFault"]), (3, "file", None), "/perf: the count in force and its source")
+        for raw, want in (("1", 1), ("16", 16), ("40", 16), ("0", 1), ("-3", 1), (" 5 \n", 5), ("99999999999999999999", 16)):   # held to 1..16
+            self._file(raw)
+            self.assertEqual(km._watched_tabs_setting(), (want, "file", None), raw)
+        self._file(None)
+        self.assertEqual(km._watched_tabs_setting(), (2, "env", None), "the file gone: the environment's again")
+        self.assertEqual(self._chat()["watchedTabsFrom"], "env")
+        with mock.patch.dict(os.environ, {"ROMP_WATCHED_TABS": ""}):
+            self.assertEqual(km._watched_tabs_setting(), (4, "default", None))
+            self.assertEqual(self._chat()["watchedTabsFrom"], "default")
+        self.assertEqual(self.said, [], "nothing here is a fault")
+        doc = open(os.path.join(os.path.dirname(HERE), "docs", "reference.md"), encoding="utf-8").read()
+        self.assertIn("`watched-tabs`", doc); self.assertIn("`watchedTabsFrom`", doc)
+
+    def test_51_a_change_takes_effect_at_the_next_cycle_shrinking_and_growing_the_set(self):
+        c = self._client()
+        self._warm(c)
+        self._file("3")
+        self._show(c, S1); self._show(c, S2); self._show(c, S3)
+        self.assertEqual(sorted(self._cycle([c], S1, S2, S3)), [S1, S2, S3], "three watched tabs, by the file, on a kernel started with two")
+        self.assertEqual(self._frames(c, "status"), [], "none taken back")
+        # SHRINK to one, no restart: at the next cycle web and api are no longer watched. web, which goes on writing, is
+        # taken back at once; api, which wrote nothing, keeps its copy and costs nothing (an unwatched tab that does not
+        # move is served from its cached build, as ever)
+        self._file("1")
+        self.assertEqual(self._cycle([c], S1, S3), [S3], "the tab on screen alone is built")
+        self.assertEqual([f.get("rest") for f in self._frames(c, "status", S1)], [True], "web, the oldest, is taken back at this cycle")
+        self.assertEqual(self._frames(c, "status", S2), [])
+        self.assertEqual(km._watched_by(c), (S3,))
+        self.assertEqual(self._chat()["watchedTabs"], 1)
+        # GROW to two: api, which the page still holds current, is among the last two it showed again and takes its
+        # changes as deltas; web was taken back and stays at rest until the page opens it (a larger count builds nothing
+        # for a copy the page was told is behind)
+        self._file("2")
+        c["_frames"].clear()
+        self.assertEqual(sorted(self._cycle([c], S1, S2, S3)), [S2, S3], "api is built again; web is not")
+        self.assertEqual(len(self._frames(c, "chatTail", S2)), 1, "…and its change reaches the page as a delta on the base it kept")
+        self.assertEqual(self._frames(c, "session"), [], "no full frame: nothing was reloaded")
+        self.assertEqual([f for f in self._frames(c, "status") if f.get("rest")], [], "and nothing is taken back")
+        self.assertEqual(km._watched_by(c), (S2, S3))
+        # the page opens web: the newest of the three it showed; with two, api is the one displaced
+        self._show(c, S1)
+        km.Handler._dispatch_ws(_Self(), {"type": "needFull", "id": S1, "why": "rest-open"}, c)
+        self.assertEqual(km._watched_by(c), (S3, S1))
+        c["_frames"].clear()
+        self.assertEqual(sorted(self._cycle([c], S1, S2, S3)), [S1, S3])
+        self.assertEqual([f.get("rest") for f in self._frames(c, "status", S2)], [True])
+        self.assertEqual(self.said, [])
+
+    def test_52_a_file_that_cannot_be_used_falls_back_and_says_so_once(self):
+        c = self._client()
+        self._warm(c)
+        self._show(c, S1); self._show(c, S2)
+        self._file("four\n")
+        for _ in range(3):                                   # three cycles over the same bad file
+            self.assertEqual(sorted(self._cycle([c], S1, S2, S3)), [S1, S2], "the environment's two, as with no file")
+        n, src, fault = km._watched_tabs_setting()
+        self.assertEqual((n, src), (2, "env"))
+        self.assertIn('"four"', fault); self.assertIn("not a whole number", fault)
+        self.assertEqual(len(self.said), 1, "one line in the problem center, not one per cycle: %r" % self.said)
+        line = self.said[0]
+        self.assertIn(str(km.jd.STATE / "watched-tabs"), line, "it names the file")
+        self.assertIn('"four"', line); self.assertIn("2", line); self.assertIn("ROMP_WATCHED_TABS", line)
+        self.assertIn("1 to 16", line, "and what the file may hold")
+        chat = self._chat()
+        self.assertEqual((chat["watchedTabs"], chat["watchedTabsFrom"]), (2, "env"))
+        self.assertEqual(chat["watchedTabsFault"], fault, "/perf carries the reason too, and reading /perf says nothing a second time")
+        self.assertEqual(len(self.said), 1)
+        # another edit that cannot be used is new information: said again, once
+        self._file("")
+        for _ in range(2):
+            km._push([c])
+        self.assertEqual(len(self.said), 2)
+        self.assertIn("empty", self.said[1])
+        # a file that cannot be read (a directory in its place), with nothing in the environment: the default, said so
+        self._file(None)
+        (km.jd.STATE / "watched-tabs").mkdir()
+        with mock.patch.dict(os.environ, {"ROMP_WATCHED_TABS": ""}):
+            for _ in range(2):
+                km._push([c])
+            n, src, fault = km._watched_tabs_setting()
+            self.assertEqual((n, src), (4, "default"))
+            self.assertIn("cannot be read", fault)
+        self.assertEqual(len(self.said), 3)
+        self.assertIn("default", self.said[2])
+        # repaired: the file's count, at the next cycle, and nothing more is said
+        self._file(None)
+        self._file("3")
+        km._push([c])
+        self.assertEqual(km._watched_tabs_setting(), (3, "file", None))
+        self.assertEqual(len(self.said), 3)
 
 
 class AfterTheReview(_Base):
