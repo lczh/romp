@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+import sysconfig
 import tempfile
 import threading
 import time
@@ -621,14 +622,32 @@ class MallocBooks(unittest.TestCase):
         # arena with room: a freed mmapped block raises the dynamic thresholds, blocks under them then come from the heap
         # and stay with it when freed. With 32 MiB free there (CI's second Python 3.11 shard, 2026-11-15), a bare 32 MiB
         # block was served from the heap and `mmapped` did not move.
-        m = km._process_stats_perf()["malloc"]
-        held = bytes((32 << 20) + m["free"])
-        try:
+        # The block is asked of glibc itself, on every build (2026-11-16): these are glibc's books, and the block used to
+        # be a bytes object alone, which is glibc's only where the interpreter's objects are. A free-threaded build serves
+        # its objects from mimalloc, so there the object left the books where they were (`mmapped` moved by 0 on 3.15t)
+        # and the reader went untested. The bytes object is still held after it wherever the build's objects are glibc's.
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc.restype, libc.malloc.argtypes, libc.free.argtypes = ctypes.c_void_p, (ctypes.c_size_t,), (ctypes.c_void_p,)
+
+        def shows(what):
             m2 = km._process_stats_perf()["malloc"]
-            self.assertGreaterEqual(m2["mmapped"] - m["mmapped"], 30 << 20, "a held block the arena cannot serve shows in mmapped")
+            self.assertGreaterEqual(m2["mmapped"] - m["mmapped"], 30 << 20, "a held %s the arena cannot serve shows in mmapped" % what)
             self.assertGreaterEqual(m2["inUse"] - m["inUse"], 30 << 20, "and in what is in use")
+        m = km._process_stats_perf()["malloc"]
+        held = libc.malloc((32 << 20) + m["free"])
+        self.assertTrue(held, "premise: glibc served the block")
+        try:
+            shows("block")
         finally:
-            del held
+            libc.free(held)
+        if sysconfig.get_config_var("Py_GIL_DISABLED") != 1:
+            m = km._process_stats_perf()["malloc"]
+            held = bytes((32 << 20) + m["free"])
+            try:
+                shows("bytes object")
+            finally:
+                del held
         self.assertEqual(set(km._process_stats()), {"rss_kb", "threads", "cpu_s", "pid"},
                          "the samplers' plain read takes the four fields and pays for no arena walk")
         src = inspect.getsource(km._process_stats)
