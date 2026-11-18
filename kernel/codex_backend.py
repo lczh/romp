@@ -253,6 +253,22 @@ def _is_permanent_request_rejection(error):
 _is_permanent_turn_rejection = _is_permanent_request_rejection
 
 
+def _model_list_page(client):
+    """model/list's first page as the app-server sent it: a dict in wire names (data[].id, displayName, model,
+    hidden, isDefault, supportedReasoningEfforts[].reasoningEffort/description).
+
+    Read raw, not through the pinned SDK's ModelListResponse: that model is closed over the enums of the protocol
+    it was generated from, and the list is DATA the account's catalog fills. On runtime 0.166.0 and 0.169.0 a model
+    advertising inputModalities 'audio' failed the whole page (pydantic: 'Input should be text or image'), so the
+    picker and set_effort had nothing while turns ran fine (live, 2026-11-17). The catalog reads only the fields it
+    shows, so a value it never reads cannot take the list down. _request_raw is the client's own request path
+    (request() is _request_raw plus model_validate), the same in the pinned 0.144.4 client and in 0.167."""
+    page = client._request_raw("model/list", {"includeHidden": False})
+    if not isinstance(page, dict):
+        raise RuntimeError("model/list answered %s, not an object" % type(page).__name__)
+    return page
+
+
 def _is_response_model_mismatch(error):
     """Whether a request reached Codex, was answered with success, and only the pinned SDK's model of
     the REPLY could not read it.
@@ -1399,7 +1415,14 @@ class CodexBackend:
         try:
             acct = client.account_read()
         except Exception as e:
-            self.log("account_read failed: %s" % e)
+            if _is_response_model_mismatch(e):
+                # The reply carries a plan type or account kind the pinned SDK's models predate (runtime 0.166.0
+                # lists plan types and account variants 0.144.4 has no member for, 2026-11-17). pydantic's text
+                # quotes the failing input, which here is the account itself, so name it by count only.
+                self.log("account_read: %s cannot read the reply (%s); the login check is skipped"
+                         % (_sdk_for_mismatch_log(), _response_model_mismatch_summary(e)))
+            else:
+                self.log("account_read failed: %s" % e)
             return
         needs = getattr(acct, "requires_openai_auth", None)
         if needs and not getattr(acct, "account", None):
@@ -1881,21 +1904,21 @@ class CodexBackend:
                                          % (self._client_err or "not started yet"))
                 return []
             try:
-                ms = c.model_list()
+                page = _model_list_page(c)
                 rows = []
-                for m in (getattr(ms, "data", None) or []):
-                    if getattr(m, "hidden", False):
+                for m in (page.get("data") or []):
+                    if not isinstance(m, dict) or m.get("hidden"):
+                        continue
+                    mid = m.get("id")
+                    if not isinstance(mid, str) or not mid:
                         continue
                     efforts = []
-                    for option in getattr(m, "supported_reasoning_efforts", None) or []:
-                        level = getattr(option, "reasoning_effort", None)
-                        level = getattr(level, "value", level)  # SDK enums preserve newly advertised values (2026-09-17)
+                    for option in m.get("supportedReasoningEfforts") or []:
+                        level = option.get("reasoningEffort") if isinstance(option, dict) else None
                         if isinstance(level, str) and level and not any(e["value"] == level for e in efforts):
-                            efforts.append({"value": level, "label": level,
-                                            "sub": getattr(option, "description", "") or ""})
-                    rows.append({"value": m.id, "label": getattr(m, "display_name", None) or m.id,
-                                 "model": getattr(m, "model", None) or m.id,
-                                 "isDefault": bool(getattr(m, "is_default", False)), "efforts": efforts})
+                            efforts.append({"value": level, "label": level, "sub": option.get("description") or ""})
+                    rows.append({"value": mid, "label": m.get("displayName") or mid, "model": m.get("model") or mid,
+                                 "isDefault": bool(m.get("isDefault")), "efforts": efforts})
             except Exception as e:
                 self._note_catalog_error("model_list failed: %s" % (str(e) or e.__class__.__name__))
                 return []

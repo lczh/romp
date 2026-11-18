@@ -14,13 +14,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-VERSION = '0.153.3'
-# SHA-256 digests published with OpenAI's rust-v0.153.3 GitHub release.
+VERSION = '0.169.0'
+# SHA-256 digests published with OpenAI's rust-v0.169.0 GitHub release. A ChatGPT account's model list is filtered by
+# the client's version: the GPT-6.2 models appear from 0.166.0 (0.165.0 lists GPT-6.1 at most; probed 2026-11-17).
 _WHEELS = {
-    ('Linux', 'x86_64'): ('manylinux_2_17_x86_64', '35e8524f7d3ad16afa2fbabfff8730a932b74db09831514ffe7b0181e6169b65'),
-    ('Linux', 'aarch64'): ('manylinux_2_17_aarch64', '52649619ca29d09981e4502d054c03358be6e9fdc992f073117157453e69014d'),
-    ('Darwin', 'x86_64'): ('macosx_10_9_x86_64', '1cb81fb889433556de776211eea39ab475410f740e66916b02e3196735409535'),
-    ('Darwin', 'arm64'): ('macosx_11_0_arm64', 'd8908affb145935f506554d7575178d8b66ff5434d816d533a5ae253c97e6983'),
+    ('Linux', 'x86_64'): ('manylinux_2_17_x86_64', '8e0a30a55b05a44f2a8228afca04bbc5e231592be375d2f98fc99eb24bd1ebb5'),
+    ('Linux', 'aarch64'): ('manylinux_2_17_aarch64', '23ca658c8bf6b19807ab33cfa27d0d4fec240cf4679e9e7addd5af8870e40222'),
+    ('Darwin', 'x86_64'): ('macosx_10_9_x86_64', 'd550485eb2d20d50f3b4a9cff03b8835cf4a9d7ddeec14bb1113169d4429576a'),
+    ('Darwin', 'arm64'): ('macosx_11_0_arm64', '19929a5742ba1d043855fd184ec1fbce1a563478a77b1999b126c0e08c799eeb'),
 }
 
 
@@ -41,9 +42,11 @@ def _package_path(target):
         metadata = json.loads((root / 'codex-package.json').read_text())
         if metadata.get('version') != VERSION:
             raise ValueError('wrong runtime version')
-        files = ['bin/codex', 'bin/codex-code-mode-host', 'codex-path/rg']
+        # The executables every 0.169.0 wheel ships. The bundled zsh left the package after 0.153.3 (no wheel
+        # carries codex-resources/zsh any more); bin/codex-exec-server arrived, named by codex-package.json.
+        files = ['bin/codex', 'bin/codex-code-mode-host', 'bin/codex-exec-server', 'codex-path/rg']
         if platform.system() == 'Linux':
-            files += ['codex-resources/bwrap', 'codex-resources/zsh/bin/zsh']
+            files += ['codex-resources/bwrap']
         if any(not (root / name).is_file() or not os.access(root / name, os.X_OK)
                for name in files):
             raise ValueError('missing runtime executable or helper')

@@ -16,10 +16,13 @@ HERE = Path(__file__).resolve().parents[1]
 rt = load_source('test_romp_codex_runtime', str(HERE / 'kernel/codex_runtime.py'))
 
 
-def package(target, version=None):
+# The executables of a 0.169.0 wheel (all four platforms ship the first four; the Linux wheels add bwrap).
+LAYOUT = ('bin/codex', 'bin/codex-code-mode-host', 'bin/codex-exec-server', 'codex-path/rg', 'codex-resources/bwrap')
+
+
+def package(target, version=None, files=LAYOUT):
     root = target / 'codex_cli_bin'
-    for name in ('bin/codex', 'bin/codex-code-mode-host', 'codex-path/rg',
-                 'codex-resources/bwrap', 'codex-resources/zsh/bin/zsh'):
+    for name in files:
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('synthetic executable')
@@ -43,7 +46,7 @@ class ManagedRuntime(unittest.TestCase):
                                 ('Darwin', 'x86_64'), ('Darwin', 'arm64')]:
             with self.subTest(system=system, machine=machine):
                 url = rt.wheel_url(system, machine)
-                self.assertTrue(url.startswith('https://github.com/openai/codex/releases/download/rust-v0.153.3/'))
+                self.assertTrue(url.startswith('https://github.com/openai/codex/releases/download/rust-v0.169.0/'))
                 self.assertRegex(url, r'\.whl#sha256=[0-9a-f]{64}$')
         with self.assertRaisesRegex(RuntimeError, 'Unsupported'):
             rt.wheel_url('Linux', 'riscv64')
@@ -62,6 +65,18 @@ class ManagedRuntime(unittest.TestCase):
             package(target)
             self.assertEqual(rt.runtime_path(state), exe)
             (target / 'codex_cli_bin/codex-path/rg').unlink()
+            with self.assertRaisesRegex(RuntimeError, 'romp-codex-setup'):
+                rt.runtime_path(state)
+
+    def test_the_current_layout_is_required_without_the_retired_zsh(self):
+        # The wheels after 0.153.3 dropped codex-resources/zsh and added bin/codex-exec-server (0.166.0 and 0.169.0,
+        # 2026-11-17): a package without zsh is complete, and one without the exec server is not.
+        with _state_dir() as state:
+            target = Path(state) / 'codex-runtime' / rt.VERSION
+            exe = package(target)
+            self.assertFalse((target / 'codex_cli_bin/codex-resources/zsh').exists())
+            self.assertEqual(rt.runtime_path(state), exe)
+            (target / 'codex_cli_bin/bin/codex-exec-server').unlink()
             with self.assertRaisesRegex(RuntimeError, 'romp-codex-setup'):
                 rt.runtime_path(state)
 

@@ -149,20 +149,27 @@ def main():
     print("== turn 3: the postal tools as dynamic tools (wire shape)")
     tid = be._sessions[sid].tid
 
+    def blocks():
+        return [block for record in map(json.loads, path.read_text().splitlines())
+                for block in record.get("message", {}).get("content", [])]
+
     def tool_records():
-        uses, results = [], []
-        for record in map(json.loads, path.read_text().splitlines()):
-            for block in record.get("message", {}).get("content", []):
-                if block.get("type") == "tool_use" and block.get("name", "").startswith("mcp__romp-postal-service__"):
-                    uses.append(block)
-                if block.get("type") == "tool_result" and str(block.get("tool_use_id", "")).startswith("exec-"):
-                    results.append(block)
+        # Turn 3's own postal calls and the results paired with them by id. Every exec- result in the file used to
+        # count, so a shell command from turns 1-2 (an exploratory ls that failed, the interrupted sleep) came first
+        # or carried is_error, and the checks below failed on 0.153.3 and 0.166.0 alike with the postal reply
+        # itself intact (2026-11-17). Models may also call a postal tool unprompted in turn 1, hence n3/b3.
+        later = blocks()[b3:]
+        uses = [block for block in later if block.get("type") == "tool_use"
+                and block.get("name", "").startswith("mcp__romp-postal-service__")]
+        ids = {block.get("id") for block in uses}
+        results = [block for block in later if block.get("type") == "tool_result" and block.get("tool_use_id") in ids]
         return uses, results
+    n3, b3 = len(postal_calls), len(blocks())
     be.send(sid, "Call the list_agents tool once, then reply with exactly the text it returned and nothing else.")
-    assert until(lambda: postal_calls, 120, what="the list_agents call to reach the postal callable")
+    assert until(lambda: len(postal_calls) > n3, 120, what="the list_agents call to reach the postal callable")
     assert until(lambda: be.live_sessions()[sid]["state"] == "waiting" and not be.busy(sid), 300,
                  what="turn 3 settle")
-    tool, csid, cname, cargs = postal_calls[0]
+    tool, csid, cname, cargs = postal_calls[n3]
     print("   call: tool=%s sid-matches=%s name=%s args=%s" % (tool, csid == sid, cname, cargs))
     assert tool == "list_agents", "the model called %s" % tool
     assert csid == sid and cname == "smoke", "the call was bound to the wrong session (threadId %s)" % tid

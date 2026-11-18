@@ -20,7 +20,7 @@ Codex sessions need, once per machine:
         romp-codex-setup
 
     This installs Python SDK **0.144.4** in a dedicated venv and Codex runtime
-    **0.153.3** under `codex-runtime/0.153.3/` in ROMP's state directory.
+    **0.169.0** under `codex-runtime/0.169.0/` in ROMP's state directory.
     The runtime comes from OpenAI's official release wheels, pinned by SHA-256,
     with its sandbox and code-mode helpers. Linux and macOS, x86-64 and ARM64,
     are supported. Neither system Python nor the SDK's own dependency is replaced.
@@ -111,7 +111,8 @@ model picker or update ROMP's pinned runtime; Auto cannot fix a model/runtime
 version mismatch. The picker's list is the app-server's own. When it cannot be
 had, the chat's menu shows the reason (the client not up yet, a failed list, no
 live Codex session) instead of opening blank, and a menu opened on an empty list
-asks for it again. Runtime 0.153.3 supports Astra, but the host must also support
+asks for it again. Runtime 0.169.0 lists the GPT-6.2 models (Astra and Sol) for a
+ChatGPT login, which runtimes before 0.166.0 do not, but the host must also support
 sandbox creation as described below.
 
 ## Sandboxing
@@ -156,7 +157,7 @@ each call it makes is answered that mail is not available in this session.
 
 Two host notes:
 
-- On Linux, install the distribution's **bubblewrap** package. Codex 0.153.3
+- On Linux, install the distribution's **bubblewrap** package. Codex
   prefers a compatible system `bwrap` from PATH over its bundled helper.
   Ubuntu 24.04 can additionally require its standard **bwrap-userns-restrict**
   AppArmor profile, supplied by `apparmor-profiles`. That confined profile lets

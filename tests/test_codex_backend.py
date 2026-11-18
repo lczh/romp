@@ -198,13 +198,20 @@ class FakeClient:
     def push_global(self, method, params):
         self._global.put(note(method, params))
 
-    def model_list(self, *a, **k):
-        self._rec("model_list")
-        return SimpleNamespace(data=[
-            SimpleNamespace(id="gpt-5-test", display_name="GPT-5 Test", hidden=False, is_default=True,
-                            supported_reasoning_efforts=[SimpleNamespace(reasoning_effort=v, description="")
-                                                        for v in ("low", "medium", "high", "xhigh")]),
-            SimpleNamespace(id="gpt-5-hidden", display_name="Hidden", hidden=True)])
+    def model_page(self):
+        """model/list's page in wire names: the catalog reads it raw through _request_raw (2026-11-17). Tests swap
+        this method for another page or a raise."""
+        return {"data": [
+            {"id": "gpt-5-test", "displayName": "GPT-5 Test", "hidden": False, "isDefault": True,
+             "supportedReasoningEfforts": [{"reasoningEffort": v, "description": ""}
+                                           for v in ("low", "medium", "high", "xhigh")]},
+            {"id": "gpt-5-hidden", "displayName": "Hidden", "hidden": True}]}
+
+    def _request_raw(self, method, params=None):
+        if method != "model/list":
+            raise AssertionError("the backend made an unscripted raw request: %s" % method)
+        self._rec("model_list", params)
+        return self.model_page()
 
     def turn_start(self, tid, input_items, params=None):
         if self.compacting:
@@ -366,6 +373,28 @@ class Conformance(unittest.TestCase):
         for text in (cb._response_model_mismatch_summary(one_item), summary):
             self.assertNotIn("SYNTHETIC-ITEM-INPUT-NEVER-LOGGED", text)
             self.assertNotIn("UserMessageThreadItem", text)
+
+
+    def test_an_unreadable_account_reply_is_logged_by_count_never_by_its_contents(self):
+        # Runtime 0.166.0+ can answer account/read with a plan type or account kind SDK 0.144.4 has no member for
+        # (2026-11-17). pydantic's text quotes the failing input, here the account record itself, so the login
+        # check names the failure by count and skips; any other failure keeps its own text.
+        logged = []
+        be, _, _ = build(log=logged.append)
+        errs = [{"type": "enum", "loc": ("account", "chatgpt", "planType"), "msg": "synthetic",
+                 "input": {"email": "SYNTHETIC-ACCOUNT-NEVER-LOGGED", "planType": "future-plan"}}]
+        unreadable = type("ValidationError", (ValueError,), {
+            "errors": lambda self: errs, "error_count": lambda self: 1,
+            "__str__": lambda self: "1 validation error for GetAccountResponse SYNTHETIC-ACCOUNT-NEVER-LOGGED"})()
+
+        def raise_(e):
+            raise e
+        be._check_auth(SimpleNamespace(account_read=lambda: raise_(unreadable)))
+        self.assertEqual(len(logged), 1)
+        self.assertNotIn("SYNTHETIC-ACCOUNT-NEVER-LOGGED", logged[0])
+        self.assertTrue(logged[0].startswith("account_read: ") and "login check is skipped" in logged[0], logged[0])
+        be._check_auth(SimpleNamespace(account_read=lambda: raise_(RuntimeError("synthetic pipe closed"))))
+        self.assertEqual(logged[1], "account_read failed: synthetic pipe closed")
 
 
 class ApprovalModes(unittest.TestCase):
@@ -2410,19 +2439,45 @@ for i in range(20):
         self.assertEqual(len(fake.called("model_list")), 1, "catalog is fetched once, then cached")
         self.assertIsNone(be.model_catalog_error(), "a held catalog carries no error")
 
-    def test_efforts_come_from_each_models_catalog_including_future_values(self):
-        from enum import Enum
-        class Level(str, Enum):
-            ultra = "ultra"
+    def test_model_catalog_survives_values_the_pinned_sdk_cannot_model(self):
+        # Runtime 0.166.0/0.169.0 (2026-11-17): one model advertised inputModalities 'audio', the pinned SDK's
+        # ModelListResponse admits only text and image, and the typed parse failed the whole page, so /models was
+        # empty and set_effort refused every level while turns ran fine. The catalog reads the page raw and only
+        # the fields it shows: unknown values and fields elsewhere in a model cannot take the list down.
         be, fake, _ = build()
-        fake.model_list = lambda: SimpleNamespace(data=[
-            SimpleNamespace(id="gpt-test-web", model="gpt-test-web", display_name="Web", hidden=False,
-                            is_default=True, supported_reasoning_efforts=[
-                                SimpleNamespace(reasoning_effort=Level.ultra, description="Detailed reasoning"),
-                                SimpleNamespace(reasoning_effort="future-level", description="New level")]),
-            SimpleNamespace(id="gpt-test-api", model="gpt-test-api", display_name="API", hidden=False,
-                            is_default=False, supported_reasoning_efforts=[
-                                SimpleNamespace(reasoning_effort="low", description="Quick")])])
+        fake.model_page = lambda: {"nextCursor": None, "data": [
+            {"id": "gpt-test-astra", "model": "gpt-test-astra", "displayName": "Astra", "hidden": False,
+             "isDefault": True, "inputModalities": ["text", "image", "audio"], "serviceTiers": [{"id": "future"}],
+             "upgradeInfo": {"model": "gpt-next"}, "defaultReasoningEffort": "ultra",
+             "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "Quick"},
+                                           {"reasoningEffort": "ultra", "description": "Delegating"}]},
+            {"id": "gpt-test-luna", "displayName": "Luna", "hidden": False, "isDefault": False,
+             "inputModalities": ["text"], "supportedReasoningEfforts": []}]}
+        rows = be.model_catalog()
+        self.assertEqual([r["value"] for r in rows], ["gpt-test-astra", "gpt-test-luna"])
+        self.assertEqual(rows[0]["efforts"], [{"value": "low", "label": "low", "sub": "Quick"},
+                                              {"value": "ultra", "label": "ultra", "sub": "Delegating"}])
+        self.assertEqual((rows[1]["model"], rows[1]["isDefault"], rows[1]["efforts"]), ("gpt-test-luna", False, []))
+        self.assertIsNone(be.model_catalog_error())
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.set_model(sid, "gpt-test-astra"))
+        self.assertTrue(be.set_effort(sid, "ultra"), "the effort a 6.2 session asks for validates against the list")
+        self.assertEqual(fake.called("model_list"), [("model_list", {"includeHidden": False})])
+
+    def test_model_catalog_names_a_page_that_is_not_an_object(self):
+        be, fake, _ = build()
+        fake.model_page = lambda: ["not", "a", "page"]
+        self.assertEqual(be.model_catalog(), [])
+        self.assertEqual(be.model_catalog_error(), "model_list failed: model/list answered list, not an object")
+
+    def test_efforts_come_from_each_models_catalog_including_future_values(self):
+        be, fake, _ = build()
+        fake.model_page = lambda: {"data": [
+            {"id": "gpt-test-web", "model": "gpt-test-web", "displayName": "Web", "hidden": False, "isDefault": True,
+             "supportedReasoningEfforts": [{"reasoningEffort": "ultra", "description": "Detailed reasoning"},
+                                           {"reasoningEffort": "future-level", "description": "New level"}]},
+            {"id": "gpt-test-api", "model": "gpt-test-api", "displayName": "API", "hidden": False, "isDefault": False,
+             "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "Quick"}]}]}
         rows = be.model_catalog()
         self.assertEqual(rows[0]["efforts"], [
             {"value": "ultra", "label": "ultra", "sub": "Detailed reasoning"},
@@ -2443,7 +2498,7 @@ for i in range(20):
         self.assertTrue(be.set_model(sid, "gpt-not-listed"))
         self.assertFalse(be.set_effort(sid, "high"))
         self.assertEqual(be.live_sessions()[sid]["effort"], "")
-        fake.model_list = lambda: SimpleNamespace(data=[])
+        fake.model_page = lambda: {"data": []}
         be._catalog = None
         self.assertTrue(be.set_model(sid, "gpt-5-test"))
         self.assertFalse(be.set_effort(sid, "high"))
@@ -2473,13 +2528,13 @@ for i in range(20):
         be, fake, _ = build()
         logged = []
         be.log = logged.append
-        real = fake.model_list
-        pages, asked = [SimpleNamespace(data=[])], []
+        real = fake.model_page
+        pages, asked = [{"data": []}], []
 
-        def paged(*a, **k):
+        def paged():
             asked.append(1)
-            return pages.pop() if pages else real(*a, **k)
-        fake.model_list = paged
+            return pages.pop() if pages else real()
+        fake.model_page = paged
         self.assertEqual(be.model_catalog(), [])
         self.assertEqual(be.model_catalog(), MODEL_CHOICES,
                          "an empty answer is not the catalog: the next read asks the app-server again")
@@ -2497,14 +2552,14 @@ for i in range(20):
         be, fake, _ = build()
         logged = []
         be.log = logged.append
-        real = fake.model_list
+        real = fake.model_page
         faults = [RuntimeError("app-server not ready"), RuntimeError("app-server not ready"), RuntimeError("pump died")]
 
-        def flaky(*a, **k):
+        def flaky():
             if faults:
                 raise faults.pop(0)
-            return real(*a, **k)
-        fake.model_list = flaky
+            return real()
+        fake.model_page = flaky
         named = lambda: [l for l in logged if l.startswith("model_list failed")]
         self.assertEqual(be.model_catalog(), [])
         self.assertEqual(be.model_catalog_error(), "model_list failed: app-server not ready")
