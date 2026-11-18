@@ -19,9 +19,9 @@ and a GitHub warning names it. Dealing new files last keeps every recorded file 
 
 Refreshing: every shard uploads its JUnit report as an artifact (served-junit-K; python-junit-VERSION-OS-K). From a
 green run on main:
-  gh run download RUN_ID --repo safety-research/romp --pattern 'served-junit-*' --dir /tmp/served-junit
+  gh run download RUN_ID --repo lczh/romp --pattern 'served-junit-*' --dir /tmp/served-junit
   python3 scripts/ci/shard_tests.py --refresh /tmp/served-junit
-  gh run download RUN_ID --repo safety-research/romp --pattern 'python-junit-*' --dir /tmp/python-junit
+  gh run download RUN_ID --repo lczh/romp --pattern 'python-junit-*' --dir /tmp/python-junit
   python3 scripts/ci/shard_tests.py --durations scripts/ci/python-durations.json --refresh /tmp/python-junit
 A case counts toward the file that collected it (its class's module), and a file several reports name (each Python
 version runs every file) keeps the slowest. The refresh replaces the entries of the files the reports name and keeps the

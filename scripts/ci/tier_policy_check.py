@@ -288,7 +288,7 @@ def run_one(repo, n, token):
 
 def main(argv):
     token = os.environ.get("GITHUB_TOKEN") or ""
-    repo = os.environ.get("GITHUB_REPOSITORY") or "safety-research/romp"
+    repo = os.environ.get("GITHUB_REPOSITORY") or "lczh/romp"
     if not token:
         sys.exit("GITHUB_TOKEN is required")
     if "--all-open" in argv:

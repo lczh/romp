@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-line install for romp:
-#   gh api -H 'Accept: application/vnd.github.raw' repos/safety-research/romp/contents/bootstrap.sh | bash
+#   gh api -H 'Accept: application/vnd.github.raw' repos/lczh/romp/contents/bootstrap.sh | bash
 # (the repository is internal to its organisation, so the signed-in GitHub CLI fetches the script and clones)
 #
 # Clones romp, checks out the newest release, runs install.sh, and puts bin/ on
@@ -16,7 +16,7 @@
 # install.sh's own switches (ROMP_NO_EXT, ROMP_NO_SERVICE, ROMP_NO_SDK) pass through.
 set -euo pipefail
 
-SLUG="safety-research/romp"
+SLUG="lczh/romp"
 REPO="${ROMP_REPO:-https://github.com/$SLUG.git}"
 DIR="${ROMP_DIR:-$HOME/romp}"
 

@@ -17,7 +17,7 @@
 ## Install
 
 ```bash
-gh api -H 'Accept: application/vnd.github.raw' repos/safety-research/romp/contents/bootstrap.sh | bash
+gh api -H 'Accept: application/vnd.github.raw' repos/lczh/romp/contents/bootstrap.sh | bash
 ```
 
 Open a new terminal afterwards, so `~/romp/bin` is on your `PATH`, and type
@@ -37,7 +37,7 @@ Install this way to keep Romp somewhere other than `~/romp`, or to run the
 latest commit rather than the newest release:
 
 ```bash
-gh repo clone safety-research/romp ~/romp
+gh repo clone lczh/romp ~/romp
 cd ~/romp
 git checkout "$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)"   # newest release
 # or:   git checkout main                                        # the latest commit

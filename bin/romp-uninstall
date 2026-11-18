@@ -364,5 +364,5 @@ fi
 
 echo
 echo "Reinstall from scratch with:"
-echo "  gh api -H 'Accept: application/vnd.github.raw' repos/safety-research/romp/contents/bootstrap.sh | bash"
+echo "  gh api -H 'Accept: application/vnd.github.raw' repos/lczh/romp/contents/bootstrap.sh | bash"
 echo "Open a NEW terminal afterwards (this one still has the old PATH)."
