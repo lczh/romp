@@ -113,6 +113,20 @@ probe_token() { printf 'gh%s_%s%s' p "$(printf '0123456789%.0s' 1 2 3)" abcdef; 
     [ "$status" -eq 2 ]
 }
 
+@test "a variable's name with nothing after its '=' is excused" {
+    # The keysource test's own message, which names the variables it removed: no value at all.
+    printf '        self.assertIn("ROMP_API_KEY added, ANTHROPIC_API_KEY= removed", text)\n' > "$TEST_DIR/probe.py"
+    run scan
+    [ "$status" -eq 0 ]
+}
+
+@test "the excuse is the bare name: a value after its '=' still trips" {
+    # Halves, because a whole one written here would trip the scan of this very repo.
+    printf 'env = "ANTHROPIC_API_KEY=%s%s"\n' "Zk8vQ2xhdWRlU2Vj" "cmV0OTk5a2V5VmFs" > "$TEST_DIR/probe.py"
+    run scan
+    [ "$status" -eq 2 ]
+}
+
 # ── the hook, with the real scanner ────────────────────────────────────────
 # A clone with the hook installed and a bare remote, pushed to for real. No
 # denylist (the identifier scan stands down) and no .gitleaks.toml (default

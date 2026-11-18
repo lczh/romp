@@ -26,3 +26,13 @@ is still caught. ANCHORED (^...$): unanchored, this would also excuse any secret
 that merely CONTAINS the nonce as a substring.
 """
 regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']
+
+[[allowlists]]
+description = """
+An environment variable's NAME with nothing after its '='. A keysource test kept on
+the old romp-fix-keysource branch (commit 86dbff073, 2026-09-07) asserts the CLI's
+message "ROMP_API_KEY added, ANTHROPIC_API_KEY= removed", and generic-api-key reads
+the name as a key whose value is empty. ANCHORED (^...$) to the exact name and its
+'=', so a value written after the '=' is still caught.
+"""
+regexes = ['''^ANTHROPIC_API_KEY=$''']
