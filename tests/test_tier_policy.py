@@ -436,7 +436,7 @@ class MajorFeature(unittest.TestCase):
 
     def test_an_issue_url_counts_too(self):
         v = tp.evaluate(pr(labels=["major-feature"], permissions=ADMIN_AUTHOR,
-                           body="See https://github.com/safety-research/romp/issues/7 for the discussion.",
+                           body="See https://github.com/lczh/romp/issues/7 for the discussion.",
                            issues=self.ISSUE_OK))
         self.assertEqual(v["conclusion"], "success")
 
@@ -728,8 +728,8 @@ class FetcherShapes(unittest.TestCase):
             test.assertNotIn((route, n), test.served, "page requested twice: not following Link")
             test.served.add((route, n))
             more = n < len(pages)
-            nxt = "%s/repos/safety-research/romp/pulls/42/%s?per_page=100&page=%d" % (test.tc.API, route, n + 1)
-            last = "%s/repos/safety-research/romp/pulls/42/%s?per_page=100&page=%d" % (test.tc.API, route, len(pages))
+            nxt = "%s/repos/lczh/romp/pulls/42/%s?per_page=100&page=%d" % (test.tc.API, route, n + 1)
+            last = "%s/repos/lczh/romp/pulls/42/%s?per_page=100&page=%d" % (test.tc.API, route, len(pages))
             hdrs = {"Link": '<%s>; rel="next", <%s>; rel="last"' % (nxt, last)} if more else {}
             return pages[n - 1], hdrs
 
@@ -811,14 +811,14 @@ class FetcherShapes(unittest.TestCase):
         self.labels = []
         self.body = "fixes #7\n\nTier: fix\n"
         self.reviews = []
-        v = self.tc.run_one("safety-research/romp", 42, "tok")
+        v = self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._labels_posted(), [{"labels": ["fix"]}], "one label write, the declared tier")
         self.assertEqual(v["conclusion"], "success", "graded as the fix it declared, in the same run")
         self.assertIn("applied", v["summary"])
         self.assertIn("fix", v["summary"])
         # a label added with the workflow's own token fires no `labeled` run, so the "Exactly one tier
         # label" run on this head still shows the count it read before: its newest completed run is re-run
-        self.assertEqual(self._reruns_posted(), ["/repos/safety-research/romp/actions/runs/9001/rerun"])
+        self.assertEqual(self._reruns_posted(), ["/repos/lczh/romp/actions/runs/9001/rerun"])
 
     def test_an_existing_label_stands_and_a_disagreeing_body_is_only_mentioned(self):
         self.labels = ["feature"]
@@ -826,7 +826,7 @@ class FetcherShapes(unittest.TestCase):
         self.perms["author-a"] = "admin"
         self.counter_runs = [{"id": 9006, "status": "completed", "conclusion": "success",
                               "head_repository": {"full_name": "fork-x/romp"}}]     # a green counter: nothing to refresh
-        v = self.tc.run_one("safety-research/romp", 42, "tok")
+        v = self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._labels_posted(), [], "the label stands; maintainers re-tier by relabeling")
         self.assertEqual(self._reruns_posted(), [])
         self.assertEqual(v["title"], "Tier policy: feature", "graded as the label says")
@@ -836,7 +836,7 @@ class FetcherShapes(unittest.TestCase):
     def test_disagreeing_tier_lines_apply_nothing_and_the_verdict_says_so(self):
         self.labels = []
         self.body = "Tier: fix\n\nTier: feature\n"
-        v = self.tc.run_one("safety-research/romp", 42, "tok")
+        v = self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._labels_posted(), [])
         self.assertEqual(v["conclusion"], "failure")
         self.assertIn("disagree", v["summary"])
@@ -844,7 +844,7 @@ class FetcherShapes(unittest.TestCase):
     def test_the_untouched_template_applies_nothing_and_the_verdict_points_at_the_placeholder(self):
         self.labels = []
         self.body = open(os.path.join(os.path.dirname(HERE), ".github", "PULL_REQUEST_TEMPLATE.md")).read()
-        v = self.tc.run_one("safety-research/romp", 42, "tok")
+        v = self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._labels_posted(), [])
         self.assertEqual(v["conclusion"], "failure")
         self.assertIn("names no tier", v["summary"])
@@ -853,7 +853,7 @@ class FetcherShapes(unittest.TestCase):
         self.labels = []
         self.body = "Tier: fix"
         self.counter_runs = [{"id": 9002, "status": "in_progress", "conclusion": None}]
-        v = self.tc.run_one("safety-research/romp", 42, "tok")
+        v = self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._labels_posted(), [{"labels": ["fix"]}])
         self.assertEqual(self._reruns_posted(), [], "a run in progress cannot be re-run")
         self.assertIn("mid-count", v["summary"])
@@ -862,7 +862,7 @@ class FetcherShapes(unittest.TestCase):
         self.labels = []
         self.body = "Tier: fix"
         self.counter_runs = [{"id": 9003, "status": "queued", "conclusion": None}]
-        v = self.tc.run_one("safety-research/romp", 42, "tok")
+        v = self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._reruns_posted(), [], "a queued run has not counted yet: nothing to refresh")
         self.assertEqual(v["conclusion"], "success")
 
@@ -870,7 +870,7 @@ class FetcherShapes(unittest.TestCase):
         self.labels = []
         self.body = "Tier: fix"
         self.counter_runs = []
-        v = self.tc.run_one("safety-research/romp", 42, "tok")
+        v = self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._labels_posted(), [{"labels": ["fix"]}])
         self.assertEqual(self._reruns_posted(), [])
         self.assertEqual(v["conclusion"], "success")
@@ -883,7 +883,7 @@ class FetcherShapes(unittest.TestCase):
         self.body = "Tier: fix"
         self.counter_runs = [{"id": 9004, "status": "completed", "conclusion": "action_required",
                               "head_repository": {"full_name": "fork-x/romp"}}]
-        v = self.tc.run_one("safety-research/romp", 42, "tok")
+        v = self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._labels_posted(), [{"labels": ["fix"]}])
         self.assertEqual(self._reruns_posted(), [], "an approval-gated run is never re-run from here")
         self.assertEqual(v["conclusion"], "success")
@@ -895,7 +895,7 @@ class FetcherShapes(unittest.TestCase):
         self.labels = []
         self.body = "Tier: fix"
         self.rerun_error = 403
-        v = self.tc.run_one("safety-research/romp", 42, "tok")
+        v = self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._labels_posted(), [{"labels": ["fix"]}])
         self.assertEqual(v["conclusion"], "success")
         self.assertIn("could not be re-run", v["summary"])
@@ -916,7 +916,7 @@ class FetcherShapes(unittest.TestCase):
             self.body = "Tier: fix"
             self.posted = []
             self.served = set()
-            v = self.tc.run_one("safety-research/romp", 42, "tok")
+            v = self.tc.run_one("lczh/romp", 42, "tok")
             self.tc._req = real
             self.assertEqual(self._labels_posted(), [{"labels": ["fix"]}], repr(exc))
             self.assertEqual(v["conclusion"], "success", repr(exc))
@@ -928,9 +928,9 @@ class FetcherShapes(unittest.TestCase):
         # re-run both leave the counter red with the label on; the next event or hourly pass repairs it
         self.labels = ["fix"]
         self.body = ""
-        v = self.tc.run_one("safety-research/romp", 42, "tok")
+        v = self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._labels_posted(), [], "nothing to apply")
-        self.assertEqual(self._reruns_posted(), ["/repos/safety-research/romp/actions/runs/9001/rerun"])
+        self.assertEqual(self._reruns_posted(), ["/repos/lczh/romp/actions/runs/9001/rerun"])
         self.assertEqual(v["conclusion"], "success")
         self.assertIn("re-run", v["summary"])
         # a green counter is left alone: no write for nothing
@@ -938,7 +938,7 @@ class FetcherShapes(unittest.TestCase):
         self.served = set()
         self.counter_runs = [{"id": 9005, "status": "completed", "conclusion": "success",
                               "head_repository": {"full_name": "fork-x/romp"}}]
-        self.tc.run_one("safety-research/romp", 42, "tok")
+        self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._reruns_posted(), [])
 
     def test_another_repositorys_run_on_the_same_sha_is_not_the_one_rerun(self):
@@ -947,8 +947,8 @@ class FetcherShapes(unittest.TestCase):
         self.body = "Tier: fix"
         self.counter_runs = [{"id": 7, "status": "completed", "conclusion": "failure", "head_repository": {"full_name": "other-y/romp"}},
                              {"id": 9001, "status": "completed", "conclusion": "failure", "head_repository": {"full_name": "fork-x/romp"}}]
-        self.tc.run_one("safety-research/romp", 42, "tok")
-        self.assertEqual(self._reruns_posted(), ["/repos/safety-research/romp/actions/runs/9001/rerun"])
+        self.tc.run_one("lczh/romp", 42, "tok")
+        self.assertEqual(self._reruns_posted(), ["/repos/lczh/romp/actions/runs/9001/rerun"])
 
     def test_a_tier_label_removed_by_someone_other_than_the_author_ends_the_bodys_say(self):
         # a maintainer who removes the label has ruled (to re-tier, or to leave it unsorted for a talk);
@@ -960,10 +960,10 @@ class FetcherShapes(unittest.TestCase):
         self.events = [{"event": "unlabeled", "label": {"name": "fix"}, "actor": {"login": "maint-b"}},
                        {"event": "unlabeled", "label": {"name": "wontfix"}, "actor": {"login": "maint-b"}},
                        {"event": "unlabeled", "label": {"name": "feature"}, "actor": {"login": "github-actions[bot]", "type": "Bot"}}]
-        rec = self.tc.build_record("safety-research/romp", 42, "tok")
+        rec = self.tc.build_record("lczh/romp", 42, "tok")
         self.assertEqual(rec["tier_unlabeled_by"], ["maint-b"], "tier labels only, humans only, once per login")
         self.served = set()
-        v = self.tc.run_one("safety-research/romp", 42, "tok")
+        v = self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._labels_posted(), [], "the body's line is not re-applied after a maintainer's removal")
         self.assertEqual(v["conclusion"], "failure")
         self.assertIn("maint-b", v["summary"])
@@ -971,7 +971,7 @@ class FetcherShapes(unittest.TestCase):
         # the author's own removal is not a ruling: the line applies again
         self.events = [{"event": "unlabeled", "label": {"name": "fix"}, "actor": {"login": "author-a"}}]
         self.served = set()
-        self.tc.run_one("safety-research/romp", 42, "tok")
+        self.tc.run_one("lczh/romp", 42, "tok")
         self.assertEqual(self._labels_posted(), [{"labels": ["fix"]}])
 
     def test_a_failed_label_write_fails_the_run_loudly(self):
@@ -987,7 +987,7 @@ class FetcherShapes(unittest.TestCase):
         self.labels = []
         self.body = "Tier: fix"
         with self.assertRaises(urllib.error.HTTPError):
-            self.tc.run_one("safety-research/romp", 42, "tok")
+            self.tc.run_one("lczh/romp", 42, "tok")
         failed = [b for p, b in self.posted if p.endswith("/check-runs")]
         self.assertEqual(len(failed), 1)
         self.assertEqual(failed[0]["conclusion"], "failure")
@@ -1007,7 +1007,7 @@ class FetcherShapes(unittest.TestCase):
                 raise urllib.error.HTTPError(path, 502, "Bad Gateway", {}, None)
             return real(method, path, token, body)
         self.tc._req = refusing
-        with unittest.mock.patch.dict(os.environ, {"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "safety-research/romp"}):
+        with unittest.mock.patch.dict(os.environ, {"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "lczh/romp"}):
             with self.assertRaises(urllib.error.HTTPError) as cm:
                 self.tc.main(["--pr", "42"])
             self.assertEqual(cm.exception.code, 502, "the post's own error is what reaches the job")
@@ -1025,7 +1025,7 @@ class FetcherShapes(unittest.TestCase):
             self.assertIn("evaluation failed", attempted[0]["output"]["title"])
 
     def test_build_record_survives_the_documented_shapes_and_has_no_time_field(self):
-        rec = self.tc.build_record("safety-research/romp", 42, "tok")
+        rec = self.tc.build_record("lczh/romp", 42, "tok")
         self.assertEqual(set(rec), {"number", "author", "labels", "head_sha", "files", "files_truncated", "reviews",
                                     "permissions", "body", "issues", "tier_unlabeled_by"},
                          "the record has exactly the documented keys: no time field, no commit date")
@@ -1040,7 +1040,7 @@ class FetcherShapes(unittest.TestCase):
 
     def test_an_unreviewed_fix_passes_through_the_fetcher_too(self):
         self.reviews = []
-        rec = self.tc.build_record("safety-research/romp", 42, "tok")
+        rec = self.tc.build_record("lczh/romp", 42, "tok")
         v = self.tc.evaluate(rec)
         self.assertEqual(v["conclusion"], "success")
         self.assertIn("merges on green", v["summary"])
@@ -1049,12 +1049,12 @@ class FetcherShapes(unittest.TestCase):
         # a member's feature waits for the admin's approval; the same PR by an admin merges on green
         self.labels = ["feature"]
         self.reviews = []
-        rec = self.tc.build_record("safety-research/romp", 42, "tok")
+        rec = self.tc.build_record("lczh/romp", 42, "tok")
         self.assertEqual(rec["permissions"], {"author-a": "write"}, "no reviewer: the author alone is looked up")
         self.assertEqual(self.tc.evaluate(rec)["conclusion"], "failure")
         self.perms["author-a"] = "admin"
         self.served = set()                  # a second, independent build: the page ledger starts over
-        rec = self.tc.build_record("safety-research/romp", 42, "tok")
+        rec = self.tc.build_record("lczh/romp", 42, "tok")
         self.assertEqual(rec["permissions"], {"author-a": "admin"})
         v = self.tc.evaluate(rec)
         self.assertEqual(v["conclusion"], "success")
@@ -1065,7 +1065,7 @@ class FetcherShapes(unittest.TestCase):
         self.author = "outsider-x"
         self.labels = ["feature"]
         self.reviews = []
-        rec = self.tc.build_record("safety-research/romp", 42, "tok")
+        rec = self.tc.build_record("lczh/romp", 42, "tok")
         self.assertEqual(rec["permissions"], {"outsider-x": "none"})
         self.assertEqual(self.tc.evaluate(rec)["conclusion"], "failure", "a contributor's feature waits for the admin")
         rec["labels"] = ["fix"]
@@ -1076,7 +1076,7 @@ class FetcherShapes(unittest.TestCase):
         # while posting a normal-looking verdict; the fetcher fails loudly instead
         self.perm_error = 403
         with self.assertRaises(urllib.error.HTTPError):
-            self.tc.build_record("safety-research/romp", 42, "tok")
+            self.tc.build_record("lczh/romp", 42, "tok")
 
     def test_a_push_during_evaluation_raises_instead_of_grading_a_mixed_record(self):
         real = self.tc._req
@@ -1089,14 +1089,14 @@ class FetcherShapes(unittest.TestCase):
             return real(method, path, token, body)
         self.tc._req = moving
         with self.assertRaises(RuntimeError):
-            self.tc.build_record("safety-research/romp", 42, "tok")
+            self.tc.build_record("lczh/romp", 42, "tok")
 
     def test_a_rename_out_of_github_carries_both_paths(self):
         # the review's HIGH: `git mv .github/workflows/tier-policy.yml docs/gate-notes.md` in a docs PR
         # read as documentation-only and would have merged on green, removing the gate from main
         self.files_pages = [[{"filename": "docs/gate-notes.md", "status": "renamed",
                               "previous_filename": ".github/workflows/tier-policy.yml"}]]
-        rec = self.tc.build_record("safety-research/romp", 42, "tok")
+        rec = self.tc.build_record("lczh/romp", 42, "tok")
         self.assertEqual(rec["files"], ["docs/gate-notes.md", ".github/workflows/tier-policy.yml"])
         self.assertFalse(rec["files_truncated"], "one entry, two paths: truncation counts entries, not paths")
         self.assertEqual(self.tc.evaluate(rec)["conclusion"], "success", "approved by an admin: the guard is met")
@@ -1109,14 +1109,14 @@ class FetcherShapes(unittest.TestCase):
     def test_a_two_page_file_listing_is_read_whole(self):
         self.files_pages = [[{"filename": "a.py", "status": "modified"}], [{"filename": "b.py", "status": "added"}]]
         self.changed_files = 2
-        rec = self.tc.build_record("safety-research/romp", 42, "tok")
+        rec = self.tc.build_record("lczh/romp", 42, "tok")
         self.assertEqual(rec["files"], ["a.py", "b.py"])
         self.assertFalse(rec["files_truncated"])
         self.assertTrue(any("/files" in p and "page=2" in p for _, p in self.calls), "the Link URL was followed")
 
     def test_a_listing_shorter_than_changed_files_is_flagged_truncated(self):
         self.changed_files = 3001
-        rec = self.tc.build_record("safety-research/romp", 42, "tok")
+        rec = self.tc.build_record("lczh/romp", 42, "tok")
         self.assertTrue(rec["files_truncated"])
         self.assertEqual(self.tc.evaluate(rec)["conclusion"], "success", "an admin-approved fix still passes")
         rec["reviews"] = []

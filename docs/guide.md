@@ -577,7 +577,7 @@ machine are separated by policy rather than by this boundary.
 
 The lines Romp can actually enforce are per-user (the token file) and
 per-machine (the trust level);
-[SECURITY.md](https://github.com/safety-research/romp/blob/main/SECURITY.md) states the
+[SECURITY.md](https://github.com/lczh/romp/blob/main/SECURITY.md) states the
 trust model in full and names the private channel for reporting a
 vulnerability.
 

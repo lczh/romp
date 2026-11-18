@@ -48,7 +48,7 @@ GH="${ROMP_GH:-gh}"                       # overridable so tests can stub the Gi
 PYTEST="${ROMP_RELEASE_PYTEST:-}"         # overridable suite runner (tests); empty → resolve below
 POLL="${ROMP_RELEASE_POLL:-5}"            # seconds between checks while the run starts
 REF="${ROMP_RELEASE_REF:-main}"
-UPSTREAM="${ROMP_RELEASE_UPSTREAM:-safety-research/romp}"
+UPSTREAM="${ROMP_RELEASE_UPSTREAM:-lczh/romp}"
 
 # Which git remote is the canonical repo, and which one takes the branch push. The convention
 # (the user 2026-09-06): in a clone with a fork, `origin` is the fork and `upstream` is the

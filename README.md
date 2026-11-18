@@ -58,7 +58,7 @@ You run Romp yourself, on your laptop or a server, with no hosted service in bet
 Needs [Claude Code](https://claude.com/claude-code) (signed in), the [GitHub CLI](https://cli.github.com) signed in to the organisation, Python 3.10+, and Node.js.
 
 ```bash
-gh api -H 'Accept: application/vnd.github.raw' repos/safety-research/romp/contents/bootstrap.sh | bash
+gh api -H 'Accept: application/vnd.github.raw' repos/lczh/romp/contents/bootstrap.sh | bash
 ```
 
 This clones Romp to `~/romp`, checks out the newest release, installs it, and adds `bin/` to your shell rc. Open a new terminal afterwards. [Installing by hand](docs/install.md#manual-and-custom-installs) works too.

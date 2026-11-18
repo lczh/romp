@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 
 # ./bootstrap.sh — the one-line installer:
-#   gh api -H 'Accept: application/vnd.github.raw' repos/safety-research/romp/contents/bootstrap.sh | bash
+#   gh api -H 'Accept: application/vnd.github.raw' repos/lczh/romp/contents/bootstrap.sh | bash
 # Hermetic: HOME points at a temp dir and the "origin" is a local fixture repo whose install.sh is
 # a stub, so the real install.sh never runs (it would symlink this machine's ~/.claude at the temp
 # clone and break Claude Code when the temp dir is removed).
@@ -217,7 +217,7 @@ EOF
     [ "$status" -eq 0 ]
     [ -d "$HOME/romp/.git" ]
     [ "$(cat "$TEST_DIR/gh-calls")" = "auth status
-repo clone https://github.com/safety-research/romp.git $HOME/romp -- --quiet" ]
+repo clone https://github.com/lczh/romp.git $HOME/romp -- --quiet" ]
     [ "$(git -C "$HOME/romp" remote)" = "origin" ]
 }
 
@@ -243,7 +243,7 @@ EOF
     PATH="$TEST_DIR:$PATH" ROMP_DIR="$HOME/romp" ROMP_NO_PATH=1 run env -u ROMP_REPO bash "$REPO_ROOT/bootstrap.sh"
     [ "$status" -eq 0 ]
     [ -d "$HOME/romp/.git" ]
-    [ "$(cat "$TEST_DIR/git-calls")" = "clone --quiet https://github.com/safety-research/romp.git $HOME/romp" ]
+    [ "$(cat "$TEST_DIR/git-calls")" = "clone --quiet https://github.com/lczh/romp.git $HOME/romp" ]
 }
 
 @test "bootstrap.sh: configures no git remotes or push defaults beyond the clone's own origin" {
