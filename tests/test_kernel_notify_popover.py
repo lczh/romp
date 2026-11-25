@@ -1238,13 +1238,18 @@ class UnwatchedTurnEnd(unittest.TestCase):
         (this process). The default stand-in is this Python, not /bin/sleep: on macOS `ps -E` shows no environment for a
         system binary (SIP), so a `sleep` stand-in's tag could not be read, the kernel rightly refused to end it, and
         the tests that must see it ended failed there while the ones that must see it spared passed for the wrong reason
-        (2026-11-25). The tag is checked readable before the test leans on it."""
+        (2026-11-25). The tag is checked readable before the test leans on it, after a bounded wait: Popen returns once
+        the child's exec has closed its descriptors, which on Linux is before the new image's environment is set up, so
+        /proc/<pid>/environ can read empty for a moment (CI, 2026-11-25)."""
         import subprocess
         import sys
         env = dict(os.environ, **{sb.STATE_TAG_ENV: tag or sb.state_tag_of(jd.STATE)})
         cli = subprocess.Popen(argv or [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
                                env=env)
         self.addCleanup(lambda: (cli.poll() is None and cli.kill(), cli.wait()))
+        deadline = time.monotonic() + 5
+        while sb.proc_env_value(cli.pid, sb.STATE_TAG_ENV) is None and time.monotonic() < deadline:  # loop-ok: bounded test wait
+            time.sleep(0.02)
         self.assertEqual(sb.proc_env_value(cli.pid, sb.STATE_TAG_ENV), env[sb.STATE_TAG_ENV],
                          "the stand-in's environment reads back")
         lease = {"sid": SID_WEB, "fsid": SID_WEB, "name": "web", "pid": cli.pid,
