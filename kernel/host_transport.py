@@ -446,18 +446,31 @@ class HostTransport(_Base):
         main-thread result arms a SIGTERM that many seconds later, the next turn's init or assistant message disarms it
         (that turn is finished first, then its own result arms it again), and the exit frame ends the wait as ever. Once
         sent, the TERM is followed by `end` with the kill bound, which pulls the host's deadline in (session_host._end), and
-        the wait shrinks to match: the CLI's own shutdown takes about two seconds (relaunch_now)."""
-        deadline = time.time() + timeout
+        the wait shrinks to match: the CLI's own shutdown takes about two seconds (relaunch_now).
+
+        Every bound here is on the event loop's own clock, the one asyncio.wait_for times out on, and a timed-out read is
+        told apart by the bound that read was given, never by reading a clock again (review 2026-11-25): the wall clock
+        (time.time()) is slewed and stepped by the system's time daemon while the loop's monotonic clock is not, so with
+        the wall clock running a little slow the SIGTERM's read timed out a hair before term_at by time.time(), was taken
+        for the deadline, and the wait returned with no SIGTERM, leaving the CLI alive beside the relaunch. The due time
+        is also checked after each chunk, so records arriving closer together than a read's timeout cannot put it off.
+
+        Known residual: a post-`end` turn that parks on a control request nobody answers once the session has gone (a
+        permission ask) never reaches a result, so nothing arms the SIGTERM and the wait is the end grace; the host's own
+        TERM step before its forced end (session_host._grace_loop, a follow-up) is what bounds that one."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
         term_at = None
-        while self.exit_info is None and time.time() < deadline:
-            until = deadline if term_at is None else min(deadline, term_at)
+        while self.exit_info is None and loop.time() < deadline:
+            term_bound = term_at is not None and term_at <= deadline   # this read times out at the SIGTERM's due time
+            until = term_at if term_bound else deadline
             try:
-                chunk = await asyncio.wait_for(self._reader.read(65536), timeout=max(0.05, until - time.time()))
+                chunk = await asyncio.wait_for(self._reader.read(65536), timeout=max(0.05, until - loop.time()))
             except asyncio.TimeoutError:
-                if term_at is None or time.time() < term_at:
+                if not term_bound:
                     return
                 term_at = None
-                deadline = min(deadline, await self._term_after_result())
+                deadline = await self._term_after_result(deadline)
                 continue
             except Exception:
                 return
@@ -466,24 +479,29 @@ class HostTransport(_Base):
             for f in self._fr.feed(chunk):
                 out = self._dispatch_side(f)
                 if out is not None and self.term_after_result is not None:
-                    term_at = self._post_end_turn(out.get("data"), term_at)
+                    term_at = self._post_end_turn(out.get("data"), term_at, loop.time())
+            if term_at is not None and self.exit_info is None and loop.time() >= term_at:
+                term_at = None                          # due while records kept coming: no read timed out for it
+                deadline = await self._term_after_result(deadline)
 
-    def _post_end_turn(self, data, term_at):
-        """When the post-`end` SIGTERM is due, given one CLI record read in _wait_exit: armed at a main-thread result,
-        disarmed by the next turn's open (its init, or an assistant message), unchanged by anything else (a background
-        task's progress, a subagent's frames: the very work that holds the CLI after its turn)."""
+    def _post_end_turn(self, data, term_at, now: float):
+        """When the post-`end` SIGTERM is due (on the clock `now` is read from), given one CLI record read in _wait_exit:
+        armed at a main-thread result, disarmed by the next turn's open (its init, or an assistant message), unchanged by
+        anything else (a background task's progress, a subagent's frames: the very work that holds the CLI after its
+        turn)."""
         if not isinstance(data, dict) or data.get("parent_tool_use_id"):
             return term_at
         kind = data.get("type")
         if kind == "result":
-            return time.time() + float(self.term_after_result)
+            return now + float(self.term_after_result)
         if kind == "assistant" or (kind == "system" and data.get("subtype") == "init"):
             return None
         return term_at
 
-    async def _term_after_result(self) -> float:
+    async def _term_after_result(self, deadline: float) -> float:
         """Send the post-`end` SIGTERM and `end` with the kill bound (once per teardown: term_after_result is spent), report
-        it, and return the deadline the exit wait keeps from here (unchanged when the request failed)."""
+        it, and return the deadline the exit wait keeps from here, on the loop's clock like `deadline` (unchanged when the
+        request failed)."""
         self.term_after_result = None
         err = None
         try:
@@ -496,7 +514,9 @@ class HostTransport(_Base):
                 self.on_post_end_term(err)
             except Exception:
                 pass
-        return time.time() + (sh.END_GRACE_KILL_S + 5.0 if err is None else float("inf"))
+        if err is not None:
+            return deadline
+        return min(deadline, asyncio.get_running_loop().time() + sh.END_GRACE_KILL_S + 5.0)
 
     def _dispatch_side(self, f: dict):
         """A non-record frame; returns the record for an `out` frame, else None."""

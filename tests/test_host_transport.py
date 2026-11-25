@@ -461,10 +461,12 @@ class PostEndTurnHost:
     assistant message, a result each), starts background work in the last of them, and so does not exit: the CLI of
     2026-11-25. It honors the end grace as the host does (a forced end, code -9, at the deadline; a later `end` with a
     shorter grace pulls the deadline in) and exits 143 on a SIGTERM, as the installed CLI does. `turns`: how many such turns,
-    `gap` seconds apart. Every frame it got is kept, with the time it came."""
+    `gap` seconds apart. `tick`: seconds between the new watcher's progress records after the last turn, or None for a CLI
+    that streams nothing more (a bash watcher reports nothing until it ends). Every frame it got is kept, with the time it
+    came."""
 
-    def __init__(self, path, turns=1, gap=0.0):
-        self.path, self.turns, self.gap = path, turns, gap
+    def __init__(self, path, turns=1, gap=0.0, tick=0.1):
+        self.path, self.turns, self.gap, self.tick = path, turns, gap, tick
         self.got = []
         self.server = None
         self.deadline = None
@@ -503,8 +505,10 @@ class PostEndTurnHost:
                             {"type": "result", "subtype": "success", "session_id": SID}):
                     self._out(writer, off, rec); off += 1
                 await writer.drain()
+            if self.tick is None:
+                return                           # silent from here: the grace, a SIGTERM or the socket ends it
             while not exited.is_set():           # the new watcher's progress: the work that holds the CLI
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(self.tick)
                 self._out(writer, off, {"type": "system", "subtype": "task_progress", "task_id": "t-new0"}); off += 1
                 await writer.drain()
 
@@ -600,6 +604,41 @@ class TheEndOfASwitchIsBounded(unittest.TestCase):
             end = next(f for f in fh.got if f["t"] == "end")
             self.assertGreaterEqual(term["at"] - end["at"], 0.2 + 0.5,
                                     "the second turn's init disarmed the first result's SIGTERM; its own result armed it")
+            fh.close()
+        run(go())
+
+    def test_a_wall_clock_running_slow_still_gets_the_sigterm(self):
+        # review 2026-11-25: the wait's reads time out on the loop's monotonic clock, but the SIGTERM's due time was read on
+        # the wall clock, which the system's time daemon slews; with the wall clock a little slow the SIGTERM's read timed
+        # out just before term_at by time.time(), was taken for the deadline, and the wait returned with no SIGTERM. The
+        # stand-in host's progress records hid it (each 0.05 s re-wait landed after term_at), so this CLI is silent after its
+        # result, like a bash watcher. The wall clock runs 2% slow here, exaggerated so the outcome is deterministic.
+        real, t0 = time.time, time.time()
+        slow = types.SimpleNamespace(time=lambda: t0 + (real() - t0) * 0.98, monotonic=time.monotonic, sleep=time.sleep)
+
+        async def go():
+            fh = PostEndTurnHost(self._path(), tick=None)
+            t, said = await self._attached(fh, end_grace=1200.0, term_after_result=1.0)
+            with mock.patch.object(ht, "time", slow):
+                await asyncio.wait_for(t.close(), 30)
+            kinds = [f["t"] for f in fh.got]
+            self.assertEqual(kinds[-3:], ["end", "signal", "end"], kinds)
+            self.assertEqual((t.exit_info or {}).get("code"), 143, "the CLI's own SIGTERM shutdown")
+            self.assertEqual(said, [None])
+            fh.close()
+        run(go())
+
+    def test_records_arriving_closer_together_than_a_read_timeout_do_not_put_the_sigterm_off(self):
+        # review 2026-11-25: the due time was checked only when a read timed out, so a CLI streaming records less than 50 ms
+        # apart put the SIGTERM off until the first quieter gap, or the end grace; it is checked after each chunk as well
+        async def go():
+            fh = PostEndTurnHost(self._path(), tick=0.01)
+            t, said = await self._attached(fh, end_grace=1200.0, term_after_result=0.3)
+            t0 = time.time()
+            await asyncio.wait_for(t.close(), 10)
+            self.assertLess(time.time() - t0, 5.0, "within the bound, though records never paused")
+            self.assertEqual((t.exit_info or {}).get("code"), 143)
+            self.assertEqual(said, [None])
             fh.close()
         run(go())
 
