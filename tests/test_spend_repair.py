@@ -784,7 +784,9 @@ class Plan(unittest.TestCase):
                  {"t": 900, "action": "manager-sigterm"}]           # requests, answered or not: never instants (a parked request is no restart)
         self.assertEqual(rp.restart_instants(cuts, audit), [107, 400], "boot rows alone (M1, round three): the request at 900 that nothing answers is a parked one")
         self.assertEqual(rp.restart_instants(cuts), [107, 400])
-        self.assertEqual(rp.plan([], rp.restart_instants(cuts), "1970-01-01")["restarts"], 2, "the report counts instants, one per restart")
+        # the day the instants fall on in THIS machine's zone (plan buckets by local day): the literal "1970-01-01" held
+        # only under UTC, and on a US-zone Mac epochs 107 and 400 are 1969-12-31 (2026-11-25)
+        self.assertEqual(rp.plan([], rp.restart_instants(cuts), rp.local_day(107))["restarts"], 2, "the report counts instants, one per restart")
 
     def test_a_result_the_old_kernel_recorded_during_its_drain_is_an_ordinary_turn_not_a_fresh_process(self):
         # web: 300 (its lifetime after the 9:30 boot), then at 9:59:53 the restart is REQUESTED and the old kernel records

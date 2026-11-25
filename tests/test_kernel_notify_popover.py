@@ -1235,11 +1235,18 @@ class UnwatchedTurnEnd(unittest.TestCase):
     def _cli_and_lease(self, start=None, tag=None, argv=None):
         """A stand-in CLI (a process of its own, carrying a state tag in its environment as every session CLI does: this
         kernel's unless `tag` says otherwise) and a host lease naming it by pid and start time, held by a live, beating host
-        (this process)."""
+        (this process). The default stand-in is this Python, not /bin/sleep: on macOS `ps -E` shows no environment for a
+        system binary (SIP), so a `sleep` stand-in's tag could not be read, the kernel rightly refused to end it, and
+        the tests that must see it ended failed there while the ones that must see it spared passed for the wrong reason
+        (2026-11-25). The tag is checked readable before the test leans on it."""
         import subprocess
+        import sys
         env = dict(os.environ, **{sb.STATE_TAG_ENV: tag or sb.state_tag_of(jd.STATE)})
-        cli = subprocess.Popen(argv or ["sleep", "60"], start_new_session=True, env=env)
+        cli = subprocess.Popen(argv or [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                               env=env)
         self.addCleanup(lambda: (cli.poll() is None and cli.kill(), cli.wait()))
+        self.assertEqual(sb.proc_env_value(cli.pid, sb.STATE_TAG_ENV), env[sb.STATE_TAG_ENV],
+                         "the stand-in's environment reads back")
         lease = {"sid": SID_WEB, "fsid": SID_WEB, "name": "web", "pid": cli.pid,
                  "start": start or sb.proc_start(cli.pid),
                  "holder": {"pid": os.getpid(), "start": sb.proc_start(os.getpid()), "kind": "host"}, "t": time.time()}

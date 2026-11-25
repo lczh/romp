@@ -508,7 +508,7 @@ class OneListingPerChange(_Listing):
 
     def test_the_route_serves_the_kept_json_and_threads_ride_their_own_key(self):
         self._cycle()
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        srv = km._LoopbackServer(("127.0.0.1", 0), km.Handler)   # the kernel's own server: its backlog (macOS resets past 5)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
             def get(path):
@@ -682,7 +682,7 @@ class _Threads(_Listing):
         self.comments = []
         self._thread(T1, "web-comment-1")
         self._thread(T2, "web-comment-2")
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        self.srv = km._LoopbackServer(("127.0.0.1", 0), km.Handler)   # the kernel's own server: its backlog (macOS resets past 5)
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 

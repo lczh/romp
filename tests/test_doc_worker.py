@@ -605,6 +605,7 @@ class LostWorkers(Harness):
         self.assertEqual(km._doc_worker_time_bound(0), km.DOC_WORKER_TIME_FLOOR_S)
         self.assertAlmostEqual(km._doc_worker_time_bound(300 << 20), 600 + 1200.0)
 
+    @unittest.skipUnless(LINUX, "the real worker runs on Linux")
     def test_a_done_line_starts_the_count_again(self):
         leaves = [self.session(sid, turns=260 + 10 * i, tag="s%d" % i) for i, sid in enumerate((SID, SID2, SID3, SID4))]
         self.switch("on")
