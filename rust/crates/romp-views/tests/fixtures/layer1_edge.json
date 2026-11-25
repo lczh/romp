@@ -1,0 +1,3520 @@
+{
+ "schema": "romp-spike-layer1-edge/1",
+ "python": "3.12.11",
+ "generatedBy": "tools/rust-spike/dump_layer1.py --edge-cases",
+ "atomColumns": [
+  "em._content",
+  "em._text_of",
+  "em._has_text",
+  "em.atom_has_text",
+  "em._machine_written",
+  "em._text_hash8",
+  "em._stop_reason",
+  "em.is_interrupt_record",
+  "em._is_opener",
+  "em._is_segment_input",
+  "em._prose_chars",
+  "em.atom_prose_chars",
+  "kernel._atom_prose_chars",
+  "em.atom_is_bare_end",
+  "em.atom_is_settle",
+  "em.atom_tool_uses",
+  "kernel._atom_user_text",
+  "jd._atom_text"
+ ],
+ "turnColumns": [
+  "em.turn_scalar:hT",
+  "em.turn_scalar:pcs"
+ ],
+ "segColumns": [
+  "input",
+  "jd._seg_key",
+  "kernel._seg_key"
+ ],
+ "constants": {
+  "END_STOPS": [
+   "end_turn",
+   "stop_sequence"
+  ],
+  "CITE_MIN_CHARS": 80,
+  "SETTLE_TEXT_H8": "d6202be5"
+ },
+ "isspace": [
+  9,
+  10,
+  11,
+  12,
+  13,
+  28,
+  29,
+  30,
+  31,
+  32,
+  133,
+  160,
+  5760,
+  8192,
+  8193,
+  8194,
+  8195,
+  8196,
+  8197,
+  8198,
+  8199,
+  8200,
+  8201,
+  8202,
+  8232,
+  8233,
+  8239,
+  8287,
+  12288
+ ],
+ "atoms": [
+  {
+   "name": "user text, human",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "fix the search index"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "89264b939ae78f58",
+    "fix the search index",
+    true,
+    true,
+    false,
+    "2614d7ae",
+    null,
+    false,
+    true,
+    true,
+    20,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "fix the search index",
+    "fix the search index"
+   ]
+  },
+  {
+   "name": "user author sdk",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "go"
+      }
+     ]
+    },
+    "author": "sdk"
+   },
+   "expect": [
+    "34305687bd39fabb",
+    "go",
+    true,
+    true,
+    false,
+    "1ec558a6",
+    null,
+    false,
+    true,
+    true,
+    2,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "go",
+    "go"
+   ]
+  },
+  {
+   "name": "user author romp",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "go"
+      }
+     ]
+    },
+    "author": "romp"
+   },
+   "expect": [
+    "34305687bd39fabb",
+    "go",
+    true,
+    true,
+    false,
+    "1ec558a6",
+    null,
+    false,
+    true,
+    true,
+    2,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "go",
+    "go"
+   ]
+  },
+  {
+   "name": "user author peer dict",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "go"
+      }
+     ]
+    },
+    "author": {
+     "peer": "s002",
+     "host": "TESTHOST"
+    }
+   },
+   "expect": [
+    "34305687bd39fabb",
+    "go",
+    true,
+    true,
+    false,
+    "1ec558a6",
+    null,
+    false,
+    true,
+    true,
+    2,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "go",
+    "go"
+   ]
+  },
+  {
+   "name": "user author peer string",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "go"
+      }
+     ]
+    },
+    "author": "peer"
+   },
+   "expect": [
+    "34305687bd39fabb",
+    "go",
+    true,
+    true,
+    false,
+    "1ec558a6",
+    null,
+    false,
+    false,
+    false,
+    2,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "go",
+    "go"
+   ]
+  },
+  {
+   "name": "user author system",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "<task-notification> done"
+      }
+     ]
+    },
+    "author": "system"
+   },
+   "expect": [
+    "c7891d13a6098e7d",
+    "<task-notification> done",
+    true,
+    true,
+    false,
+    "e8b0f7e1",
+    null,
+    false,
+    false,
+    false,
+    24,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "<task-notification> done",
+    "<task-notification> done"
+   ]
+  },
+  {
+   "name": "user author absent",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "go"
+      }
+     ]
+    }
+   },
+   "expect": [
+    "34305687bd39fabb",
+    "go",
+    true,
+    true,
+    false,
+    "1ec558a6",
+    null,
+    false,
+    false,
+    false,
+    2,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "go",
+    "go"
+   ]
+  },
+  {
+   "name": "user author null",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "go"
+      }
+     ]
+    },
+    "author": null
+   },
+   "expect": [
+    "34305687bd39fabb",
+    "go",
+    true,
+    true,
+    false,
+    "1ec558a6",
+    null,
+    false,
+    false,
+    false,
+    2,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "go",
+    "go"
+   ]
+  },
+  {
+   "name": "user tool_result only, human",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "t1",
+       "content": "ok"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "ee693a4df5297b79",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    null,
+    false,
+    true,
+    true,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "assistant end_turn text",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Done: the suite passes."
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "7b0b7a416b22503c",
+    "Done: the suite passes.",
+    true,
+    true,
+    false,
+    "765d901e",
+    "end_turn",
+    false,
+    false,
+    false,
+    23,
+    23,
+    23,
+    false,
+    false,
+    [],
+    null,
+    "Done: the suite passes."
+   ]
+  },
+  {
+   "name": "assistant stop_sequence text",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "x"
+      }
+     ],
+     "stop_reason": "stop_sequence",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "a5c90222979eab45",
+    "x",
+    true,
+    true,
+    false,
+    "11f6ad8e",
+    "stop_sequence",
+    false,
+    false,
+    false,
+    1,
+    1,
+    1,
+    false,
+    false,
+    [],
+    null,
+    "x"
+   ]
+  },
+  {
+   "name": "assistant tool_use",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "running"
+      },
+      {
+       "type": "tool_use",
+       "id": "t1",
+       "name": "Bash",
+       "input": {
+        "command": "ls",
+        "n": 1.5
+       }
+      }
+     ],
+     "stop_reason": "tool_use",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "677a168188b8025c",
+    "running",
+    true,
+    true,
+    false,
+    "3c49d9cc",
+    "tool_use",
+    false,
+    false,
+    false,
+    7,
+    7,
+    7,
+    false,
+    false,
+    [
+     [
+      "t1",
+      "Bash"
+     ]
+    ],
+    null,
+    "running"
+   ]
+  },
+  {
+   "name": "assistant two tool uses, one bare",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "t1",
+       "name": "Bash",
+       "input": {
+        "command": "ls",
+        "n": 1.5
+       }
+      },
+      {
+       "type": "tool_use"
+      }
+     ],
+     "stop_reason": "tool_use",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "caa6e6c390879595",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    "tool_use",
+    false,
+    false,
+    false,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [
+     [
+      "t1",
+      "Bash"
+     ],
+     [
+      null,
+      null
+     ]
+    ],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "assistant no stop reason",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "partial"
+      }
+     ],
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "379410d5ab1542b1",
+    "partial",
+    true,
+    true,
+    false,
+    "355705cf",
+    null,
+    false,
+    false,
+    false,
+    7,
+    7,
+    7,
+    false,
+    false,
+    [],
+    null,
+    "partial"
+   ]
+  },
+  {
+   "name": "assistant null stop reason",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "partial"
+      }
+     ],
+     "stop_reason": null
+    }
+   },
+   "expect": [
+    "379410d5ab1542b1",
+    "partial",
+    true,
+    true,
+    false,
+    "355705cf",
+    null,
+    false,
+    false,
+    false,
+    7,
+    7,
+    7,
+    false,
+    false,
+    [],
+    null,
+    "partial"
+   ]
+  },
+  {
+   "name": "bare end: empty content",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    "end_turn",
+    false,
+    false,
+    false,
+    0,
+    0,
+    0,
+    true,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "bare end: thinking only",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "thinking",
+       "thinking": "hm",
+       "signature": ""
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "d4b1ac8140c2bb7e",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    "end_turn",
+    false,
+    false,
+    false,
+    0,
+    0,
+    0,
+    true,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "bare end: whitespace text",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "  \n\t "
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "4e1148cca9438c4b",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    "end_turn",
+    false,
+    false,
+    false,
+    5,
+    5,
+    5,
+    true,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "bare end: separator-only text",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "\u001c\u001d\u001e\u001f"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "39abcbd2b79434b2",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    "end_turn",
+    false,
+    false,
+    false,
+    4,
+    4,
+    4,
+    true,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "not bare: end_turn with tool use",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "t1",
+       "name": "Read",
+       "input": {
+        "command": "ls",
+        "n": 1.5
+       }
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "98bf7e6688d83ae0",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    "end_turn",
+    false,
+    false,
+    false,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [
+     [
+      "t1",
+      "Read"
+     ]
+    ],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "not bare: tool_use stop, no text",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [],
+     "stop_reason": "tool_use",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    "tool_use",
+    false,
+    false,
+    false,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "string content, user",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": "  hello  "
+    },
+    "author": "human"
+   },
+   "expect": [
+    "32f43dbea50edb6b",
+    "hello",
+    true,
+    true,
+    false,
+    "aaf4c61d",
+    null,
+    false,
+    true,
+    true,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "hello",
+    ""
+   ]
+  },
+  {
+   "name": "string content, assistant",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": "  a bare string reply  ",
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "0eeb1cb4633f635b",
+    "a bare string reply",
+    true,
+    true,
+    false,
+    "22d50921",
+    "end_turn",
+    false,
+    false,
+    false,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "string content, whitespace only",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": "  \n "
+    },
+    "author": "human"
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    null,
+    false,
+    true,
+    true,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "string content, separators only",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": "\u001c \u001f"
+    },
+    "author": "human"
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    null,
+    false,
+    true,
+    true,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "string content, NBSP-wrapped",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": "\u00a0hi\u2003"
+    },
+    "author": "human"
+   },
+   "expect": [
+    "e6346258caf4d46c",
+    "hi",
+    true,
+    true,
+    false,
+    "c22b5f91",
+    null,
+    false,
+    true,
+    true,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "hi",
+    ""
+   ]
+  },
+  {
+   "name": "content absent",
+   "atom": {
+    "type": "user",
+    "uuid": "u-2",
+    "t": 100,
+    "author": "human",
+    "message": {
+     "role": "user"
+    }
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    null,
+    false,
+    true,
+    true,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "message absent",
+   "atom": {
+    "type": "user",
+    "uuid": "u-3",
+    "t": 100,
+    "author": "human"
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    null,
+    false,
+    true,
+    true,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "message null",
+   "atom": {
+    "type": "user",
+    "uuid": "u-4",
+    "t": 100,
+    "author": "human",
+    "message": null
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    null,
+    false,
+    true,
+    true,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "message empty dict",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-2",
+    "t": 100,
+    "message": {}
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    null,
+    false,
+    false,
+    false,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "idle atom",
+   "atom": {
+    "type": "idle",
+    "uuid": null,
+    "t": 100,
+    "end": 200,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000"
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    null,
+    false,
+    false,
+    false,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "non-dict blocks skipped",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      "text",
+      5,
+      null,
+      [
+       1,
+       2
+      ],
+      {
+       "type": "text",
+       "text": "kept"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "788b230887c1171f",
+    "kept",
+    true,
+    true,
+    false,
+    "1e61fe1e",
+    "end_turn",
+    false,
+    false,
+    false,
+    4,
+    4,
+    4,
+    false,
+    false,
+    [],
+    null,
+    "kept"
+   ]
+  },
+  {
+   "name": "text block without text",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text"
+      },
+      {
+       "type": "text",
+       "text": "b"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "0a4cd885952709cc",
+    "b",
+    true,
+    true,
+    false,
+    "e9d71f5e",
+    "end_turn",
+    false,
+    false,
+    false,
+    1,
+    1,
+    1,
+    false,
+    false,
+    [],
+    null,
+    "b"
+   ]
+  },
+  {
+   "name": "blocks joined then stripped",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": " a "
+      },
+      {
+       "type": "text",
+       "text": "b "
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "9005202aedd5f880",
+    "a  b",
+    true,
+    true,
+    false,
+    "a002b74a",
+    "end_turn",
+    false,
+    false,
+    false,
+    5,
+    5,
+    5,
+    false,
+    false,
+    [],
+    null,
+    "a  b"
+   ]
+  },
+  {
+   "name": "blocks with an untyped block",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "text": "no type"
+      },
+      {
+       "type": "text",
+       "text": "typed"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "794a9c75c57c8626",
+    "typed",
+    true,
+    true,
+    false,
+    "bda4b1c3",
+    "end_turn",
+    false,
+    false,
+    false,
+    5,
+    5,
+    5,
+    false,
+    false,
+    [],
+    null,
+    "typed"
+   ]
+  },
+  {
+   "name": "interrupt record",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "[Request interrupted by user]"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "177617f4269a9f48",
+    "[Request interrupted by user]",
+    true,
+    true,
+    false,
+    "265b4636",
+    null,
+    true,
+    true,
+    true,
+    29,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "[Request interrupted by user]",
+    "[Request interrupted by user]"
+   ]
+  },
+  {
+   "name": "interrupt record for tool use",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "[Request interrupted by user for tool use]"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "e47d57e823bbbba9",
+    "[Request interrupted by user for tool use]",
+    true,
+    true,
+    false,
+    "260cc976",
+    null,
+    true,
+    true,
+    true,
+    42,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "[Request interrupted by user for tool use]",
+    "[Request interrupted by user for tool use]"
+   ]
+  },
+  {
+   "name": "interrupt record, leading space",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "   [Request interrupted by user]"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "b56fc21c0346f5f1",
+    "[Request interrupted by user]",
+    true,
+    true,
+    false,
+    "265b4636",
+    null,
+    true,
+    true,
+    true,
+    32,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "[Request interrupted by user]",
+    "[Request interrupted by user]"
+   ]
+  },
+  {
+   "name": "interrupt text on an assistant",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "[Request interrupted by user]"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "177617f4269a9f48",
+    "[Request interrupted by user]",
+    true,
+    true,
+    false,
+    "265b4636",
+    "end_turn",
+    false,
+    false,
+    false,
+    29,
+    29,
+    29,
+    false,
+    false,
+    [],
+    null,
+    "[Request interrupted by user]"
+   ]
+  },
+  {
+   "name": "injected marker",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "please continue <!-- romp-injected -->"
+      }
+     ]
+    },
+    "author": "romp"
+   },
+   "expect": [
+    "6b9e57459e561236",
+    "please continue <!-- romp-injected -->",
+    true,
+    true,
+    true,
+    "4f7bc86a",
+    null,
+    false,
+    true,
+    true,
+    38,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "please continue <!-- romp-injected -->",
+    "please continue <!-- romp-injected -->"
+   ]
+  },
+  {
+   "name": "injected marker, tight",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "<!--romp-injected-->"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "a7fb832d1d325b10",
+    "<!--romp-injected-->",
+    true,
+    true,
+    true,
+    "e5e39984",
+    null,
+    false,
+    true,
+    true,
+    20,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "<!--romp-injected-->",
+    "<!--romp-injected-->"
+   ]
+  },
+  {
+   "name": "injected marker, unicode spaces",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "<!--\u3000romp-injected\u001c-->"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "f62b19e7cd92077c",
+    "<!--\u3000romp-injected\u001c-->",
+    true,
+    true,
+    true,
+    "82a342d8",
+    null,
+    false,
+    true,
+    true,
+    22,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "<!--\u3000romp-injected\u001c-->",
+    "<!--\u3000romp-injected\u001c-->"
+   ]
+  },
+  {
+   "name": "injected marker, nested opener",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "<!--<!-- romp-injected -->"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "b925afaf7130042c",
+    "<!--<!-- romp-injected -->",
+    true,
+    true,
+    true,
+    "48633cb1",
+    null,
+    false,
+    true,
+    true,
+    26,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "<!--<!-- romp-injected -->",
+    "<!--<!-- romp-injected -->"
+   ]
+  },
+  {
+   "name": "injected marker, unclosed",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "<!-- romp-injected --"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "2928096c57e394df",
+    "<!-- romp-injected --",
+    true,
+    true,
+    false,
+    "241414ff",
+    null,
+    false,
+    true,
+    true,
+    21,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "<!-- romp-injected --",
+    "<!-- romp-injected --"
+   ]
+  },
+  {
+   "name": "injected marker, bare word",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "the romp-injected marker"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "40aafd35b9eaaeae",
+    "the romp-injected marker",
+    true,
+    true,
+    false,
+    "0e36663a",
+    null,
+    false,
+    true,
+    true,
+    24,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "the romp-injected marker",
+    "the romp-injected marker"
+   ]
+  },
+  {
+   "name": "injected marker, suffix",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "<!-- romp-injected-x -->"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "d951bf73d3ad2831",
+    "<!-- romp-injected-x -->",
+    true,
+    true,
+    false,
+    "0f7705e1",
+    null,
+    false,
+    true,
+    true,
+    24,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "<!-- romp-injected-x -->",
+    "<!-- romp-injected-x -->"
+   ]
+  },
+  {
+   "name": "scheduled preamble",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "  [SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT] run the report"
+      }
+     ]
+    },
+    "author": "sdk"
+   },
+   "expect": [
+    "731044219410652b",
+    "[SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT] run the report",
+    true,
+    true,
+    true,
+    "c05afa22",
+    null,
+    false,
+    true,
+    true,
+    75,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "[SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT] run the report",
+    "[SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT] run the report"
+   ]
+  },
+  {
+   "name": "scheduled preamble, not first",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "run [SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT]"
+      }
+     ]
+    },
+    "author": "sdk"
+   },
+   "expect": [
+    "cd270e9a1b7c3c63",
+    "run [SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT]",
+    true,
+    true,
+    false,
+    "0247b410",
+    null,
+    false,
+    true,
+    true,
+    62,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "run [SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT]",
+    "run [SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT]"
+   ]
+  },
+  {
+   "name": "scheduled origin",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "run the report"
+      }
+     ]
+    },
+    "author": "sdk",
+    "origin": {
+     "kind": "task-notification",
+     "subkind": "scheduled-trigger"
+    }
+   },
+   "expect": [
+    "1df9d1b1b6156451",
+    "run the report",
+    true,
+    true,
+    true,
+    "c9503dd0",
+    null,
+    false,
+    true,
+    true,
+    14,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "run the report",
+    "run the report"
+   ]
+  },
+  {
+   "name": "scheduled origin, no text",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": []
+    },
+    "author": "sdk",
+    "origin": {
+     "kind": "task-notification",
+     "subkind": "scheduled-trigger"
+    }
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    null,
+    false,
+    true,
+    true,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "origin other kind",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "x"
+      }
+     ]
+    },
+    "author": "human",
+    "origin": {
+     "kind": "task-notification",
+     "subkind": "agent"
+    }
+   },
+   "expect": [
+    "a5c90222979eab45",
+    "x",
+    true,
+    true,
+    false,
+    "11f6ad8e",
+    null,
+    false,
+    true,
+    true,
+    1,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "x",
+    "x"
+   ]
+  },
+  {
+   "name": "origin a string",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "x"
+      }
+     ]
+    },
+    "author": "human",
+    "origin": "task-notification"
+   },
+   "expect": [
+    "a5c90222979eab45",
+    "x",
+    true,
+    true,
+    false,
+    "11f6ad8e",
+    null,
+    false,
+    true,
+    true,
+    1,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "x",
+    "x"
+   ]
+  },
+  {
+   "name": "api error",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "API Error: overloaded"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    },
+    "isApiError": true
+   },
+   "expect": [
+    "9af0d227f89451be",
+    "API Error: overloaded",
+    true,
+    true,
+    false,
+    "0c7d06ab",
+    "end_turn",
+    false,
+    false,
+    false,
+    21,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    "API Error: overloaded"
+   ]
+  },
+  {
+   "name": "api error false",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "fine"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    },
+    "isApiError": false
+   },
+   "expect": [
+    "915282a1bcf8667c",
+    "fine",
+    true,
+    true,
+    false,
+    "2a1b875b",
+    "end_turn",
+    false,
+    false,
+    false,
+    4,
+    4,
+    4,
+    false,
+    false,
+    [],
+    null,
+    "fine"
+   ]
+  },
+  {
+   "name": "settle reply",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "No response requested."
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "8fe332e59443d3ab",
+    "No response requested.",
+    true,
+    true,
+    false,
+    "d6202be5",
+    "end_turn",
+    false,
+    false,
+    false,
+    22,
+    22,
+    22,
+    false,
+    true,
+    [],
+    null,
+    "No response requested."
+   ]
+  },
+  {
+   "name": "settle reply, trailing space",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "No response requested. "
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "575d814b7c168ca9",
+    "No response requested.",
+    true,
+    true,
+    false,
+    "d6202be5",
+    "end_turn",
+    false,
+    false,
+    false,
+    23,
+    23,
+    23,
+    false,
+    true,
+    [],
+    null,
+    "No response requested."
+   ]
+  },
+  {
+   "name": "synthetic model",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "anything"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "<synthetic>"
+    }
+   },
+   "expect": [
+    "9fe1e19196ff337e",
+    "anything",
+    true,
+    true,
+    false,
+    "8867c88b",
+    "end_turn",
+    false,
+    false,
+    false,
+    8,
+    8,
+    8,
+    false,
+    true,
+    [],
+    null,
+    "anything"
+   ]
+  },
+  {
+   "name": "settle text on a user",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "No response requested."
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "8fe332e59443d3ab",
+    "No response requested.",
+    true,
+    true,
+    false,
+    "d6202be5",
+    null,
+    false,
+    true,
+    true,
+    22,
+    0,
+    0,
+    false,
+    true,
+    [],
+    "No response requested.",
+    "No response requested."
+   ]
+  },
+  {
+   "name": "boundary atom",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Recap: limit \u2192 3, the na\u00efve cache is gone; the search suite passes, once again."
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "b226426d5c9d08aa",
+    "Recap: limit \u2192 3, the na\u00efve cache is gone; the search suite passes, once again.",
+    true,
+    true,
+    false,
+    "634a428a",
+    "end_turn",
+    false,
+    false,
+    false,
+    79,
+    79,
+    79,
+    false,
+    false,
+    [],
+    null,
+    "Recap: limit \u2192 3, the na\u00efve cache is gone; the search suite passes, once again."
+   ]
+  },
+  {
+   "name": "boundary atom plus one",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Recap: limit \u2192 3, the na\u00efve cache is gone; the search suite passes, once again.!"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "0992eb02cf657282",
+    "Recap: limit \u2192 3, the na\u00efve cache is gone; the search suite passes, once again.!",
+    true,
+    true,
+    false,
+    "d85eb896",
+    "end_turn",
+    false,
+    false,
+    false,
+    80,
+    80,
+    80,
+    false,
+    false,
+    [],
+    null,
+    "Recap: limit \u2192 3, the na\u00efve cache is gone; the search suite passes, once again.!"
+   ]
+  },
+  {
+   "name": "astral and combining",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "ok \ud83d\ude00 e\u0301 \u00e9"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "1d05cd602aef0d74",
+    "ok \ud83d\ude00 e\u0301 \u00e9",
+    true,
+    true,
+    false,
+    "2ea9c792",
+    "end_turn",
+    false,
+    false,
+    false,
+    9,
+    9,
+    9,
+    false,
+    false,
+    [],
+    null,
+    "ok \ud83d\ude00 e\u0301 \u00e9"
+   ]
+  },
+  {
+   "name": "NUL and controls",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "a\u0000b\u0001c"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "8b1edfdc19a7c296",
+    "a\u0000b\u0001c",
+    true,
+    true,
+    false,
+    "ec32cd8d",
+    "end_turn",
+    false,
+    false,
+    false,
+    5,
+    5,
+    5,
+    false,
+    false,
+    [],
+    null,
+    "a\u0000b\u0001c"
+   ]
+  },
+  {
+   "name": "zero width space kept",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "\u200bx\u200b"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "62bf4e4bf9b3e189",
+    "\u200bx\u200b",
+    true,
+    true,
+    false,
+    "a15c8159",
+    null,
+    false,
+    true,
+    true,
+    3,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "\u200bx\u200b",
+    "\u200bx\u200b"
+   ]
+  },
+  {
+   "name": "NEL and line separators",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "\u0085x\u2028\u2029"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "a363138f9bdfe8bf",
+    "x",
+    true,
+    true,
+    false,
+    "11f6ad8e",
+    null,
+    false,
+    true,
+    true,
+    4,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "x",
+    "x"
+   ]
+  },
+  {
+   "name": "romp-goal-id text",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "reply <!-- romp-goal-id: s1:g1 -->"
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "a08486703c271482",
+    "reply <!-- romp-goal-id: s1:g1 -->",
+    true,
+    true,
+    false,
+    "9ee27087",
+    null,
+    false,
+    true,
+    true,
+    34,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "reply <!-- romp-goal-id: s1:g1 -->",
+    "reply <!-- romp-goal-id: s1:g1 -->"
+   ]
+  },
+  {
+   "name": "echo text and command",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "/model"
+      }
+     ]
+    },
+    "author": "human",
+    "_echo_text": "/model",
+    "command": "model"
+   },
+   "expect": [
+    "e454a5da497b8118",
+    "/model",
+    true,
+    true,
+    false,
+    "56195a10",
+    null,
+    false,
+    true,
+    true,
+    6,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "/model",
+    "/model"
+   ]
+  },
+  {
+   "name": "lazy null",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "x"
+      }
+     ]
+    },
+    "author": "human",
+    "lazy": null
+   },
+   "expect": [
+    "a5c90222979eab45",
+    "x",
+    true,
+    true,
+    false,
+    "11f6ad8e",
+    null,
+    false,
+    true,
+    true,
+    1,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "x",
+    "x"
+   ]
+  },
+  {
+   "name": "REFUSE type absent",
+   "atom": {
+    "uuid": "u-9",
+    "t": 100,
+    "message": {
+     "content": [
+      {
+       "type": "text",
+       "text": "x"
+      }
+     ]
+    }
+   },
+   "expect": [
+    "a5c90222979eab45",
+    "x",
+    true,
+    true,
+    false,
+    "11f6ad8e",
+    null,
+    false,
+    {
+     "raises": "KeyError"
+    },
+    {
+     "raises": "KeyError"
+    },
+    1,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    "x"
+   ]
+  },
+  {
+   "name": "REFUSE t absent",
+   "atom": {
+    "type": "user",
+    "uuid": "u-9",
+    "author": "human",
+    "message": {
+     "content": [
+      {
+       "type": "text",
+       "text": "x"
+      }
+     ]
+    }
+   },
+   "expect": [
+    "a5c90222979eab45",
+    "x",
+    true,
+    true,
+    false,
+    "11f6ad8e",
+    null,
+    false,
+    true,
+    true,
+    1,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "x",
+    "x"
+   ]
+  },
+  {
+   "name": "REFUSE content null",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": null
+    },
+    "author": "human"
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    null,
+    false,
+    true,
+    true,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    {
+     "raises": "TypeError"
+    }
+   ]
+  },
+  {
+   "name": "REFUSE content dict",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": {
+      "a": 1
+     }
+    },
+    "author": "human"
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    null,
+    false,
+    true,
+    true,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    ""
+   ]
+  },
+  {
+   "name": "REFUSE content number",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": 5
+    },
+    "author": "human"
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    null,
+    false,
+    true,
+    true,
+    0,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    {
+     "raises": "TypeError"
+    }
+   ]
+  },
+  {
+   "name": "REFUSE text null",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": null
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "4da3fa5e7a07d8ae",
+    {
+     "raises": "TypeError"
+    },
+    {
+     "raises": "TypeError"
+    },
+    {
+     "raises": "TypeError"
+    },
+    {
+     "raises": "TypeError"
+    },
+    {
+     "raises": "TypeError"
+    },
+    null,
+    {
+     "raises": "TypeError"
+    },
+    true,
+    true,
+    {
+     "raises": "TypeError"
+    },
+    0,
+    0,
+    false,
+    {
+     "raises": "TypeError"
+    },
+    [],
+    {
+     "raises": "TypeError"
+    },
+    {
+     "raises": "TypeError"
+    }
+   ]
+  },
+  {
+   "name": "REFUSE text number",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": 5
+      }
+     ]
+    },
+    "author": "human"
+   },
+   "expect": [
+    "32d946b114078398",
+    {
+     "raises": "TypeError"
+    },
+    {
+     "raises": "TypeError"
+    },
+    {
+     "raises": "TypeError"
+    },
+    {
+     "raises": "TypeError"
+    },
+    {
+     "raises": "TypeError"
+    },
+    null,
+    {
+     "raises": "TypeError"
+    },
+    true,
+    true,
+    {
+     "raises": "TypeError"
+    },
+    0,
+    0,
+    false,
+    {
+     "raises": "TypeError"
+    },
+    [],
+    {
+     "raises": "TypeError"
+    },
+    {
+     "raises": "TypeError"
+    }
+   ]
+  },
+  {
+   "name": "REFUSE message a string",
+   "atom": {
+    "type": "user",
+    "uuid": "u-9",
+    "t": 100,
+    "message": "hello"
+   },
+   "expect": [
+    "97d170e1550eee4a",
+    "",
+    false,
+    false,
+    false,
+    "da39a3ee",
+    {
+     "raises": "AttributeError"
+    },
+    false,
+    false,
+    false,
+    {
+     "raises": "AttributeError"
+    },
+    0,
+    0,
+    false,
+    {
+     "raises": "AttributeError"
+    },
+    [],
+    {
+     "raises": "AttributeError"
+    },
+    {
+     "raises": "AttributeError"
+    }
+   ]
+  },
+  {
+   "name": "REFUSE stop reason a number",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "x"
+      }
+     ],
+     "stop_reason": 5,
+     "model": "claude-sonnet-4"
+    }
+   },
+   "expect": [
+    "a5c90222979eab45",
+    "x",
+    true,
+    true,
+    false,
+    "11f6ad8e",
+    5,
+    false,
+    false,
+    false,
+    1,
+    1,
+    1,
+    false,
+    false,
+    [],
+    null,
+    "x"
+   ]
+  },
+  {
+   "name": "REFUSE author a number",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "x"
+      }
+     ]
+    },
+    "author": 5
+   },
+   "expect": [
+    "a5c90222979eab45",
+    "x",
+    true,
+    true,
+    false,
+    "11f6ad8e",
+    null,
+    false,
+    false,
+    false,
+    1,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "x",
+    "x"
+   ]
+  },
+  {
+   "name": "REFUSE api error a string",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "x"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": "claude-sonnet-4"
+    },
+    "isApiError": "yes"
+   },
+   "expect": [
+    "a5c90222979eab45",
+    "x",
+    true,
+    true,
+    false,
+    "11f6ad8e",
+    "end_turn",
+    false,
+    false,
+    false,
+    1,
+    0,
+    0,
+    false,
+    false,
+    [],
+    null,
+    "x"
+   ]
+  },
+  {
+   "name": "REFUSE lazy atom",
+   "atom": {
+    "type": "user",
+    "uuid": "u-1",
+    "t": 100,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "x"
+      }
+     ]
+    },
+    "author": "human",
+    "lazy": {
+     "h": "abcd1234",
+     "nt": true,
+     "pc": 1
+    }
+   },
+   "expect": [
+    "a5c90222979eab45",
+    "x",
+    true,
+    true,
+    false,
+    "abcd1234",
+    null,
+    false,
+    true,
+    true,
+    1,
+    0,
+    0,
+    false,
+    false,
+    [],
+    "x",
+    "x"
+   ]
+  },
+  {
+   "name": "REFUSE model a number",
+   "atom": {
+    "type": "assistant",
+    "uuid": "a-1",
+    "t": 101,
+    "session_id": "eeeeeeee-0000-0000-0000-000000000000",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "x"
+      }
+     ],
+     "stop_reason": "end_turn",
+     "model": 5
+    }
+   },
+   "expect": [
+    "a5c90222979eab45",
+    "x",
+    true,
+    true,
+    false,
+    "11f6ad8e",
+    "end_turn",
+    false,
+    false,
+    false,
+    1,
+    1,
+    1,
+    false,
+    false,
+    [],
+    null,
+    "x"
+   ]
+  }
+ ],
+ "turns": [
+  {
+   "name": "plain turn",
+   "turn": {
+    "atoms": [],
+    "t": 1,
+    "end": 2,
+    "id": "s:1:h",
+    "ended": true,
+    "trigger": null
+   },
+   "expect": [
+    null,
+    null
+   ]
+  },
+  {
+   "name": "pre true, scalars",
+   "turn": {
+    "atoms": [],
+    "t": 1,
+    "end": 2,
+    "pre": true,
+    "hT": 7,
+    "pcs": [
+     3,
+     4
+    ]
+   },
+   "expect": [
+    7,
+    [
+     3,
+     4
+    ]
+   ]
+  },
+  {
+   "name": "pre true, float",
+   "turn": {
+    "atoms": [],
+    "t": 1,
+    "end": 2,
+    "pre": true,
+    "hT": 7.0,
+    "pcs": 2.5
+   },
+   "expect": [
+    7.0,
+    2.5
+   ]
+  },
+  {
+   "name": "pre true, absent",
+   "turn": {
+    "atoms": [],
+    "t": 1,
+    "end": 2,
+    "pre": true
+   },
+   "expect": [
+    null,
+    null
+   ]
+  },
+  {
+   "name": "pre true, null",
+   "turn": {
+    "atoms": [],
+    "t": 1,
+    "end": 2,
+    "pre": true,
+    "hT": null
+   },
+   "expect": [
+    null,
+    null
+   ]
+  },
+  {
+   "name": "pre 1",
+   "turn": {
+    "atoms": [],
+    "t": 1,
+    "end": 2,
+    "pre": 1,
+    "hT": 9
+   },
+   "expect": [
+    9,
+    null
+   ]
+  },
+  {
+   "name": "pre false",
+   "turn": {
+    "atoms": [],
+    "t": 1,
+    "end": 2,
+    "pre": false,
+    "hT": 9
+   },
+   "expect": [
+    null,
+    null
+   ]
+  },
+  {
+   "name": "pre empty string",
+   "turn": {
+    "atoms": [],
+    "t": 1,
+    "end": 2,
+    "pre": "",
+    "hT": 9
+   },
+   "expect": [
+    null,
+    null
+   ]
+  },
+  {
+   "name": "pre null",
+   "turn": {
+    "atoms": [],
+    "t": 1,
+    "end": 2,
+    "pre": null,
+    "hT": 9
+   },
+   "expect": [
+    null,
+    null
+   ]
+  },
+  {
+   "name": "pre empty list",
+   "turn": {
+    "atoms": [],
+    "t": 1,
+    "end": 2,
+    "pre": [],
+    "hT": 9
+   },
+   "expect": [
+    null,
+    null
+   ]
+  },
+  {
+   "name": "pre dict",
+   "turn": {
+    "atoms": [],
+    "t": 1,
+    "end": 2,
+    "pre": {
+     "a": 1
+    },
+    "pcs": {
+     "b": [
+      1,
+      2.0
+     ]
+    }
+   },
+   "expect": [
+    null,
+    {
+     "b": [
+      1,
+      2.0
+     ]
+    }
+   ]
+  }
+ ],
+ "segKeys": [
+  [
+   null,
+   null,
+   null
+  ],
+  [
+   "",
+   "",
+   ""
+  ],
+  [
+   "a",
+   "a",
+   "a"
+  ],
+  [
+   "a:b",
+   "a:b",
+   "a:b"
+  ],
+  [
+   "a:b:c",
+   "a:c",
+   "a:c"
+  ],
+  [
+   "a:b:c:d",
+   "a:d",
+   "a:d"
+  ],
+  [
+   "a::c",
+   "a:c",
+   "a:c"
+  ],
+  [
+   ":",
+   ":",
+   ":"
+  ],
+  [
+   "::",
+   ":",
+   ":"
+  ],
+  [
+   ":::",
+   ":",
+   ":"
+  ],
+  [
+   "sid:1781100000:abcd1234",
+   "sid:abcd1234",
+   "sid:abcd1234"
+  ],
+  [
+   "sid:1781100000:abcd1234#d",
+   "sid:abcd1234#d",
+   "sid:abcd1234#d"
+  ],
+  [
+   "sid:1:h#p",
+   "sid:h#p",
+   "sid:h#p"
+  ],
+  [
+   "sid:1:h#live",
+   "sid:h#live",
+   "sid:h#live"
+  ],
+  [
+   "\u00e9:1:\u00fc",
+   "\u00e9:\u00fc",
+   "\u00e9:\u00fc"
+  ],
+  [
+   "s:g1",
+   "s:g1",
+   "s:g1"
+  ],
+  [
+   "x:y:",
+   "x:",
+   "x:"
+  ],
+  [
+   ":y:z",
+   ":z",
+   ":z"
+  ]
+ ]
+}

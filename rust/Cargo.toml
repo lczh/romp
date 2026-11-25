@@ -1,6 +1,8 @@
 # The Rust spike's workspace (rust/SPIKE.md): the transcript store and the feed's per-card build, standalone.
 # External crates are added only with lczh's approval, pinned exactly here and in Cargo.lock to versions at least a
 # week old when added (tools/rust-spike/check_crate_ages.py). Approved 2026-11-25: serde, serde_json and their deps.
+# serde_json's `float_roundtrip` (a feature, no added crate) reads every float as Python's repr wrote it; without it
+# 14% of fractional times below 2e9 came back one ULP off (rust/SPIKE.md, S4.1).
 [workspace]
 resolver = "3"
 members = ["crates/romp-json", "crates/romp-transcript", "crates/romp-views", "crates/romp-spike"]
@@ -13,7 +15,7 @@ publish = false
 
 [workspace.dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order", "float_roundtrip"] }
 romp-json = { path = "crates/romp-json" }
 romp-transcript = { path = "crates/romp-transcript" }
 romp-views = { path = "crates/romp-views" }
