@@ -248,6 +248,11 @@ class HostTransport(_Base):
         #                                 the consumer reads the transport through a buffered stream a record ahead, so the
         #                                 transport's current offset is never the handled record's; the tag is
         self.end_grace = float(end_grace)
+        self.term_after_result = None   # seconds, or None: after this transport's `end`, a CLI that ran a turn and is still alive
+        #                                 this long after its result is ended with SIGTERM (then `end` with the kill bound), not
+        #                                 left to the end grace: with stdin closed it does not exit while background work runs
+        #                                 (2026-11-25). Set per teardown by the session (SdkSession._switch_teardown_check)
+        self.on_post_end_term = None    # called with None once that SIGTERM was asked for, or with the exception that stopped it
         self.on_ack, self.on_hello, self.on_stderr, self.on_exit, self.on_fault = on_ack, on_hello, on_stderr, on_exit, on_fault
         self.on_reexec = on_reexec      # the host's `reexec-now`: it is about to exec into the kernel's code and close this socket
         self.on_lost = on_lost          # the socket ended without this kernel asking (no detach, no close): called with this
@@ -436,16 +441,62 @@ class HostTransport(_Base):
             self._last_ack_t = time.time()
 
     async def _wait_exit(self, timeout: float) -> None:
+        """Read the host's frames until its exit frame or `timeout`. The CLI's records still streaming are dropped (the
+        session's receive loop is gone), except that with term_after_result set they are read for the turn boundary: a
+        main-thread result arms a SIGTERM that many seconds later, the next turn's init or assistant message disarms it
+        (that turn is finished first, then its own result arms it again), and the exit frame ends the wait as ever. Once
+        sent, the TERM is followed by `end` with the kill bound, which pulls the host's deadline in (session_host._end), and
+        the wait shrinks to match: the CLI's own shutdown takes about two seconds (relaunch_now)."""
         deadline = time.time() + timeout
+        term_at = None
         while self.exit_info is None and time.time() < deadline:
+            until = deadline if term_at is None else min(deadline, term_at)
             try:
-                chunk = await asyncio.wait_for(self._reader.read(65536), timeout=max(0.05, deadline - time.time()))
-            except (asyncio.TimeoutError, Exception):
+                chunk = await asyncio.wait_for(self._reader.read(65536), timeout=max(0.05, until - time.time()))
+            except asyncio.TimeoutError:
+                if term_at is None or time.time() < term_at:
+                    return
+                term_at = None
+                deadline = min(deadline, await self._term_after_result())
+                continue
+            except Exception:
                 return
             if not chunk:
                 return
             for f in self._fr.feed(chunk):
-                self._dispatch_side(f)
+                out = self._dispatch_side(f)
+                if out is not None and self.term_after_result is not None:
+                    term_at = self._post_end_turn(out.get("data"), term_at)
+
+    def _post_end_turn(self, data, term_at):
+        """When the post-`end` SIGTERM is due, given one CLI record read in _wait_exit: armed at a main-thread result,
+        disarmed by the next turn's open (its init, or an assistant message), unchanged by anything else (a background
+        task's progress, a subagent's frames: the very work that holds the CLI after its turn)."""
+        if not isinstance(data, dict) or data.get("parent_tool_use_id"):
+            return term_at
+        kind = data.get("type")
+        if kind == "result":
+            return time.time() + float(self.term_after_result)
+        if kind == "assistant" or (kind == "system" and data.get("subtype") == "init"):
+            return None
+        return term_at
+
+    async def _term_after_result(self) -> float:
+        """Send the post-`end` SIGTERM and `end` with the kill bound (once per teardown: term_after_result is spent), report
+        it, and return the deadline the exit wait keeps from here (unchanged when the request failed)."""
+        self.term_after_result = None
+        err = None
+        try:
+            await self.signal("TERM")
+            await self._send({"t": "end", "grace": sh.END_GRACE_KILL_S})
+        except Exception as e:
+            err = e
+        if self.on_post_end_term is not None:
+            try:
+                self.on_post_end_term(err)
+            except Exception:
+                pass
+        return time.time() + (sh.END_GRACE_KILL_S + 5.0 if err is None else float("inf"))
 
     def _dispatch_side(self, f: dict):
         """A non-record frame; returns the record for an `out` frame, else None."""

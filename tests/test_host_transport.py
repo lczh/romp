@@ -456,6 +456,167 @@ class TransportOverSocket(unittest.TestCase):
         self.assertEqual(ht.UNWATCHED_STOP_KEY, sb.UNWATCHED_STOP_KEY)
 
 
+class PostEndTurnHost:
+    """A host whose CLI, once `end` closes its stdin, runs the turn(s) it owes a background task's notification (an init, an
+    assistant message, a result each), starts background work in the last of them, and so does not exit: the CLI of
+    2026-11-25. It honors the end grace as the host does (a forced end, code -9, at the deadline; a later `end` with a
+    shorter grace pulls the deadline in) and exits 143 on a SIGTERM, as the installed CLI does. `turns`: how many such turns,
+    `gap` seconds apart. Every frame it got is kept, with the time it came."""
+
+    def __init__(self, path, turns=1, gap=0.0):
+        self.path, self.turns, self.gap = path, turns, gap
+        self.got = []
+        self.server = None
+        self.deadline = None
+
+    async def start(self):
+        self.server = await asyncio.start_unix_server(self._client, path=self.path)
+
+    def _out(self, writer, off, rec):
+        writer.write(sh.encode_frame({"t": "out", "offset": off, "data": rec}))
+
+    async def _client(self, reader, writer):
+        fr = sh.FrameReader()
+        off = 0
+        exited = asyncio.Event()
+
+        async def exit_with(code, cause):
+            if not exited.is_set():
+                exited.set()
+                writer.write(sh.encode_frame({"t": "exit", "code": code, "cause": cause}))
+                await writer.drain()
+
+        async def grace():
+            while not exited.is_set():
+                await asyncio.sleep(0.05)
+                if self.deadline is not None and time.time() >= self.deadline:
+                    await exit_with(-9, "end-forced")
+
+        async def post_end_turns():
+            nonlocal off
+            for i in range(self.turns):
+                if i:
+                    await asyncio.sleep(self.gap)
+                for rec in ({"type": "system", "subtype": "init", "session_id": SID},
+                            {"type": "assistant", "message": {"content": []}},
+                            {"type": "system", "subtype": "task_started", "task_id": "t-new%d" % i},
+                            {"type": "result", "subtype": "success", "session_id": SID}):
+                    self._out(writer, off, rec); off += 1
+                await writer.drain()
+            while not exited.is_set():           # the new watcher's progress: the work that holds the CLI
+                await asyncio.sleep(0.1)
+                self._out(writer, off, {"type": "system", "subtype": "task_progress", "task_id": "t-new0"}); off += 1
+                await writer.drain()
+
+        tasks = [asyncio.ensure_future(grace())]
+        try:
+            while not exited.is_set():
+                chunk = await reader.read(65536)
+                if not chunk:
+                    return
+                for f in fr.feed(chunk):
+                    self.got.append(dict(f, at=time.time()))
+                    if f["t"] == "attach":
+                        writer.write(sh.encode_frame({"t": "hello", "protocol": 1, "host": {"pid": 10, "start": "h"},
+                                                      "cli": {"pid": 11, "start": "c", "fsid": SID}, "journal": {"next": 0}}))
+                        await writer.drain()
+                    elif f["t"] == "in":
+                        obj = json.loads(f["data"])
+                        if obj.get("type") == "control_request":
+                            self._out(writer, off, {"type": "control_response", "response": {
+                                "subtype": "success", "request_id": obj["request_id"], "response": {}}}); off += 1
+                            await writer.drain()
+                    elif f["t"] == "end":
+                        dl = time.time() + float(f["grace"])
+                        first = self.deadline is None
+                        self.deadline = dl if first else min(self.deadline, dl)
+                        if first:
+                            tasks.append(asyncio.ensure_future(post_end_turns()))
+                    elif f["t"] == "signal" and f.get("sig") == "TERM":
+                        await exit_with(143, "end")
+        except (ConnectionResetError, asyncio.IncompleteReadError):
+            return
+        finally:
+            for t in tasks:
+                t.cancel()
+
+    def close(self):
+        if self.server:
+            self.server.close()
+
+
+class TheEndOfASwitchIsBounded(unittest.TestCase):
+    """2026-11-25: a switch's teardown sends `end` with the 1200 s grace so a turn the CLI opened in the last instant is
+    finished, not killed. But with its stdin closed the CLI does not exit at that turn's end while background work runs, and
+    the notification turn had started a new watcher: the CLI lived until the host's SIGKILL at exactly 1200 s, with the
+    kernel's session waiting in close() all along. With term_after_result set, the wait reads the records still streaming for
+    the turn boundary: a CLI still alive that long after a turn's result is ended with SIGTERM, then `end` with the kill
+    bound."""
+
+    def _path(self):
+        d = tempfile.mkdtemp(dir=os.environ.get("ROMP_TESTS_SYSTEM_TMPDIR") or None)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return os.path.join(d, "h.sock")
+
+    async def _attached(self, fh, end_grace, term_after_result):
+        await fh.start()
+        t = ht.HostTransport(fh.path, kernel={"pid": 1}, end_grace=end_grace)
+        t.term_after_result = term_after_result
+        said = []
+        t.on_post_end_term = said.append
+        await t.connect()
+        reader = asyncio.ensure_future(t.read_messages().__anext__())
+        await t.write(json.dumps({"type": "control_request", "request_id": "req_1_x", "request": {"subtype": "initialize"}}))
+        await asyncio.wait_for(reader, 5)          # the initialize answered: close() takes the `end` road
+        return t, said
+
+    def test_a_cli_still_alive_after_its_post_end_turn_is_ended_with_sigterm_within_the_bound(self):
+        async def go():
+            fh = PostEndTurnHost(self._path())
+            t, said = await self._attached(fh, end_grace=1200.0, term_after_result=0.3)
+            t0 = time.time()
+            await asyncio.wait_for(t.close(), 30)
+            took = time.time() - t0
+            self.assertLess(took, 5.0, "ended within the bound, never the 1200 s grace")
+            self.assertEqual((t.exit_info or {}).get("code"), 143, "the CLI's own SIGTERM shutdown, not a SIGKILL")
+            kinds = [f["t"] for f in fh.got]
+            self.assertEqual(kinds[-3:], ["end", "signal", "end"], kinds)
+            first_end, term, second_end = fh.got[-3:]
+            self.assertEqual((first_end["grace"], term["sig"], second_end["grace"]), (1200.0, "TERM", sh.END_GRACE_KILL_S),
+                             "the switch's grace, then SIGTERM, then the kill bound that pulls the host's deadline in")
+            self.assertGreaterEqual(term["at"] - first_end["at"], 0.3, "not before the turn's result plus the bound")
+            self.assertEqual(said, [None], "reported once, as sent")
+            self.assertIsNone(t.term_after_result, "spent: once per teardown")
+            fh.close()
+        run(go())
+
+    def test_each_turn_after_the_end_is_finished_before_the_sigterm(self):
+        async def go():
+            fh = PostEndTurnHost(self._path(), turns=2, gap=0.2)   # a second notification turn opens 0.2 s after the first
+            t, said = await self._attached(fh, end_grace=1200.0, term_after_result=0.5)
+            await asyncio.wait_for(t.close(), 30)
+            self.assertEqual((t.exit_info or {}).get("code"), 143)
+            term = next(f for f in fh.got if f["t"] == "signal")
+            end = next(f for f in fh.got if f["t"] == "end")
+            self.assertGreaterEqual(term["at"] - end["at"], 0.2 + 0.5,
+                                    "the second turn's init disarmed the first result's SIGTERM; its own result armed it")
+            fh.close()
+        run(go())
+
+    def test_without_the_bound_the_wait_is_the_end_grace_as_before(self):
+        async def go():
+            fh = PostEndTurnHost(self._path())
+            t, said = await self._attached(fh, end_grace=1.5, term_after_result=None)
+            t0 = time.time()
+            await asyncio.wait_for(t.close(), 30)
+            self.assertGreaterEqual(time.time() - t0, 1.4, "waited out the grace")
+            self.assertEqual((t.exit_info or {}).get("cause"), "end-forced")
+            self.assertNotIn("signal", [f["t"] for f in fh.got], "no SIGTERM on a road that did not ask for one")
+            self.assertEqual(said, [])
+            fh.close()
+        run(go())
+
+
 class TransportOverJournal(unittest.TestCase):
     def test_the_replay_answers_the_initialize_and_yields_the_journal_then_ends(self):
         d = tempfile.mkdtemp(); j = sh.Journal(d)
