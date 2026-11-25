@@ -1,6 +1,6 @@
 # The Rust spike's workspace (rust/SPIKE.md): the transcript store and the feed's per-card build, standalone.
-# No external crates yet: each one is added only with lczh's approval, pinned in Cargo.lock to a version at least
-# a week old when added.
+# External crates are added only with lczh's approval, pinned exactly here and in Cargo.lock to versions at least a
+# week old when added (tools/rust-spike/check_crate_ages.py). Approved 2026-11-25: serde, serde_json and their deps.
 [workspace]
 resolver = "3"
 members = ["crates/romp-json", "crates/romp-transcript", "crates/romp-views", "crates/romp-spike"]
@@ -12,6 +12,8 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 romp-json = { path = "crates/romp-json" }
 romp-transcript = { path = "crates/romp-transcript" }
 romp-views = { path = "crates/romp-views" }

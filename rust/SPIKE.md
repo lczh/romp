@@ -10,13 +10,14 @@ with no server. Both implementations run on one synthetic state, and the feed JS
   `tools/rust-spike/gen_json_golden.py`), and on a one-off check of 499,869 random floats against `repr`, 0
   mismatches. S2 (the oracle dumper, Python only) is next.
 - Next action: map what `build_feed`'s per-card build reads (kernel.py), then write `tools/rust-spike/dump_world.py`.
-- Blocked on lczh: external crates. Parsing JSON (S2 onward) wants `serde` and `serde_json`, the libraries a real
-  port would use, so their speed is what the measurement should see. On 2026-11-25 the permission check refused
-  a `cargo generate-lockfile` that would have fetched the newest versions unvetted. Each crate is added only with
-  lczh's approval, at an exact version published at least a week earlier.
+- External crates: lczh approved `serde` and `serde_json` with their dependencies on 2026-11-25. They are pinned
+  exactly: serde 1.0.229 and serde_json 1.0.154 in `Cargo.toml`, the rest by `Cargo.lock`, with hashbrown held at
+  0.17.1 because 0.17.2 was 3 days old. All 15 are at least 7 days old (`tools/rust-spike/check_crate_ages.py`).
+  `serde_json` 1.0.154 uses `zmij` (not `ryu`), and `hashbrown` brings `foldhash`; both are well past a week.
+  Any further crate needs lczh's approval and the same check.
 - Toolchain: Rust 1.100.0 (2026-11-09, aarch64-apple-darwin) via rustup in `~/.cargo`. Profiles are not
-  modified, so call it as `~/.cargo/bin/cargo`. `rust-toolchain.toml` pins the version. Build with `--offline`
-  until crates are approved.
+  modified, so call it as `~/.cargo/bin/cargo`. `rust-toolchain.toml` pins the version. Build with `--offline`:
+  the crates are already fetched.
 
 ## The question the spike answers
 
