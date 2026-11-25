@@ -1,0 +1,832 @@
+[
+ {
+  "area": "feed-builder",
+  "summary": "A feed card is one top-level goal of one living session, built as a dict inside _feed_session_entry (kernel/kernel.py:55894-57009). That function is the per-card derivation. Its loop over top goals starts at 56420, the card literal is 56814-56952, and the tree rows come from the nested flatten closure at 56216. The same function can also add one placeholder card (_provisional_card 53926, _blocked_placeholder 54089, _awaiting_card 54048) at 56980-57004. It returns a per-session entry {asks, working, awaiting, bgServices, servingFolds, heal, hidden, cold, peers, reads, faults} (57005). build_feed (57207) is the whole board. It reads the board-wide inputs once (57223-57250), then for each alive session in order (57255) it computes _feed_session_key (55227, 31 components named by _FEED_MEMO_LABELS at 54686). The key ALSO computes the ctx facts the body needs: ps, who_working, interrupting, store, closer, leaf_ok, leaf_head (55423-55467). The entry is served from or put into _feed_memo as a JSON string (57298-57300). Then _feed_fold_session (57129) decodes it, pops _ageT, stamps trgb via cm.age_rgb(now-_ageT), sets t=now on placeholders, and adds notify/notifyRaw. After the loop come the cross-session passes: the serving-fold join (57345), the handoff rows' whoWorking from other sessions' working state (57387), parked-handoff cards (57410), notice cards (57432) and a bell pass for the non-session cards (57440). The frame is returned at 57445. Its frame-level keys (sessions, order, views, boards, sdkNotices, selfHost, and so on) are not per-card. _build_feed_locked (74701) adds buildId. _push sends the frame as a copy with ledgers attached (73431-73476, _send_feed_frames 72683). The wire delta slot is _DELTA_SLOTS[\"feed\"] = ((\"feed\",), {\"asks\": \"byid:itemId\"}) (67003). /perf builds.feed.memo comes from _feed_memo_report (54868). It holds hit/miss/derived/coldLive/coldFlip, miss_by per key label plus cold (_feed_memo_miss 54752), row_by per live-row position, the fold* counters, the wire* counters and the seg* counters. The census at tests/test_feed_memo_inputs.py:131-216 (HELPERS, MODULE_READS, CTX) classifies every helper and ctx field the body reads, by input label. It passes at HEAD (31 passed, run here), so it is the authoritative one-level input list. The central finding for S2: the per-card build reads transcripts only through the cache-only event-model parse (ctx[\"ps\"]) and a few raw scans that are mostly gated on that parse. A cold build (ps None) over the synthetic world is a pure function of non-transcript state. A warm build needs the parse-derived half: segment anchor maps, working dot, narration, interrupted badge, awaiting, API error, provisional card.",
+  "entry_points": [
+   {
+    "name": "build_feed",
+    "where": "kernel/kernel.py:57207-57491",
+    "role": "The {type:'feed'} frame. Board-wide reads at 57223-57250. Per-session memo and fold loop at 57255-57320. Cross-session post-passes at 57345-57449. Return at 57445. Signature build_feed(now, live_map=None)."
+   },
+   {
+    "name": "_feed_session_entry",
+    "where": "kernel/kernel.py:55894-57009",
+    "role": "THE per-card derivation for one session. Top-goal loop at 56420, card dict at 56814, tree rows via the flatten closure at 56216, placeholders at 56980, entry return at 57005. Reads ctx fields that only _feed_session_key fills."
+   },
+   {
+    "name": "_feed_session_key",
+    "where": "kernel/kernel.py:55227-55471",
+    "role": "The memo key, one component per input (its docstring maps every component to the readers, 55241-55375). It also computes ctx ps / who_working / interrupting / store / closer / leaf_ok / leaf_head (55423-55467), so the body cannot run without it."
+   },
+   {
+    "name": "_feed_board_facts",
+    "where": "kernel/kernel.py:55101-55128",
+    "role": "Board-wide inputs taken once per build into ctx: cleared_by_sid, postal maps, nudge_records (count/failed/failedAt), nudge_times (last 8), usage identity, cap_open, auth key, downtime, debug."
+   },
+   {
+    "name": "_feed_key_with_deps / _feed_peer_facts / _feed_peer_facts_once",
+    "where": "kernel/kernel.py:55545, 54886, 54907",
+    "role": "Dependency components (usage, offer, peers, nudge, stalls, subagents) re-evaluated over the new entry. What a card reads about each peer sid: the peer's store identity, whether that store reads, its names parts, its clears and its host."
+   },
+   {
+    "name": "_feed_fold_session / _feed_fold_card / _feed_fold_stamp / _feed_fold_bell",
+    "where": "kernel/kernel.py:57129, 57073, 57061, 57052",
+    "role": "Turns a memoized entry string into frame cards: pops _ageT, sets trgb=cm.age_rgb(now-ageT, cmap), sets t=now for placeholders (_ageT None) and adds notify/notifyRaw. Keeps card objects across builds (_FEED_FOLD 57026)."
+   },
+   {
+    "name": "_feed_memo_get/_put/_miss/_drop/_forget/_report, _FEED_MEMO_STATS",
+    "where": "kernel/kernel.py:54778, 54787, 54752, 54805, 54816, 54868, 54707-54724",
+    "role": "The card memo (sid -> (key, entry_json, size), LRU, byte bound) and /perf builds.feed.memo, including miss_by (labels + cold) and row_by (_FEED_ROW_FIELDS 54696)."
+   },
+   {
+    "name": "_feed_seg_walk / _FeedSegTurns / _FeedSegWalk / _feed_seg_plain_t",
+    "where": "kernel/kernel.py:55750, 55706, 55743, 55811",
+    "role": "Parse-derived anchor maps (seg_uuid, seg_trig, seg_best, cite_uuids, seg_turn) and the plain-prompt time, with closed turns held in _FEED_SEG_HELD. This is where transcript content enters the cards."
+   },
+   {
+    "name": "_provisional_card / _awaiting_card / _blocked_placeholder",
+    "where": "kernel/kernel.py:53926, 54048, 54089",
+    "role": "Placeholder cards (itemId 'provisional:<sid>' and the like, _ageT from the segment or None). The provisional card needs a warm parse and reads placements, captions and cleared."
+   },
+   {
+    "name": "_build_feed_locked",
+    "where": "kernel/kernel.py:74701-74760",
+    "role": "The pusher's caller. Gated by _task_tracking_on() (74709), adds buildId, stores _built_feed, computes needs-you sets, fires bells."
+   },
+   {
+    "name": "_push feed section + _send_feed_frames + _DELTA_SLOTS['feed']",
+    "where": "kernel/kernel.py:73431-73476, 72683-72720, 67003-67013",
+    "role": "The browser frame: a dict copy of the cached build plus 'ledgers'. Sent as a delta slot keyed ('feed',), asks keyed by itemId. _DEDUP_VOLATILE=('now','buildId') at 65870."
+   },
+   {
+    "name": "input census + harnesses",
+    "where": "tests/test_feed_memo_inputs.py:131-216; tests/test_feed_session_memo.py:184-279; tests/bench_connect_push.py:96-130",
+    "role": "HELPERS/CTX label every read. _Board.setUp shows the hermetic world: jd._rebind_state, NAMES, goal stores minted with jd.apply_plan and saved with jd.save_goals, a patched _live_map. write_world is the S2 world base."
+   }
+  ],
+  "inputs": [
+   {
+    "input": "Goal store per session (nodes, status, lastNode, confirming, placements, closedTurns/closedSig, seams; node fields such as t, mt, text, trail, log, blocked, nodeComplete, cleared, handoff, origin, serving, agentTask, summary*, brief*, followup*, settledAt, blockCheckT, askAnchor, born, promptUuid)",
+    "read_by": "_feed_goals_keyed (kernel.py:42497), called once in the key (55451) -> ctx['store'] -> body 55994. Also every store helper in HELPERS (jd.review_boundary, jd._done_since, jd._block_since, _focus_open_top, _agent_open_set, ...) and jd.load_goals_shared inside _bg_placed_tops / _session_stamp_read.",
+    "where": "jd.GOALDIR/<sid>.json + override journal jd._overrides_dir()/<sid>.jsonl + jd.GOALARCHDIR/<sid>.json (judge.py:19592-19606). The mid-pass snapshot is _goals_snap and the rewind hold is _apply_rewind_hold (42540-42560).",
+    "how_to_snapshot": "Dump the RENDERED store _feed_goals_keyed returns (journal replayed, rewind hold applied), not the raw file. Keep node insertion order: card order follows it. Write null when the read faulted (store_faulted path, 55995)."
+   },
+   {
+    "input": "Live-session map (row per sid: state, since, authLive/auth/authPending/authLogin/authLoginLive/authLabel, retryCount/retryInfo, subagents, bgTasks)",
+    "read_by": "build_feed(live_map) -> tm=live_map.get(fsid) (live, perm_state, placeholder since). _feed_row_key (55156) lists the fields. BUT _cap_switch_offer (24999), _session_awaiting (37868) and _bg_live_norm (37964) read km._live_map() directly.",
+    "where": "Sessions.live via _live_map (kernel.py:27596)",
+    "how_to_snapshot": "Dump the dict passed to build_feed. The dumper must also patch km._live_map to return that same dict (test_feed_session_memo.py:1213 does this)."
+   },
+   {
+    "input": "Alive session rows s = {sid, name, anchor, path, mtime}, in order",
+    "read_by": "_alive_sessions (kernel.py:6592), called at build_feed 57235. The order sets the asks order across sessions.",
+    "where": "discover rows from _sessions (6386), newest transcript mtime first, filtered by live_map",
+    "how_to_snapshot": "Dump the list in order. Replace path with a transcript id the Rust side maps to its own copy."
+   },
+   {
+    "input": "Names registry (name, cwd, color) for the session and for every peer a card names",
+    "read_by": "_names_parts (3320), _name_color (3332, gives {bg:'#..', fg:'#ffffff'} or null), _name_of (4827). Read for own sid, handoff rows (56245-56250), origin (56556-56562) and wmap names.",
+    "where": "NAMES/<sid> tab-separated; the cycle scope _live_scope.names takes precedence when set",
+    "how_to_snapshot": "Dump the parts per sid for all sids and peers. Set km._live_scope.names=None so files are read."
+   },
+   {
+    "input": "Cleared set",
+    "read_by": "_cleared_ids_display (52752) at 57223 -> ctx['cleared']. Used at 56423 (`nid in cleared`), 56553 (origin_live), _provisional_card's follow-up check, parked handoffs and notice cards.",
+    "where": "STATE/cleared.jsonl",
+    "how_to_snapshot": "Sorted list of itemIds."
+   },
+   {
+    "input": "Judge runs in flight",
+    "read_by": "jd.active_runs() (judge.py:1666) at 57244 -> _jactive -> sess_judging (56020) and the key's closer gate (55453)",
+    "where": "in-memory jd._active registry",
+    "how_to_snapshot": "List of fsids. Empty in the synthetic world unless planted into jd._active."
+   },
+   {
+    "input": "Judge-auth latch {fsid: {t, mode, note, login}}",
+    "read_by": "jd._auth_down_map (judge.py:1996) at 57238. loginLabel is resolved through _sdk().login_display at 57242. The result goes to jerr (56378), jauth_top and the blocked.judgeAuth card fields (56912-56918).",
+    "where": "STATE/judge-auth.json (judge.py:138)",
+    "how_to_snapshot": "Dump the map AFTER the loginLabel resolution (it depends on the SDK backend's login registry)."
+   },
+   {
+    "input": "States logs",
+    "read_by": "_interrupted_by (2530, machine cuts), _session_retrying (38531), _session_awaiting -> _states_awaiting_overlay, and the parse key (jd.parse_cached states=)",
+    "where": "jd.STATESDIR/<sid>.jsonl and the anchor sid's file (key 55386)",
+    "how_to_snapshot": "Raw rows per sid. They only matter on the warm path or for the retrying chip. write_world writes one {t, state:'waiting'} row each."
+   },
+   {
+    "input": "Postal log (wait-for graph, answered pairs, peer display names)",
+    "read_by": "_postal_wait_maps (54160) -> _wait_for_graph (54372) at 57236 -> wmap (peer-wait floor 56442, waitingOn chip). _peer_answered (54441) in the stamp arm; _peer_identity (37271); _bg_service_descs",
+    "where": "STATE/timeline/messages.jsonl",
+    "how_to_snapshot": "Dump wmap and the _postal_session_slice(sid) (55052) per session, or the raw log. Empty in write_world."
+   },
+   {
+    "input": "Auto-nudge ledger and nudge history",
+    "read_by": "_auto_nudge_data()['nudged'] -> ctx['nudge_records'] (55115), _auto_nudge_data()['deferred'] -> _stalled_goals (18553) -> ctx['stalls'], _nudge_times (63877) -> ctx['nudge_times']. Used for nudged, nudgeFailed, stalled and the needs_input filing (56710-56767).",
+    "where": "STATE/auto-nudge.json; STATE/nudge-events.jsonl",
+    "how_to_snapshot": "Dump the three dicts exactly as they sit in ctx (only the fields count/failed/failedAt, last 8 times)."
+   },
+   {
+    "input": "Transcripts (through which functions)",
+    "read_by": "Mainly through the cache-only parse ctx['ps']: _parse_cached (45049) -> jd.parse_cached -> em.parse_session (event_model.py; store reader _read_jsonl_incremental at event_model.py:2921), live-merged by _merge_live_atoms (49368). This feeds _session_working (2064), _open_turn_progress (2037), _interrupted_by, _feed_seg_walk maps (56038), _feed_seg_plain_t (56403) and _provisional_card's _parse (53926). Raw scans: _api_error (40762, tail of raw records; gated on ps at 56347), _bg_live_norm / _bg_scan_all_cached (38807; via _heal_session_tops only for askAnchor=='machine' tops), em.hydrate body reads in _summary_text_anchor (61501), and _dictated_prompt_uuid inside _pure_delegation_top (16237, only for unlatched promptUuid tops). _closer_pending (16503) reads the JUDGE's parse jd.parsed_session.",
+    "where": "Claude projects dir <proj>/<sid>.jsonl",
+    "how_to_snapshot": "Not in the JSON snapshot: this is the S3 store's input. For the per-card port, either build cold (no ps) or record the parse-derived facts per session (see open questions)."
+   },
+   {
+    "input": "Closer settle gap",
+    "read_by": "_closer_pending (16503) in the key (55453) -> ctx['closer'] -> card 'judging'. Observed True on a warm synthetic board with no closedTurns.",
+    "where": "jd.parsed_session turns + store closedTurns/closedSig + jd.CLOSER_ON (env ROMP_CLOSER, judge.py:796)",
+    "how_to_snapshot": "Dump a bool per session."
+   },
+   {
+    "input": "Interrupting / who_working",
+    "read_by": "_interrupting (45249; row interrupting/snapT, stop record, 120 s cap at now) and _session_working (2064; reads _downtime via suspension) in the key -> ctx",
+    "where": "live row + parse + in-memory _downtime (kernel.py:2014)",
+    "how_to_snapshot": "Dump bools per session."
+   },
+   {
+    "input": "Peers (other sessions a card reads)",
+    "read_by": "Origin sender's store via jd.load_goals_shared_or_fault(psid) (56550) for origin.live. _name_of/_name_color for handoff recipients and origin senders. _handoff_peer_identities (37314), _handoff_card_fields (37415), _peer_identity, _goal_awaiting_stamp_full peers. Keyed by _feed_peer_facts (54886).",
+    "where": "other sessions' goal stores and names entries; _host_for_sid for remote hosts",
+    "how_to_snapshot": "For each peer sid any entry names (entry['peers']): its rendered store (at least nodeComplete/cleared of the referenced goal), its names parts and its host."
+   },
+   {
+    "input": "Session flags (hideFromFeed, notify)",
+    "read_by": "_session_flag(fsid,'hideFromFeed') (55932, entry None) and _session_flag_raw(sid,'notify') via _feed_bell_reader (57040)",
+    "where": "STATE/session-flags.json (_session_flags 9954)",
+    "how_to_snapshot": "Per-sid flag dict."
+   },
+   {
+    "input": "Bell overrides and master",
+    "read_by": "_notify_cards (10114) at 57247 -> _feed_fold_bell (57052) and _notify_card_effective (10180, master = NOTIFY_ALL_KEY); _push_explicit_bell (77203) for notifyRaw",
+    "where": "STATE/notify-cards.json",
+    "how_to_snapshot": "Dump the dict."
+   },
+   {
+    "input": "Colormap and clock (tints)",
+    "read_by": "_colormap (69316) at 57246; fold age_rgb (colormap.py:60, ramp uses math.log and Python round); placeholder t=now (57083); frame 'now'",
+    "where": "STATE/colormap (default 'aurora'); build_feed's now argument",
+    "how_to_snapshot": "One integer `now` and the colormap name in the snapshot, used by both sides."
+   },
+   {
+    "input": "Debug mode and judge-error rows",
+    "read_by": "jd._debug_mode (judge.py:1069) -> _judge_error_rows(now) (54501) at 57227 -> warnRows via _card_warn_rows (54532, 56945)",
+    "where": "STATE/debug-mode.json; STATE/judge-errors.jsonl",
+    "how_to_snapshot": "Off by default (warnRows null). Dump the flag, and the rows if on."
+   },
+   {
+    "input": "SDK registry fields and death marker",
+    "read_by": "_feed_reg_sig (43290): bgLedger (_bg_live_norm), spawnedAt (jd._cli_epoch); gone marker identity",
+    "where": "STATE/sdk/<sid>.json (write_world writes {sid, alive, name, cwd, model}); STATE/gone/<sid>.json",
+    "how_to_snapshot": "Dump bgLedger/spawnedAt per sid (absent in write_world)."
+   },
+   {
+    "input": "Captions",
+    "read_by": "_seg_caption(_captions(fsid)) inside _provisional_card / _blocked_placeholder",
+    "where": "jd.CAPDIR/<sid>.jsonl",
+    "how_to_snapshot": "Rows per sid, or the placeholder text. Only on the warm placeholder path."
+   },
+   {
+    "input": "Cap-offer inputs (usage window, key on hand)",
+    "read_by": "_cap_switch_offer (24984), only when aerr is set; _usage_cap_open (25007); _auth_key_present (24889)",
+    "where": "STATE/usage.json; machine auth",
+    "how_to_snapshot": "Only needed if the world plants an API error. Dump the (window, resetsAt) and the bool."
+   },
+   {
+    "input": "In-memory tables that change output",
+    "read_by": "_node_anchor_last/_node_anchor_rev (61742-61743, a remembered warm anchor served on cold builds), _watch_awaiting (32547), backend pending_cut / current_ask / Sessions.live_rev, _SUMMARY_ANCHOR_MEMO, _FEED_SEG_HELD",
+    "where": "process memory",
+    "how_to_snapshot": "Clear all of them before the oracle build (or use a fresh process) and record them as empty."
+   },
+   {
+    "input": "Frame-level, post-loop inputs (not per-card)",
+    "read_by": "_parked_handoffs (61281), _notice_cards (31901), _views_payload (9030), _judge_limit_view (25026), _state_unknown_names (54652), _boards_data (75093), _undo_stack_ids (53198), _cleared_foreign (52574), _session_order (6943), _chat_tab_sessions (19774) + _github_repo_of(_session_cwd), _boundary_clear_notices (54559), _sdk_problem_rows (25080), _sync_notice_rows (33005), _self_host (28685)",
+    "where": "various STATE files, the environment and the host",
+    "how_to_snapshot": "Leave them out of the per-card comparison. Either compare `asks` only, or copy these keys verbatim from the Python frame into the snapshot (redact selfHost)."
+   }
+  ],
+  "nondeterminism": [
+   "The clock: every card's and tree row's trgb = age_rgb(now - _ageT), placeholder t = now (57083) and the frame's 'now'. buildId is added later by _build_feed_locked (74711). _DEDUP_VOLATILE = ('now','buildId') (65870). _interrupting's 120 s cap and _usage_cap_open(now) also read the clock.",
+   "Discovery is clock-windowed (48 h; tests/bench_chatbuild.py:31 notes a fixed epoch falls outside the window), so the world must be written relative to time.time(). Alive order is newest transcript mtime first (_sessions 6386), so asks order across sessions depends on file mtimes. Record the alive order in the snapshot.",
+   "A cold build can start a background parse thread: build_feed calls _warm_fleet_bg (57400) when _warm_wanted (13888) holds, which starts thread 'parse-warm' (45141). That thread then fills the parse cache and races the next build. Warm every parse explicitly first, or patch km._warm_fleet_bg.",
+   "Process history: _feed_memo, _FEED_FOLD, _FEED_SEG_HELD, _SUMMARY_ANCHOR_MEMO and _node_anchor_last (61742) carry state between builds (a remembered warm anchor appears on a later cold build). The first build adopts sessions into session-order.json, so 'order' differs on build one (test_feed_session_memo.py:221-225). Warm once, then reset as _reset_memo does (test_feed_session_memo.py:110).",
+   "Frame-level keys depend on the host and environment: selfHost is the machine's hostname (observed in the probe); sdkNotices carry a wall-clock t and depend on whether claude_agent_sdk is importable (observed: one row); githubRepo comes from git at the session cwd; the jauth loginLabel and _alive_sessions' SDK branch depend on _sdk().",
+   "Float math in the tint: colormap.ramp uses Python round() (ties to even) and age_rgb uses math.log. Rust's f64::round rounds ties away from zero, so use round_ties_even, and ln may differ by one ULP. Either strip trgb from the comparison (test_feed_session_memo._without_tints at 96) or match both behaviors.",
+   "hash(str(line)) in the _summary_text_anchor memo key (61519) is PYTHONHASHSEED-randomized, but it is only a cache key, not output. The sets peers_read and _jactive are sorted or only tested for membership before output (57007 sorted(peers_read))."
+  ],
+  "gotchas": [
+   "write_world (tests/bench_connect_push.py:96) writes NO goal stores, so the board has zero goal cards. Cards appeared in the probe only after minting stores with jd.apply_plan + jd.rollup_status + jd.save_goals (the test_feed_session_memo.py:244-252 idiom) or a raw-JSON publish (_publish_raw, 264-279).",
+   "Goal trails must name real segment ids to exercise the anchor code. The format is '<sid>:<t>:<hash8>' and the key is '<sid>:<hash8>' via jd._seg_key (61584). With trail ['s1'] every anchorUuid/promptAnchorUuid/summaryAnchorUuid stayed null even warm (probe). Take ids from km.em.segments(turn) or the judge's parse.",
+   "The Gen replies in bench_connect_push are under jd.CITE_MIN_CHARS (80), so cite_uuids was empty in the probe. The Gen in bench_chatbuild writes ~95-char wrap-ups (substantive). Use the latter for summary-landing paths.",
+   "The feed reads the parse CACHE-ONLY (_parse_cached 45049). A fresh process builds cold: sessState 'unknown', no dots, no anchors, no provisional card. Calling km._parse(s['path'], sid, now) per alive session first made it warm (probe: sessState unknown->quiet, judging True from the closer gap).",
+   "Three helpers ignore the live_map argument and call km._live_map() (24999, 37868, 37964). Patch km._live_map to the same dict or the awaiting, bg and cap-offer paths see a different world.",
+   "_feed_session_entry cannot be called standalone. Its ctx needs ps, who_working, interrupting, store, closer, leaf_ok, leaf_head, nudge_records, nudge_times and board, which only _feed_session_key and _feed_board_facts set (55462-55467, 55120-55127). To drive a single derivation, call the key first with the same ctx.",
+   "Frame cards are JSON round-tripped: the entry is json.dumps(..., default=str-like) at 57298 and the fold decodes it. Tuples become lists and non-str keys become strings. The fold pops _ageT and adds trgb, notify and notifyRaw. km._feed_memo[sid][1] holds the clock-free entry before the fold, a cleaner per-card oracle. But an entry with faults is not memoized (57299), and a hidden session memoizes 'null'.",
+   "Order is load-bearing. Top cards follow the insertion order of the store's nodes dict (children built at 56045-56046). Tree kids use sorted(key=_fsubmax, reverse=True) (56218), a stable sort that keeps insertion order on ties. serde_json without preserve_order (which needs indexmap, not an approved crate) iterates maps sorted by key and would reorder cards in the S5 Value variant.",
+   "The asks list is not just the concatenated per-session cards. The post-loop passes rewrite cards from other sessions' state: whoWorking on handoff rows from working_sids (57387-57398), serving-fold rows moved into the tracker's card (57345-57378), plus parked-handoff cards (57410), notice cards (57432) and their bell stamps (57440).",
+   "A build has side effects. It may call lg.mark_refused (56366), adopt sessions into session-order.json, file _sync_notice bell rows on faults (_feed_derive_complain 54831), write a stderr heal log and start the warm thread. Build only over a temp root via jd._rebind_state (test_feed_session_memo.py:207).",
+   "Call build_feed directly. _build_feed_locked swaps in _feed_off_frame when _task_tracking_on() is false (74709) and also fires bells and badges.",
+   "selfHost carries the machine name. Strip or redact the frame-level keys before writing any oracle file that might be shared.",
+   "The census tests/test_feed_memo_inputs.py (HELPERS 131-189, MODULE_READS 192-198, CTX 199-216) passed at HEAD (31 passed here). It can serve as the dumper's checklist of boundaries to snapshot or record, and as the list of helpers whose outputs a record/replay layer would wrap."
+  ],
+  "open_questions": [
+   "Warm or cold oracle? The per-card build reads transcripts only through the event-model parse (plus raw scans gated on it), not through transcript records directly. So porting the warm path means porting em.parse_session, em.segments, jd.apply_seams, _seg_key and the atom scalars, which goes beyond the 'transcript store'. Options: (a) cold-only (ps None, a pure function of the JSON snapshot, but the store port never feeds the build); (b) add per-session parse-derived facts to the snapshot (seg maps, who_working, progress, interrupted, plain_user_t, _session_awaiting, _api_error, bg tasks, closer, interrupting, placeholder inputs), for example recorded at the HELPERS boundaries; (c) port the event model too. Which one does the spike measure?",
+   "Oracle granularity: compare the per-session entries (km._feed_memo strings, clock-free, before the fold), the folded asks list, or the whole frame? The frame keys outside asks (sessions, order, views, boards, sdkNotices, selfHost, clearNotices, ...) are not per-card and partly depend on the host.",
+   "Does the byte comparison include trgb (needs ln and ties-to-even rounding parity in Rust) or strip it like test_feed_session_memo._without_tints?",
+   "For the S5 serde_json::Value variant, how is node insertion order kept? Options: the preserve_order feature (indexmap, a new crate needing approval and the age check) or an explicit node-order array in the snapshot for both variants.",
+   "Which card shapes must the synthetic stores cover, and how should they be minted? Candidates: blocked/rejudging/recheck, completed with settledAt, awaiting (stamp/delegation/owned task), handoff and origin rows (peer reads), serving fold, parked rows, agentTask, nudge-failed, stalled, the judge-auth/permission/API floors, umbrellas, born/healed tops. Mint through judge code (jd.apply_plan/record_verdict) or raw JSON publishes?",
+   "How should S2 record which per-card code paths ran? The coverage module is not installed (the supply-chain rule applies). sys.monitoring LINE events (Python 3.12 stdlib) or sys.settrace over kernel.py 55894-57009 (plus the placeholder helpers) need no install."
+  ]
+ },
+ {
+  "area": "transcript-layer",
+  "summary": "The main finding: the per-card build (_feed_session_entry, kernel.py:55894) almost never touches transcript records directly. It reads the parsed Session -> Turn -> Atom tree `ps`. The memo key fetches that tree once per build, cache-only: `ps = _parse_cached(s[\"path\"])` at kernel.py:55427, with an in-place `_parse` re-read only for a session the memo already holds warm (55481), then `_merge_live_atoms` (55484), which returns the tree unchanged when no backend has live atoms (49395). The chain is km._parse (44489) -> jd.parsed_session (judge.py:4212) -> em.parse_session (event_model.py:12585) -> FileAdapter (4038) -> _read_jsonl_entry (3044/3077) -> _scan_jsonl_stream (2794). Only two per-card paths bypass the tree. (1) The background-task fold em.scan_bg_tasks_cached (593), reached through _bg_live_norm (kernel.py:37952, called at 56412 and by the key at 55520), _session_awaiting (56327), and _heal_session_tops -> _bg_scan_all_cached (56041 -> 38807), the last one only when the store holds tops anchored on \"machine\". It goes through fold_records (event_model.py:3310) over the same record cache. (2) _api_error (kernel.py:40762, called at 56347): a raw tail-first `open(path, errors=\"replace\")` read (40569) with its own (mtime, size) cache and a 256 KiB widening window (40499). _session_meta (49067) is NOT on the per-card path. It is reached only through _session_cwd (4843) for the feed's top-level `sessions[].githubRepo` (57487), and only when the names registry has no cwd.\n\nTraced empirically: I instrumented build_feed on a 3-session write_world board (one open turn, parses warmed, km._live_map patched). Per build: 0 em.parse_session calls (all cache hits); 5 jd.parsed_session calls (3 via km._parse from placeholders, 2 via _closer_pending at kernel.py:16515); 7 scan_bg_tasks_cached/fold_records over the transcripts; 2 _api_error; 0 _session_meta; 0 _bg_scan_all_cached (no goal store, so no candidate tops); plus record-cache reads of the states logs and captions. Atom and turn fields read: atom.type, uuid, t, author, message.content[].type/text (id/name for tool_use), message.model, message.stop_reason, isApiError, command, origin, session_id, lazy, _echo_text; turn.atoms, trigger, t, end, ended, id, pre, echoTurn, placedEchoes.\n\nRecord fields consumed, by road:\n- Through the parse (FileAdapter._ingest and _emit_fold, event_model.py:4157-5420): type, uuid, parentUuid, logicalParentUuid, timestamp, message{role, content, model, stop_reason, usage, id} (_norm_message), isApiErrorMessage, apiErrorStatus, promptId, isCompactSummary, isMeta, sourceToolUseID, promptSource, origin, toolUseResult (only when it has answers/structuredPatch/agentId/isAsync, 5353), subtype (compact_boundary, model_refusal_fallback with compactMetadata/originalModel/fallbackModel/apiRefusal*/scope), and attachment queued_command text.\n- Through the bg fold (_bg_step, 421-590): tool_use {id, name, input.description/prompt/script/scriptPath/run_in_background/persistent/timeout_ms/command/ws.url}, toolUseResult {isAsync, status, description, summary, workflowName, prompt, scriptPath, outputFile, taskType, agentId}, tool_result {tool_use_id, content, is_error}, string task-notification content, queue-operation {operation, content}.\n- Through _api_error (40569-40690): isSidechain, isMeta, uuid, parentUuid, timestamp, message.content/model, isApiErrorMessage, apiErrorStatus, error, rompNoRetry, promptSource, origin, system subtypes model_refusal_*.\n- Nothing per-card reads cwd, gitBranch, version or record sessionId.\n\nThe store's identity contract (S3 oracle facts, verified by probe with ROMP_READER_TRACE):\n- Entry tuple (3216): (st_mtime as a float, size, consumed offset, the 64-byte guard before the offset (1181), records, base, gen, an array('q') of (byte offset, length) per decoded record, inode, crc_start, zlib.crc32 of bytes [0, offset)).\n- Hit: same float mtime and size.\n- grown: guard check, then scan offset..stat size into a NEW list; same generation.\n- touched: same size, new mtime, same inode, whole entry. The guard plus the crc32 of the held bytes decide, and the generation is kept (3126).\n- shrunk or rewrite (3165), guard: a whole re-read with a fresh process-wide generation (_next_gen, 1383).\n- A trailing line with no newline is left unconsumed. Each newline-terminated line is split again with bytes.splitlines (so a bare \\r splits it, 2855), ASCII-stripped, decoded utf-8 with replace, and json.loads'd. Failures are skipped but still consumed and still in the crc. Non-object values (5, \"str\", [1,2]) are kept in the list.\n\nStandalone use works.\n- event_model alone loads via importlib with ROMP_STATE_DIR pointed at a temp dir. No threads, and checkpoints are off by default (1242). _read_jsonl_incremental, parse_session(now=fixed) and scan_bg_tasks_cached all ran on a write_world directory.\n- The kernel-level helpers (_parse, _api_error, _session_meta, _bg_scan_all_cached, build_feed) work after loading bin/romp-kernel through tests/romp_load with ROMP_KERNEL_NO_OPEN=1, XDG_STATE_HOME=<temp>/state, ROMP_STATE_DIR popped and CLAUDE_CONFIG_DIR=<temp>/claude (the tests/test_kernel_feed_warm.py:22-28 pattern). Import took 0.08 s, started no threads, and build_feed ran.\n\nromp-event-model --emit (event_model.py:13022-13043) is not usable as the store oracle. It prints the parse tree (plain_tree, sort_keys, indent=1), not records, offsets or identity. It is also clock-dependent: now=int(time.time()), and two runs 1.2 s apart differed at the idle atom's end and the last turn's end. A Python wrapper calling em.parse_session(..., now=FIXED) then em.plain_tree (or plain_tree of km._parse's tree) is a usable intermediate oracle for a parse port. The store oracle should be a small driver over _read_jsonl_entry that dumps records, offset, offsets, crc, inode, gen and the read kind per append/touch/rewrite/shrink/replace step.",
+  "entry_points": [
+   {
+    "name": "_read_jsonl_incremental",
+    "where": "kernel/event_model.py:2921",
+    "role": "Whole-file record list from the shared record cache. Calls _read_jsonl_entry (no tail entries unless _TAIL_OK is set) and returns ent[4]. The seam every fold and parse reads through."
+   },
+   {
+    "name": "_read_jsonl_entry / _read_jsonl_entry_unlocked",
+    "where": "kernel/event_model.py:3044, 3077-3220",
+    "role": "The identity contract. A hit under the cache lock alone; otherwise a per-path stripe lock (64 stripes, 3036) and one of the kinds zero/grown/touched/guard/rewrite/shrunk/upgrade/restore. Builds the 11-tuple at 3216 and inserts it with an LRU count cap of 1024 (765) and a decoded-byte budget (957)."
+   },
+   {
+    "name": "_scan_jsonl_stream",
+    "where": "kernel/event_model.py:2794-2867",
+    "role": "Line decoder: readline bounded by the stat size, bytes.splitlines inside each line, strip, utf-8 'replace', json.loads. Appends (offset, len) per decoded piece and carries the running crc32 over complete lines. The exact byte semantics a Rust store must match."
+   },
+   {
+    "name": "_JSONL_CACHE",
+    "where": "kernel/event_model.py:753 (layout comment 753-764)",
+    "role": "path -> (mtime, size, offset, tail_bytes, records, base, gen, offsets, inode, crc_start, crc). Dict order is the LRU order. record_cache_stats (1090) and record_cache_resident (1148) report it on /perf."
+   },
+   {
+    "name": "fold_records",
+    "where": "kernel/event_model.py:3310",
+    "role": "Append-incremental fold over the reader's entry, with cursor (count, gen, state). A same-gen growth steps only the new records; any other gen refolds. Used by the bg-task scans, _session_meta, the states-log readers and captions."
+   },
+   {
+    "name": "scan_bg_tasks_cached / _bg_step",
+    "where": "kernel/event_model.py:593, 421-590",
+    "role": "Background-task launch/notification pairing straight off raw records. The per-card build's only raw-record fold besides _api_error: through km._bg_scan_cached (kernel.py:38795, running-only) and km._bg_scan_all_cached (kernel.py:38807, every task)."
+   },
+   {
+    "name": "parse_session",
+    "where": "kernel/event_model.py:12585-12742",
+    "role": "Builds the Session tree. Inputs: leaf + candidate files (lineage closure from states rows), states rows (idle atoms via synthesize_idle, 5428, which reads `now`), the postal index (5993; defaults to STATE/timeline/messages.jsonl), sdk_human, leaf_override. _assemble then synthesize_orphans, synthesize_idle, segment_turns. Output keys: rompUuid, name, dir, color, leafFsid, turns, landedTextUuids, skillLoads."
+   },
+   {
+    "name": "tail_parse",
+    "where": "kernel/event_model.py:12534",
+    "role": "A parse over a tail window's own records inside a tail-first scope (comment threads). Not on the feed path."
+   },
+   {
+    "name": "FileAdapter",
+    "where": "kernel/event_model.py:4038-5427",
+    "role": "Graph rebuild. _ingest (4157) indexes uuid/parent/timestamp/promptId/etc. via r.get on EVERY record (it crashes on non-dict lines). Repair passes for resume forks and compactions. _emit_fold (5229) turns records into atoms."
+   },
+   {
+    "name": "segment_turns / _turn_id / segments",
+    "where": "kernel/event_model.py:5734, 5720, 5906",
+    "role": "Groups atoms into end_turn-bounded turns. Turn id = rompuuid:t:sha1(text)[:8]; segment ids also use sha1 (5878-5883). The ids flow into the feed's anchor maps."
+   },
+   {
+    "name": "plain_tree",
+    "where": "kernel/event_model.py:8547",
+    "role": "A plain-dict copy of a parsed tree minus the pre-turn keys. What --emit dumps and what a parse oracle should dump."
+   },
+   {
+    "name": "main (--emit/--test)",
+    "where": "kernel/event_model.py:13022-13046 (bin/romp-event-model is a symlink to it)",
+    "role": "CLI: parse_session(path, rompuuid, name, states defaulting to STATE/states/<stem>.jsonl, now=int(time.time())), then json.dumps(plain_tree(...), indent=1, sort_keys=True). No postal_log, sdk_human=False, single candidate file."
+   },
+   {
+    "name": "km._parse / km._parse_cached",
+    "where": "kernel/kernel.py:44489, 45049",
+    "role": "The kernel display parse over jd.parsed_session (judge.py:4212) and the shared parse store (judge.py:3299, slot (fsid, cut, leaf), key (fileset [mtime, size] rows (judge.py:3185), cut)). _parse_cached never parses, so on a fresh process it returns None for every session."
+   },
+   {
+    "name": "_feed_session_key (ps fetch)",
+    "where": "kernel/kernel.py:55227, 55425-55490",
+    "role": "Fetches the cache-only parse once per build (55427), re-reads in place only for a warm-keyed memo entry whose leaf stats (55481), merges live atoms (55484), and computes who_working, interrupting and closer. Hands ps to the body through ctx."
+   },
+   {
+    "name": "_bg_live_norm",
+    "where": "kernel/kernel.py:37952-38010",
+    "role": "Live background tasks. Reads the GLOBAL _live_map() (37964), not the build's live_map argument. Without a live row's bgTasks it falls back to _bg_scan_cached(path), and it reads time.time() directly (37995, 38001)."
+   },
+   {
+    "name": "_api_error / _api_error_pass",
+    "where": "kernel/kernel.py:40762, 40502-40690",
+    "role": "Raw tail-first transcript read (open errors=replace, seek, drop the half line), outside the record cache. Cached by (mtime, size) in _api_err_cache (37135). The window starts at 256 KiB (40499) and widens 4x until a record decides the verdict."
+   },
+   {
+    "name": "_heal_session_tops -> _bg_scan_all_cached",
+    "where": "kernel/kernel.py:38841, 38807",
+    "role": "Reads the every-task bg fold only when the store holds parentless tops with askAnchor == 'machine'. Otherwise returns before any transcript read."
+   },
+   {
+    "name": "_session_meta",
+    "where": "kernel/kernel.py:49067-49111",
+    "role": "Fold of cwd/gitBranch/version/permissionMode/lastEditPath. Off the per-card path. Reached via _session_cwd (4843) for build_feed's sessions[].githubRepo (57487), only when the registry has no cwd."
+   },
+   {
+    "name": "_states_rows / _messages_rows / _captions",
+    "where": "kernel/kernel.py:16321, 16330, 41066",
+    "role": "Per-card reads of the states log, the postal log and captions through the same record cache (_read_jsonl_incremental). These are the non-transcript jsonl inputs that share the store."
+   }
+  ],
+  "inputs": [
+   {
+    "input": "Leaf transcript(s) <CLAUDE_CONFIG_DIR>/projects/<dir>/<fsid>.jsonl, plus the anchor <sid>.jsonl for a reachable fork and lineage from-files",
+    "read_by": "FileAdapter via _read_jsonl_entry (parse); scan_bg_tasks_cached via fold_records; _api_error via a raw open",
+    "where": "event_model.py:4126-4140; judge.py:3892-3908 (_judge_candidates); event_model.py:12650 (_lineage_closure); kernel.py:40569",
+    "how_to_snapshot": "Not snapshotted: these are the files both implementations read. Record each file's path, size, mtime_ns and inode in the snapshot manifest so a stale file is detected. Optionally dump the Python record list (json.dumps per record), consumed offset, offsets array and crc32 as the S3 store oracle."
+   },
+   {
+    "input": "The parsed Session tree `ps` (live-merged)",
+    "read_by": "_feed_session_entry: _open_turn_progress, _session_working, _interrupted_by, _feed_seg_walk/_segs_seam (em.segments + jd.apply_seams), _feed_seg_plain_t, _dictated_prompt_uuid, placeholders via _parse",
+    "where": "kernel.py:55427, 55481, 55484; 2037, 2064, 2530, 2553, 55750, 61357, 16201",
+    "how_to_snapshot": "Either port parse_session's exercised subset to Rust, or include plain_tree(km._parse(path, sid, NOW)) per session in the snapshot as an intermediate input. Dump it as an oracle either way (json.dumps sort_keys) so a divergence is located at records -> tree or at tree -> feed."
+   },
+   {
+    "input": "states/<sid>.jsonl (and states/<anchor>.jsonl)",
+    "read_by": "parse_session (_load_states: idle atoms, resumeFork lineage, orphanReply salvage); _states_rows; _state_ev_sorted/_states_awaiting_overlay/_session_retrying folds",
+    "where": "event_model.py:6003, 5428; kernel.py:16321; judge.py:4250 (default STATESDIR/<fsid>.jsonl)",
+    "how_to_snapshot": "Dump the rows as a JSON list per sid. If the Rust side ports the parse it needs the rows for idle synthesis. They go through the same record store, so they can also stay as files the Rust store reads."
+   },
+   {
+    "input": "timeline/messages.jsonl (postal log)",
+    "read_by": "parse_session _load_postal_index (author peer resolution); _messages_rows (the postal slice)",
+    "where": "event_model.py:5986-5998; kernel.py:16330",
+    "how_to_snapshot": "Dump the rows (id, from_id, ...) as a list. Its absence must be explicit: em defaults to STATE/timeline/messages.jsonl when postal_log is None, which reads the REAL log if ROMP_STATE_DIR is not redirected."
+   },
+   {
+    "input": "captions/<fsid>.jsonl",
+    "read_by": "_captions -> _provisional_card/_blocked_placeholder gist",
+    "where": "kernel.py:41066",
+    "how_to_snapshot": "Dump the rows per fsid (absent in write_world). Not in the plan's snapshot list but read per card."
+   },
+   {
+    "input": "Live-session map",
+    "read_by": "build_feed's live_map argument AND the global km._live_map() inside helpers (_bg_live_norm, _session_awaiting's live rows)",
+    "where": "kernel.py:57221, 37964, 37868, 27596",
+    "how_to_snapshot": "Dump the map once and monkeypatch km._live_map to return it (as bench_chatbuild.py does). Passing it to build_feed alone leaves _bg_live_norm reading the empty global map."
+   },
+   {
+    "input": "Parse-store sdk_human choice and pending cut",
+    "read_by": "km._parse/_parse_cached (_display_sdk_human), _closer_pending's jd.parsed_session (_sdk_owned), jd._pending_cut",
+    "where": "kernel.py:44506, 45062, 45037; judge.py:4043, 4286-4288, 16515",
+    "how_to_snapshot": "Record per sid the sdk_human value and cut used for the parse (both '' / consistent in write_world). A mismatch puts a second tree in another slot and causes a cold parse inside build_feed."
+   },
+   {
+    "input": "Clock `now` (and time.time() inside helpers)",
+    "read_by": "parse_session synthesize_idle (idle span end = now); _closer_pending's parse; _bg_live_norm's _bg_expired(time.time())",
+    "where": "event_model.py:5428, 12680; kernel.py:37995, 38001",
+    "how_to_snapshot": "Pin NOW in the snapshot and pass it to every parse and build. Monkeypatch time.time during the dump so helpers that read the wall clock agree. Keep NOW near the world's generation time (see gotchas)."
+   },
+   {
+    "input": "Record-cache memory (S6)",
+    "read_by": "measurement only",
+    "where": "event_model.py:1002 (_entry_weight), 1148 (record_cache_resident), 838 (RECORD_CACHE_DECODED_MULTIPLE 2.85)",
+    "how_to_snapshot": "Measure Python's store in a process that has NOT parsed: tracemalloc around _read_jsonl_incremental over the transcript paths only. Atoms share message.content lists with records (70 of 80 atoms in the probe), so after a parse the record bytes are pinned by the tree too."
+   }
+  ],
+  "nondeterminism": [
+   "write_world / Gen stamp every record from int(time.time()) at generation (tests/bench_connect_push.py:96, 112; tests/bench_chatbuild.py:31-32), so two dumps are different worlds. Record NOW in the snapshot, or patch time.time while generating.",
+   "The parse output depends on the `now` passed at parse time: the open idle span's end and the last turn's end equal `now` (synthesize_idle, event_model.py:5428; verified: --emit runs 1.2 s apart differed only there). A cached tree keeps the `end` of the clock it was parsed under, not the build's.",
+   "--emit hardcodes now=int(time.time()) (event_model.py:13038), so its output is never byte-stable across runs.",
+   "Helpers read the wall clock directly, not the build's `now`: _bg_live_norm's em._bg_expired(..., time.time()) (kernel.py:37995, 38001).",
+   "The record-cache generation is a process-wide counter (_next_gen, event_model.py:1383): it depends on read order. Not in the feed output, but it drives fold refold/restore decisions.",
+   "Absolute temp paths enter outputs: the session tree's `dir` (the leaf's parent), project dir names derived from realpath (/private/var/... on macOS, bench_connect_push.py:107), and the cwd in sessions/githubRepo resolution. They are stable within one snapshot and differ across dumps.",
+   "Python set iteration of str is hash-randomized per process (PYTHONHASHSEED). Any per-card output built by iterating a set unsorted (e.g. cite_uuids is a set, kernel.py:55689) would differ across Python runs. Generate the oracle with PYTHONHASHSEED=0 and run it twice to confirm stability.",
+   "_closer_pending parses with `now` on a miss (kernel.py:16515). If its sdk_human slot differs from the display parse's, a fresh parse at the build's clock happens inside build_feed.",
+   "The judge import installs a checkpoint dir under the state root (judge.py:97). A second dump over the SAME temp state could restore tail entries and lazy atoms (_LazyBody, which json.dumps refuses) and so take different read roads. Use a fresh state dir per dump, or call em.set_checkpoint_dir(None)."
+  ],
+  "gotchas": [
+   "build_feed is cache-only for transcripts. In a fresh process _parse_cached returns None for every session (kernel.py:45049-45063, 55427), so the oracle only exercises the cold road (sessState 'unknown', no working dot, no anchors, no bg/api-error/awaiting reads) unless dump_world.py first calls km._parse(path, sid, NOW) for every alive session. _warm_fleet_bg does nothing without connected clients (kernel.py:45093). tests/test_kernel_feed_warm.py pins this.",
+   "Pass live_map AND patch km._live_map. _bg_live_norm and _session_awaiting read the global (kernel.py:37964, 37868). Without the patch the bg fold never ran in the probe (0 scan_bg_tasks_cached calls); with it, 7 per build.",
+   "Set ROMP_STATE_DIR (or XDG_STATE_HOME with ROMP_STATE_DIR popped) and CLAUDE_CONFIG_DIR BEFORE importing event_model/judge/kernel. STATE, MESSAGES_LOG and STATES_DIR are resolved at import (event_model.py:33-39; judge.py:109-133). Otherwise parse_session's default postal index reads the real ~/.local/state/romp/timeline/messages.jsonl (event_model.py:5993), --emit's default states lookup reads the real states dir (13033-13035), and judge.py:118 mkdirs/chmods the real root.",
+   "Pre-existing bug: parse_session raises AttributeError on a transcript containing any non-object JSON line ('5', '[...]'). FileAdapter._ingest calls r.get on every record (event_model.py:4163), and both the assembly fold and the full-parse fallback fail (verified). The reader keeps such values (verified), and the bg fold skips them. Keep them out of the synthetic world.",
+   "Python json.loads accepts what serde_json rejects or alters: NaN/Infinity/-Infinity (verified that 1e400 becomes Infinity), integers beyond 64 bits (verified, kept exact), lone surrogate escapes, and duplicate keys (last value wins at the first key's position). For such a line Python keeps the record while serde_json drops it (or loses precision without arbitrary_precision). The consumed offset and crc agree but the record count and offsets array diverge. Either generate no such lines or write a Python-compatible decode path.",
+   "The decode is two-level: fh.readline() on b'\\n', then bytes.splitlines(keepends=True) per line (a bare \\r splits, \\r\\n stays one boundary; \\x0b/\\x0c/\\x1c-\\x1e do not split under bytes), then bytes.strip() (ASCII whitespace), then decode('utf-8','replace'), then json.loads (event_model.py:2840-2866). Undecodable pieces are skipped but still consumed, still counted in the crc, and get no offsets entry. The read is bounded by the stat-time size; a trailing line with no newline is left for the next read (verified the partial-then-complete case).",
+   "The hit test compares st_mtime as a Python FLOAT (event_model.py:3062, 3099) and the touched test needs an 11-tuple whole entry on the same inode (3126). Rust should compare the same float or (sec, nsec), and know that two mtimes closer than float precision compare equal in Python. The feed key's _chat_ident uses (ino, mtime_ns, size, ctime_ns) (kernel.py:43253) and the parse store uses [st_mtime, st_size] rows (judge.py:3185): three different identity tuples.",
+   "A same-size edit inside the last 64 bytes is caught by the guard (kind 'guard'). Outside the guard it is caught by the crc of [0, offset) (kind 'rewrite'). A new inode at the same size is 'rewrite'. Shrinking below the consumed offset is 'shrunk'; shrinking but staying at or above the offset (a changed partial) is 'rewrite' (event_model.py:3118-3170, verified each transition).",
+   "Growth stores a NEW list (records + new), never extends the served one (event_model.py:3146). Folds and the assembly fold gate on list identity and generation, which a Rust store can model as (gen, count).",
+   "Turn and segment ids hash text with SHA-1 (event_model.py:5730, 5878-5883, 3971), and the store's touch proof uses zlib crc32. The Rust side needs SHA-1 and CRC-32 (ISO-HDLC): a hand-rolled implementation or new crates, which need lczh's approval and the 7-day age check per rust/SPIKE.md.",
+   "Python str.strip() treats \\x1c-\\x1f as whitespace and Rust's str::trim does not. Text hashing (_text_of(...).strip() before sha1) and many prompt checks strip, so ids can diverge on such characters. encode('utf-8','replace') also maps lone surrogates to '?' before hashing.",
+   "parse_z truncates fromisoformat(...).timestamp() to int, and a timestamp with no zone is read in LOCAL time (event_model.py:230-250). write_world always writes 'Z', but a Rust port should replicate the naive-local behavior or assert 'Z'. Unparseable stamps borrow the previous record's stamp (_placed_ts, 3996).",
+   "Atoms share message.content lists with the cached records (70 of 80 atoms in the probe). The record cache's 'resident' memory overlaps the parse tree's, and evicting a record entry does not free content a tree holds (the comment at event_model.py:975-990). The S6 memory comparison should measure records-only, before any parse.",
+   "_api_error is not a record-cache reader. It re-reads raw bytes with text-mode errors='replace' from a 256 KiB tail window (kernel.py:40499, 40569-40576) and skips lines lacking the substring '\"type\"'. A Rust port must reproduce the window, the half-line drop and the widening, or read from the store and accept the same verdict.",
+   "romp-event-model --emit is not a store oracle (it emits the tree), and it is not identical to the feed's parse. It passes no postal_log, sdk_human=False, only the leaf as candidate (no jd._judge_candidates anchor), and the wall clock. The feed's tree comes from km._parse with _display_sdk_human, the states path and the shared store, and km._parse also stamps session['_txKey'] (kernel.py:44518-44520).",
+   "The kernel import prints environment-derived warnings to stderr (credential-shaped env NAMES, a missing claude_agent_sdk). Harmless, but the dump script should keep stderr out of its oracle files and never dump the environment."
+  ],
+  "open_questions": [
+   "Scope decision for S4: the per-card build consumes the parse tree, not records. Does the spike port parse_session's exercised subset (linear parent walk, assistant/tool_result/typed-prompt atoms, idle from states, segment_turns, em.segments, jd.apply_seams, sha1 ids), or does the snapshot carry plain_tree(km._parse(...)) per session so the Rust build reads the tree? The first is the honest 'store feeds the build' comparison and is much larger. The second makes the store's role in the CPU gate nil.",
+   "write_world writes no goal store (tests/bench_connect_push.py:90-123), so the per-card build only yields provisional/working placeholder cards (3 asks in the probe) and never reaches _bg_scan_all_cached, the anchor-heavy card paths, or most of the goal-derived derivation. Does S2 add a synthetic goal store, and in what format (another reader's area)?",
+   "SHA-1 and CRC-32 for the Rust side: hand-roll them (no dependency) or ask lczh to approve crates (sha1, crc32fast) under the 7-day pinning rule?",
+   "Does the S3 store need byte parity with Python's json.loads edge cases (NaN/Infinity, >64-bit ints, lone surrogates, duplicate keys), or is it enough to assert the synthetic world contains none and document the gap?",
+   "Should dump_world.py disable checkpoints explicitly (em.set_checkpoint_dir(None) after the kernel import), so Python's store is whole-entry only and no lazy atoms can appear, or rely on a fresh temp state per dump?",
+   "For S6, which Python memory figure is the gate's denominator: records-only tracemalloc in a parse-free process, the record cache plus the trees that pin it, or heap.recordCacheResident's 2.85x estimate? They differ (4.2x tracemalloc bytes per file byte in the probe on a 53 KB transcript, versus the 2.85 multiple)."
+  ]
+ },
+ {
+  "area": "synthetic-world",
+  "summary": "WHAT THIS ANSWERS. How to build a synthetic world on disk and run the real build_feed (and capture each session's per-card output) inside one Python process, with no live kernel and with the same bytes on every run. I wrote a recipe from the existing tools, ran it in throwaway dirs under /tmp, and then deleted them. Nothing under ~/romp-romp_fix or ~/.local/state/romp was touched. `git status` in the worktree shows `M rust/SPIKE.md`, but I did not make that change: I only read the file with cat.\n\nTHE ONE-SENTENCE RESULT. Set the environment before importing the kernel, write the world with its clock pinned, add goal stores, pin every file's modification time, swap in a fake SDK backend, pass a fixed live map, warm the parse cache with the same fixed NOW, run one build so the session order gets written, then empty the memo and build again. That build is byte-identical across runs.\n\nTHE RECIPE, in order (it ran, at 1781100000 = 2026-06-10Z):\n1. Environment, before any romp import. judge.py:109-122 fixes STATE and PROJECTS at import time, and event_model.py:34 and kernel.py:110 (NAMES) do the same. Set:\n   - the roots: ROMP_STATE_DIR=<root>/state/romp, XDG_STATE_HOME=<root>/state, CLAUDE_CONFIG_DIR=<root>/claude;\n   - perf-bench's floor (tools/perf-bench.py:367-397): ROMP_KERNEL_NO_OPEN=1, ROMP_SERVE_TOKEN=dummy, ROMP_MANAGER_PORT=1, ROMP_KERNEL_PORT=1, ROMP_MODEL_CATALOG=off, ROMP_UPDATE_CHECK=off, ROMP_CLI_SCOPE=0, ROMP_CLAUDE_BIN=/bin/false, and ROMP_SERVICE_ENV_FILE and ROMP_SERVICE_ENV pointing at a missing file;\n   - ROMP_HOST_NAME=spikehost (this fixes selfHost, kernel.py:28685), ROMP_POSTAL_HERMETIC=1, ROMP_POSTAL_CLIENT_ONLY=1, ROMP_GC_FREEZE=off, TZ=UTC;\n   - remove ROMP_STATE_DIR from the inherited environment first, plus ROMP_SID, ROMP_POSTAL_PORT and every ANTHROPIC_*/OP_* or credential name.\n2. World. Load tests/bench_connect_push.py by spec (importing it has no side effects) and call write_world(root, n_sessions, n_records, big_records) (:90-123) inside `mock.patch.object(bcp.time, \"time\", return_value=float(NOW))`, because it stamps transcripts and states logs from time.time() (:99).\n3. Kernel. Load it through kernel/loadsource.py: `ls.load_source(\"romp_kernel_spike\", REPO+\"/kernel/kernel.py\")`, then assert that jd.STATE and jd.PROJECTS point at the temp roots.\n4. Backend and stubs.\n   - `km._sdk_backend = pb.make_backend(sbmod, state, False, False)` (tools/perf-bench.py:707). Get pb from bcp.load_bench_tools(). The kernel import does not load sdk_backend (I hit a KeyError), so load it yourself with `ls.load_source(\"romp_sdk_backend\", REPO+\"/kernel/sdk_backend.py\")`.\n   - `km._codex_backend = False`\n   - `km._warm_fleet_bg = lambda now: None`\n   - `km._GLOBAL_CLAUDE_MD = <root>/missing`\n5. Goal stores. write_world writes none. Mint them the way tests/test_feed_session_memo.py:244-252 does: jd.apply_plan(store, \"s1\", NOW-3600, [{\"do\":\"mint\",...}], []), then jd.rollup_status(store, session_closed=False), then jd.save_goals(sid, store).\n6. Run os.utime over every file under root, set to NOW-60.\n7. Live map. Build a fixed dict of rows and install it as the cycle scope the way perf-bench's scope() does (:1084-1090): `km._live_scope.snapshot = live; .paths = {}; .sessions = {}; .names = km._names_snapshot()`.\n8. Warm the parse cache: `for s in km._alive_sessions(NOW, live): km._parse(s[\"path\"], s[\"sid\"], NOW)` (perf-bench :1281-1288).\n9. Call km.build_feed(NOW, live) once. This first build adopts the session ids into session-order.json.\n10. Call `km._feed_memo_forget(set())`. That drops the memo and the held anchor aggregates (kernel.py:54816-54829).\n11. Call `feed = km.build_feed(NOW, live)`. The per-session oracle is `km._feed_memo[sid][1]`: the exact json.dumps string of each `_feed_session_entry` result (kernel.py:54787, 57298-57300). Wrapping km._feed_session_entry also works, because build_feed looks it up as a module global.\n\nWHY TO BELIEVE IT.\n- Repeat runs: two runs at different roots and wall-clock times gave a byte-identical canonical feed and byte-identical per-session entry JSON.\n- Clock shift: replacing time.time() with a +40-day and a -200-day offset changed nothing.\n- HOME: HOME=temp gave identical output, and a spy saw no home-relative path expansion during either build.\n- Memo state: a build served from the memo equals a build from an empty memo.\n- Backend choice: make_backend and `_sdk_backend=False` gave identical output on this world.\n- Side effects: a spy recorded no thread starts. It did record 3 subprocesses, all `git -C <cwd> rev-parse --show-toplevel`.\n- Cold-parse check: skipping the warm visibly changes the output (below), so the warm-parse read really happens.\n\nTHE INSTRUCTIVE EXCEPTION: TRANSCRIPT SIZE. Going from 80 records to 3000 records with a 24000-record first session leaves the feed byte-identical. But the build from an empty memo goes from about 2.5 ms to about 85 ms (wall clock, 30 samples, this Mac). cProfile puts 93% of that in _feed_seg_walk/_feed_seg_fold (kernel.py:55750/55673), then _seg_anchors, _atom_prose_chars and em.segments: the anchor walk. Every output of that walk is null in this world, because the minted goals' trail unit (\"s1\") names no real unit. So a byte match on the bench world would not test the expensive path the CPU gate measures.\n\nWHAT THIS WORLD EXERCISES.\n- One goal card per session.\n- sessState: \"quiet\" with a warm parse, \"unknown\" with a cold one (kernel.py:55967). The `judging` flag also changes with warmth.\n- Working state: the working dot plus card.working {since, toolUses} appear only when a transcript is left mid-turn. I appended a prompt and a tool_use with no result. Setting the live row's state to \"working\" alone changes nothing, because \"working\" is decided from the transcript's open turn, not from the row.\n\nCONNECTION TO S2. The recipe gives dump_world.py a deterministic Python side. The world still needs inputs that make the anchors, captions and judge state non-null. Otherwise the byte comparison passes without testing the code the gate times.",
+  "entry_points": [
+   {
+    "name": "build_feed(now, live_map=None)",
+    "where": "kernel/kernel.py:57207 (per-session loop 57255-57318, return dict 57445-57499)",
+    "role": "The whole feed. It gets live_map from _live_map() when none is passed. Per-session faults are caught and never raised (57303-57312): the card is dropped, its sid lands in absentSids, and a line goes to stderr."
+   },
+   {
+    "name": "_feed_session_entry(s, ctx)",
+    "where": "kernel/kernel.py:55894",
+    "role": "The per-card derivation the spike ports. It needs ctx keys that _feed_session_key fills in (ps, who_working, interrupting, store, closer, leaf_ok, leaf_head), so call it through build_feed rather than directly."
+   },
+   {
+    "name": "_feed_session_key(s, tm, ctx, prev_entry)",
+    "where": "kernel/kernel.py:55227",
+    "role": "The memo key. It also computes the per-session facts the entry reads, including the parse read from cache only."
+   },
+   {
+    "name": "_feed_memo / _feed_memo_put / _feed_memo_forget",
+    "where": "kernel/kernel.py:54787, 54816 (forget also drops the anchor aggregates via _feed_seg_forget, 54828)",
+    "role": "Entries are (key, entry_json, size). entry_json is the byte-exact per-card oracle. Entries with faults are not stored (57299-57300), and reads.subagents is added after the derivation (57296)."
+   },
+   {
+    "name": "_alive_sessions(now, live_map)",
+    "where": "kernel/kernel.py:6592",
+    "role": "The discovered sessions that are in live_map, plus live sessions found by the 365-day backfill. Calls _sdk() (around 6630)."
+   },
+   {
+    "name": "_parse(path, sid, now) / _parse_cached(path)",
+    "where": "kernel/kernel.py:44489 / 45049",
+    "role": "The warm step. The feed reads the parse from cache only (comment at 55929-55950), so warm with the same NOW the build uses."
+   },
+   {
+    "name": "_sdk() / _sdk_locked()",
+    "where": "kernel/kernel.py:24580 / 24606-24668; _sdk_backend sentinel at 24468",
+    "role": "If km._sdk_backend is None, the first call builds the real SdkBackend (reconcile=True, model catalog boot). Assign it before the first build."
+   },
+   {
+    "name": "_live_map / _live_scope",
+    "where": "kernel/kernel.py:27593-27606",
+    "role": "A thread-local cycle snapshot. Setting .snapshot makes every _live_map() read return the fixed map."
+   },
+   {
+    "name": "jd.discover(now, window)",
+    "where": "kernel/judge.py:10324 (cutoff = now - window, :10402)",
+    "role": "The 48-hour window is checked against file mtimes, so a fixed NOW plus pinned mtimes makes discovery deterministic."
+   },
+   {
+    "name": "write_world / Gen / load_bench_tools / on_lane",
+    "where": "tests/bench_connect_push.py:90-123 / 50-87 / 126-130 / 133-150",
+    "role": "The notes-api world: names/, sdk/, states/, session-hosts=off, and one transcript per session under claude/projects/<cwd with non-alphanumerics replaced by '-'>/<sid>.jsonl. Importing the module is safe."
+   },
+   {
+    "name": "bench_chatbuild Gen",
+    "where": "tests/bench_chatbuild.py:42-83 (NOW=int(time.time()) at :34; the script body runs at import, :23-30, 86-106)",
+    "role": "Cannot be imported: importing it loads the kernel and writes files. Extract `iso` and `Gen` with ast and exec them with fixed SID and T0 (I verified this works)."
+   },
+   {
+    "name": "prepare_env / StateShadow / install_guards / make_backend / load_kernel / scope()",
+    "where": "tools/perf-bench.py:367 / 400 / 515 / 707 / 760 / 1084",
+    "role": "The offline-replay toolkit. make_backend is a constructor-free SdkBackend whose owns() means the registry file exists. The shadow and guards are only needed when the state dir must stay read-only."
+   },
+   {
+    "name": "_Board.setUp, _mint, _reset_memo",
+    "where": "tests/test_feed_session_memo.py:167-221, 244-252, 97-118",
+    "role": "The alternative route of importing first and rebinding the state root afterwards: jd._rebind_state(td), then jd.PROJECTS=..., km.NAMES=jd.NAMES, km._live_scope.names=None, and one warm-up build."
+   },
+   {
+    "name": "jd._rebind_state(path)",
+    "where": "kernel/judge.py:189",
+    "role": "Moves jd.STATE and the directories derived from it and clears the judge memos. It does not move jd.PROJECTS, km.NAMES (kernel.py:110) or em.STATE (event_model.py:34)."
+   },
+   {
+    "name": "kernel_module() / Harness.fresh()",
+    "where": "tests/test_asm_checkpoint.py:168-174 / 100-118",
+    "role": "Loads the kernel once under a private name, and empties the event model's caches (the way a fresh process would)."
+   },
+   {
+    "name": "kernel_env / lab_kernel_env",
+    "where": "tests/test_ship_reship_served.py:186; tests/test_federation_missing_served.py:53",
+    "role": "Environments for a served lab, which runs the kernel as a subprocess on a port. Not the in-process route; listed here only to rule it out."
+   }
+  ],
+  "inputs": [
+   {
+    "input": "Transcripts",
+    "read_by": "jd.discover, _parse into em.parse_session, _feed_seg_walk",
+    "where": "<CLAUDE_CONFIG_DIR>/projects/<mangled realpath(cwd)>/<sid>.jsonl (bench_connect_push.py:108-115)",
+    "how_to_snapshot": "Not part of the snapshot: Rust reads the same files. Pin their mtimes. The cwd mangling uses realpath, so /tmp becomes /private/tmp on macOS."
+   },
+   {
+    "input": "Names registry",
+    "read_by": "discover, _names_snapshot, _name_color",
+    "where": "STATE/names/<sid>, one line: name TAB cwd TAB color (bench_connect_push.py:116-117)",
+    "how_to_snapshot": "Copy each file as text, or use the parsed km._names_snapshot()."
+   },
+   {
+    "input": "SDK registry records",
+    "read_by": "_thread_reg_read (kernel.py:21929) for _feed_reg_sig; make_backend.owns() for _display_sdk_human (kernel.py:45037), which sets sdk_human in the parse key",
+    "where": "STATE/sdk/<sid>.json (bench_connect_push.py:118-119)",
+    "how_to_snapshot": "Copy each file's JSON. Record which backend was used (make_backend or False), because it changes sdk_human."
+   },
+   {
+    "input": "States logs",
+    "read_by": "the parse key's states file, _session_retrying, the awaiting overlay, _session_moved_since_boot",
+    "where": "STATE/states/<sid>.jsonl (bench_connect_push.py:120-121)",
+    "how_to_snapshot": "Copy the lines verbatim."
+   },
+   {
+    "input": "Goal stores",
+    "read_by": "_feed_goals_keyed / jd.load_goals (cards come from the store)",
+    "where": "STATE/goals/<sid>.json. write_world writes none; mint with jd.apply_plan, rollup_status and save_goals (test_feed_session_memo.py:244-252)",
+    "how_to_snapshot": "Copy the published JSON after save_goals. Also copy any override journal or goals-archive entry if the world writes one."
+   },
+   {
+    "input": "Live-session map",
+    "read_by": "build_feed(now, live_map), _alive_sessions, the memo key's row component",
+    "where": "In memory: passed as an argument and installed as km._live_scope.snapshot",
+    "how_to_snapshot": "Dump the dict as built. Use fixed rows like test_feed_session_memo.py's _row(): state, since, model, effort, context, compactPct, color."
+   },
+   {
+    "input": "Judge runs in flight",
+    "read_by": "jd.active_runs() (judge.py:1666) into ctx jactive",
+    "where": "In memory only: jd._active. No file exists for it.",
+    "how_to_snapshot": "Seed jd._active in-process (or stub jd.active_runs) and dump the list. Rust cannot read it from disk."
+   },
+   {
+    "input": "Judge-auth latch",
+    "read_by": "jd._auth_down_map() (judge.py:1996), then build_feed's jauth_map with a loginLabel looked up through _sdk()",
+    "where": "STATE/judge-auth.json",
+    "how_to_snapshot": "Copy the JSON. Absent means {}."
+   },
+   {
+    "input": "Session order",
+    "read_by": "_session_order (kernel.py:6943), the feed's `order` field",
+    "where": "STATE/session-order.json, written by the first build (adoption). An order-audit.jsonl with wall-clock ts and stacks is written beside it.",
+    "how_to_snapshot": "Take the snapshot after the adoption build. Leave order-audit.jsonl out."
+   },
+   {
+    "input": "Clock",
+    "read_by": "build_feed(now) and _parse(..., now). The parse's trailing idle span ends at `now` (event_model.py:5428-5452).",
+    "where": "A constant (NOW=1781100000 worked)",
+    "how_to_snapshot": "Record NOW in the snapshot and use it for both the warm and the build."
+   },
+   {
+    "input": "Host name",
+    "read_by": "_self_host (kernel.py:28685), the feed's selfHost field",
+    "where": "env ROMP_HOST_NAME",
+    "how_to_snapshot": "Record the value."
+   }
+  ],
+  "nondeterminism": [
+   "write_world reads time.time() (tests/bench_connect_push.py:99) for transcript and states timestamps. Pin it with mock.patch.object(bcp.time, 'time', return_value=NOW).",
+   "bench_chatbuild sets NOW=int(time.time()) at import (:34) and runs its whole body at import. Extract Gen with ast and use a fixed T0.",
+   "File mtimes feed discover's cutoff (judge.py:10402), the alive row's 'mtime' (kernel.py:6621), and _session_moved_since_boot against _STARTED=time.time() at import (kernel.py:14059-14062, :134). Pin every mtime after the last write. Goal stores are written after the kernel import, so pin after minting.",
+   "The feed reads the parse from cache only. Without a warm, sessState is 'unknown' instead of 'quiet', `judging` flips, and the build asks for a background warm (kernel.py:55953-55967, 57399-57400). Warm with km._parse(path, sid, NOW) using the same NOW.",
+   "The first build adopts sids into session-order.json, so `order` is [] on build 1 and filled on build 2. It also appends order-audit.jsonl with a wall-clock ts and a stack. Take the oracle from a build after the adoption.",
+   "If km._sdk_backend is None, the first _sdk() call (from _alive_sessions or _display_sdk_human) builds the real SdkBackend with reconcile=True plus model-catalog and router boot (kernel.py:24606-24668). Assign it before the first build.",
+   "sessions[].githubRepo comes from _github_repo_of, which calls _tree_of and spawns `git rev-parse --show-toplevel` per cwd (kernel.py:49032). I observed 3 spawns. A world root inside a git repo would resolve to that repo; ~/Desktop is itself a git repo. Keep the root under /tmp, or set GIT_CEILING_DIRECTORIES.",
+   "selfHost comes from the machine's hostname unless ROMP_HOST_NAME is set.",
+   "Python's hash seed is random by default. Two runs with different random seeds were identical, but on a small world. Run the oracle twice under different PYTHONHASHSEED values as a cheap guard once the world has peers and sets.",
+   "In-process memo, fold and anchor-aggregate state carries across builds. Here a memo-served build equals one from an empty memo, but the oracle should still call _feed_memo_forget(set()) before its build.",
+   "build_feed's return carries `now` (volatile per _DEDUP_VOLATILE, kernel.py:65870). buildId is not in build_feed's own return."
+  ],
+  "gotchas": [
+   "MEASUREMENT: time.thread_time() under-reports CPU by about 41.7x on this Mac. Darwin 27.2, Python 3.12, Apple Silicon timebase 125/3: a 143 ms loop read 3.4 ms. tests/bench_connect_push.py's on_lane (:133-150) uses it. For S6 use time.process_time() or perf_counter in a single-threaded process.",
+   "write_world writes no goal stores. Without them there are no goal cards, so goals must be minted (test_feed_session_memo.py:244-252).",
+   "Large transcripts do not change the feed's bytes on this world, but they make the build 34x more expensive (2.5 ms to 85 ms from an empty memo), almost all of it in the anchor walk (_feed_seg_walk/_feed_seg_fold, kernel.py:55750/55673), whose outputs are null here. The byte comparison only tests the anchor walk if the world has goal trails tied to real transcript units, or captions.",
+   "A live row with state 'working' alone does nothing. The working dot, card.working and sessState 'open' need a transcript that ends mid-turn, for example a prompt followed by a tool_use with no result.",
+   "The kernel import does not load romp_sdk_backend (sys.modules KeyError), so load it yourself with load_source before make_backend.",
+   "make_backend's __getattr__ raises BenchError for an attribute the bench backend lacks. Inside build_feed that error is caught per session: the card silently goes absent. Assert that feed.get('absentSids') is None and that stderr is empty.",
+   "Prefer the env-before-import route. The rebind route (jd._rebind_state) leaves jd.PROJECTS, km.NAMES (kernel.py:110) and em.STATE (event_model.py:34) on the old root unless each is set by hand.",
+   "_live_scope is thread-local. Set it on the thread that calls build_feed.",
+   "Capture each per-card entry from km._feed_memo[sid][1] after the build. A wrapper's json.dumps comes before build_feed adds reads.subagents (kernel.py:57296), and entries with faults are never stored (57299). Here the wrapper and the memo strings matched because no subagent record existed.",
+   "The kernel import writes STATE/repo-root (the checkout path) and chmods the root to 0700 (judge.py:111-117). Leave both out of the snapshot.",
+   "Making perf-bench's StateShadow and install_guards optional is safe when the state dir is a throwaway temp dir: the writes land in the world itself.",
+   "Snapshot reads of ~/.claude.json (_acct_read, kernel.py:57868) and ~/.claude/CLAUDE.md do not follow CLAUDE_CONFIG_DIR. Neither was reached by build_feed in this world, but setting HOME=<root>/home before import is cheap insurance (it gave identical output)."
+  ],
+  "open_questions": [
+   "Which goal-store shapes (trail unit ids matching jd.plan_units over the parse, captions under STATE/captions/<sid>.jsonl) make the anchor fields non-null, so the byte comparison covers the expensive walk? The per-card input mappers should settle this.",
+   "Should the oracle compare the whole canonical feed or only the per-session entry strings? The cross-session sections (order, sessions[].githubRepo, views, boards, notices, parked handoffs) are outside the spike's per-card port.",
+   "Which backend should the oracle use: make_backend (owns() means the registry file exists, sdk_human=True, as in production) or `_sdk_backend=False` (sdk_human=False)? They matched here because every prompt has promptSource='typed'. Confirm on a world with programmatic prompts.",
+   "What scale for S6? The measured board (3 sessions with 1 goal each) costs about 2.5 ms (small transcripts) or 85 ms (big) per build from an empty memo, and 1.2-1.5 ms when served from the memo. The bench docstring's board was 38 sessions with one 24,000-record transcript.",
+   "The in-memory inputs (jd._active judge runs, and anything else held only in memory) need an injection seam and a snapshot field, since Rust cannot read them from disk. Does the per-card mapping find more of them?"
+  ]
+ },
+ {
+  "area": "determinism-and-json",
+  "summary": "The problem: the S2 oracle is only useful if two Python runs on the same world write the same bytes. Otherwise any Rust mismatch could just be Python changing under it. The risky inputs are the wall clock, in-process state (liveness, judge calls in flight, notice rings, boot time), the hostname, file mtimes, and set ordering. On the output side, the wire encoder decides the exact bytes.\n\nWhat I found, in one sentence: build_feed already takes the clock as a parameter, and once that clock and a handful of side inputs are frozen, two separate processes give identical bytes. I ran a scratch recipe (/tmp/rsdet/recipe.py) twice, with PYTHONHASHSEED 3 and 4, two seconds apart, on independently written worlds. It gave identical canonical bytes and identical insertion-order bytes (6,261 bytes each). It used 0 str() fallbacks and selfHost was 'spike-host'.\n\nHow the clock gets in. build_feed(now, live_map) (kernel.py:57207) hands `now` to every per-session derivation through ctx (kernel.py:57250). The pusher always passes an int (`now = int(time.time())`, kernel.py:72755). Inside cards, `now` shows up in three places:\n- the age tint `trgb = cm.age_rgb(now - _ageT)`. The fold stamps it every build (kernel.py:57060-57085); the math is a log plus Python round() (colormap.py:50-64).\n- `t := now` on placeholder cards (kernel.py:57080).\n- the top-level `now` field.\n\nI measured this by running dynamic censuses that wrap time.time, time.monotonic, random and uuid4 and record call sites (/tmp/rsdet/census*.py):\n- Moving `now` by +3600 s changed only `now` and 30 trgb values.\n- Passing a float now changed `now` to '1781100000.0'.\n- Shifting the wall clock by +30 days while `now` stayed fixed changed nothing in this world.\n- During a build, only two wall-clock reads fired: _sdk_problem_rows (kernel.py:25095) and _boundary_clear_notices (kernel.py:54595, because build_feed calls it without `now` at 57490). Both feed empty lists here.\n- Other wall-clock reads exist but are latent in this world: judge-limit latch expiry (judge.py:2101), background-task deadline expiry (kernel.py:37995/38001), and notice timestamps and signatures that carry the kernel boot time _STARTED (kernel.py:134, 25103, 32993).\n- No random or uuid calls happened during a build.\n- Set ordering does not matter: builds with hash seeds 1/2 and 11/22 were byte-identical, and the set-derived lists are sorted before output (kernel.py:55079-55085, 52597).\n- A build served from the per-session memo and one from a cleared memo were byte-identical.\n\nHow the feed is serialized. The whole frame is `json.dumps(feed, default=_wire_default_in(\"_push feed\"))` (kernel.py:72665/72667, 72707/72710). That means default separators (', ', ': '), ensure_ascii=True, no sort_keys, allow_nan=True, no indent. The default= hook returns str(o) but also counts it, writes to stderr, and files a sync notice (kernel.py:65915-65935). Cards are encoded one at a time with json.JSONEncoder using the same defaults (kernel.py:67083). Delta frames use json.dumps (kernel.py:67358). The dedup signatures use sort_keys=True and leave out `now` and `buildId` (kernel.py:65870, 65880-65896, 67165). Each session's part of the feed goes through a JSON round trip in the memo (dumps at kernel.py:57298, loads at 57141/57280), so per-card values come out already JSON-normal. The wire frame adds `buildId` (kernel.py:74710) and `ledgers` (kernel.py:73443) on top of build_feed's return. GET /feed.json differs: it builds with a float time.time() and calls json.dumps with no default (kernel.py:90431).\n\nProposed freeze for dump_world.py:\n1. Set ROMP_HOST_NAME=spike-host (kernel.py:28699). Load through tools/perf-bench.py: prepare_env, load_kernel, make_backend, install_guards(no_git=True). Put the world root in a fresh mkdtemp outside any git tree.\n2. Write the world with bench_connect_push.time patched to return NOW, an int (or add a now= parameter). Mint goal stores with explicit times relative to NOW. os.utime every transcript, states log, names and sdk file to distinct nanosecond mtimes, NOW-3600+i.\n3. Around the parse warm and the builds only: set time.time to return float(NOW) and km._STARTED to float(NOW). Set live_map = json.loads(json.dumps(km._live_map())) and patch km._live_map to return it.\n4. Warm every alive session with km._parse(path, sid, NOW).\n5. Run one priming build: the first build adopts the session order, so its `order` is []. Then clear _feed_memo and _FEED_FOLD and call build_feed(NOW, live_map) directly.\n6. Assert there are no absentSids, syncNotices and sdkNotices are empty, the default_str counter did not move, and the guards held.\n7. Write canonical = json.dumps(feed, sort_keys=True, default=<raise>, allow_nan=False). Also write the insertion-order dump as a stricter secondary check, since romp-json can match it.\n\nThis connects back to the spike's question: with the oracle reproducible, any byte difference S4 finds belongs to the Rust port, not to Python drift.\n\nRepo state: I edited nothing under ~/romp-romp_fix or ~/romp. `git status` shows rust/SPIKE.md modified, which predates or comes from outside this mapping. Scratch files are in /tmp/rsdet (about 400 KB; I deleted the world directories).",
+  "entry_points": [
+   {
+    "name": "build_feed(now, live_map=None)",
+    "where": "kernel/kernel.py:57207",
+    "role": "The oracle's call. `now` is the clock for everything per-card (ctx at kernel.py:57250, alive filter at 57235, wait graph at 57236). Call it directly. _cached_feed and _build_feed_locked (kernel.py:74701-74710) add buildId and fire bells, phone pushes and the badge. With live_map=None it calls _live_map() itself (kernel.py:57221)."
+   },
+   {
+    "name": "_feed_fold_stamp / _feed_fold_card / _feed_fold_restamp",
+    "where": "kernel/kernel.py:57060-57110",
+    "role": "Where `now` enters cards. trgb comes from now minus _ageT, a placeholder's t is set to now (57080), and the stamp is typed, so an int 5 and a float 5.0 are different stamps (57067)."
+   },
+   {
+    "name": "cm.age_rgb / cm.ramp",
+    "where": "kernel/colormap.py:50-64",
+    "role": "The tint math: age clamped to 120..345600 s, then a log scale, then interpolation across the stops with Python round() (round-half-even). Rust must use f64::round_ties_even and the same order of operations."
+   },
+   {
+    "name": "_live_map",
+    "where": "kernel/kernel.py:27596-27605",
+    "role": "The liveness seam. It returns _live_scope.snapshot when set; otherwise it reads fresh, because sharing is off outside a running kernel (_LIVE_SHARING=[False], kernel.py:27636). Patch it, because _judge_limit_view (25039) and _cap_switch_offer (24999) call it directly and ignore build_feed's parameter."
+   },
+   {
+    "name": "_sessions / _alive_sessions",
+    "where": "kernel/kernel.py:6386-6430, 6592",
+    "role": "Session discovery uses a window counted back from `now`. Rows are sorted by transcript mtime, newest first (6427), and cards are folded in that order, so mtimes set the order of `asks`."
+   },
+   {
+    "name": "_parse / _parse_cached / em.synthesize_idle",
+    "where": "kernel/kernel.py:44489, 45049; kernel/event_model.py:5428-5458",
+    "role": "The feed reads the parse cache only. A trailing idle span ends at the `now` of the first parse (event_model.py:5452), and the cache key has no clock in it, so the first parse's clock sticks."
+   },
+   {
+    "name": "_warm_fleet_bg",
+    "where": "kernel/kernel.py:45080-45096; tools/perf-bench.py:532",
+    "role": "Does nothing when no client is connected, and perf-bench stubs it, so the dumper must warm parses itself. Without that, sessions stay on the cold path."
+   },
+   {
+    "name": "Whole-frame encoders",
+    "where": "kernel/kernel.py:72665-72667 (_feed_first), 72707-72710 (_send_feed_frames)",
+    "role": "json.dumps(feed, default=_wire_default_in('_push feed')), Python defaults otherwise: ', ' and ': ' separators, ensure_ascii=True, no sort_keys, allow_nan=True."
+   },
+   {
+    "name": "_wire_default / _wire_default_in",
+    "where": "kernel/kernel.py:65915-65940",
+    "role": "The default= fallback: returns str(o), counts it in _wire_stats['default_str'], and files a sync notice the first time it sees a type, which changes syncNotices in later builds."
+   },
+   {
+    "name": "Per-entry, delta and dedup encoders",
+    "where": "kernel/kernel.py:67083, 67358, 65870-65896, 67165",
+    "role": "JSONEncoder(default=...).encode per card; json.dumps for delta frames; sort_keys=True signatures that leave out now and buildId (_DEDUP_VOLATILE)."
+   },
+   {
+    "name": "Memo JSON round trip",
+    "where": "kernel/kernel.py:57298 (dumps), 57141/57280 (loads)",
+    "role": "Each session's entry is stored as a JSON string and decoded by the fold, so per-card output is JSON-normal: tuples become lists and keys become strings."
+   },
+   {
+    "name": "GET /feed.json and _pure_feed",
+    "where": "kernel/kernel.py:90431, 74823-74880",
+    "role": "Not usable as the oracle: it builds with a float time.time(), and json.dumps has no default."
+   },
+   {
+    "name": "perf-bench harness",
+    "where": "tools/perf-bench.py:367 (prepare_env), 515 (install_guards), 707 (make_backend), 760 (load_kernel)",
+    "role": "The approved way to import the kernel in-process: hermetic env, shadowed writes, no subprocesses, git answers as failure, liveness from the registry files."
+   },
+   {
+    "name": "write_world",
+    "where": "tests/bench_connect_push.py:90-123",
+    "role": "The synthetic board. Every timestamp comes from int(time.time()) at line 99."
+   },
+   {
+    "name": "Existing frozen-clock test seams",
+    "where": "tests/test_feed_fold_reuse.py:143-190; tests/test_feed_session_memo.py:85, 1214",
+    "role": "Precedent: NOW=1781100000, jd._rebind_state(td), mock.patch.object(km, '_live_map', ...), the cache-clearing helper, and build_feed(NOW, live)."
+   }
+  ],
+  "inputs": [
+   {
+    "input": "Build clock `now`",
+    "read_by": "build_feed ctx, the fold's tints and placeholder t, discovery window, _interrupting's 120 s cap (kernel.py:45289/45295), _closer_pending (16515), _cap_switch_offer -> _usage_cap_open",
+    "where": "kernel/kernel.py:57207, 57250, 57080",
+    "how_to_snapshot": "One int in the snapshot (for example 1781100000), passed to build_feed and to every _parse warm. Never a float, or `now` and placeholder `t` are written with '.0'."
+   },
+   {
+    "input": "Wall clock time.time()",
+    "read_by": "_sdk_problem_rows ws-drop cutoff (kernel.py:25095), _boundary_clear_notices (54595), jd._limit_down expiry (judge.py:2101), _bg_live_norm -> em._bg_expired (kernel.py:37995, 38001), _sync_notice t (32993), _usage_cap_open when now is None (25018)",
+    "where": "see read_by",
+    "how_to_snapshot": "Set time.time to return float(NOW) only for the warm and the builds, then restore it. Record `wall: NOW` in the snapshot so Rust uses the same value wherever Python reads the wall clock."
+   },
+   {
+    "input": "Live-session map",
+    "read_by": "build_feed's live_map parameter, plus direct _live_map() calls in _judge_limit_view (kernel.py:25039) and _cap_switch_offer (24999)",
+    "where": "kernel/kernel.py:27596; BenchSdkBackend.live_sessions at tools/perf-bench.py:713-733 (registry files sdk/*.json plus last states value)",
+    "how_to_snapshot": "live_map = json.loads(json.dumps(km._live_map())), patch km._live_map to return it, and pass the same object to build_feed. Keep key order; serde_json preserve_order is already on in rust/Cargo.toml."
+   },
+   {
+    "input": "Kernel boot time _STARTED",
+    "read_by": "the sdkNotices and syncNotices `sig` strings",
+    "where": "kernel/kernel.py:134, 25103, 33008",
+    "how_to_snapshot": "Set km._STARTED = float(NOW) before the build, or assert both lists are empty (they were empty in every census)."
+   },
+   {
+    "input": "Host name",
+    "read_by": "selfHost (_self_host)",
+    "where": "kernel/kernel.py:57499, 28685-28701",
+    "how_to_snapshot": "Set ROMP_HOST_NAME=spike-host in the environment (read on every call) and store it in the snapshot. Without it the census leaked 'TESTHOST'."
+   },
+   {
+    "input": "Judge calls in flight",
+    "read_by": "_jactive -> sess_judging (the Analyzing prong)",
+    "where": "kernel/kernel.py:57244, 56020; jd.active_runs at judge.py:1666 (in-process _active registry)",
+    "how_to_snapshot": "A sorted list of fsids in the snapshot. Empty in a harness process; to cover the prong, plant entries in jd._active under jd._active_lock."
+   },
+   {
+    "input": "Judge-auth latch, with the login label resolved",
+    "read_by": "_jauth_map (per-card floor and badge)",
+    "where": "kernel/kernel.py:57238-57243; jd._auth_down_map at judge.py:1996 (judge-auth file, mtime-cached)",
+    "how_to_snapshot": "Store the map after resolution. The loginLabel lookup goes through _sdk().login_display (kernel.py:57242), which reads the login registry, so Rust should not repeat it."
+   },
+   {
+    "input": "Judge-limit latch",
+    "read_by": "judgeLimit (top level)",
+    "where": "kernel/kernel.py:57458, 25026-25050; judge.py:2084-2106",
+    "how_to_snapshot": "Store the computed value; it expires by wall clock and reads _live_map. Leave the latch absent in the world unless it is being covered."
+   },
+   {
+    "input": "Parse warm bit per session, and the parse's clock",
+    "read_by": "_feed_session_key's parse component, dots, anchors, closer pending",
+    "where": "kernel/kernel.py:45049, 44489; event_model.py:5452",
+    "how_to_snapshot": "Warm every alive session with km._parse(path, sid, NOW) before building, and record warm=true/false per session. With no warm, the no-goal world gave 0 cards; warmed, it gave 3 provisional cards."
+   },
+   {
+    "input": "Alive order and transcript mtimes",
+    "read_by": "_sessions sort (kernel.py:6427) -> fold order of asks; discovery window",
+    "where": "kernel/kernel.py:6386-6430, 6592",
+    "how_to_snapshot": "os.utime every world file to distinct nanosecond mtimes relative to NOW. Store the ordered alive list (sid, name, anchor, relative path, mtime) in the snapshot."
+   },
+   {
+    "input": "Session order (session-order.json)",
+    "read_by": "order; sessions via _chat_tab_sessions -> _ordered (which writes the file on first sight)",
+    "where": "kernel/kernel.py:57477, 57488, 19774",
+    "how_to_snapshot": "Run one priming build, then snapshot the file from the shadow (perf-bench redirects the write). The census's first build had order=[] and later builds listed all sessions."
+   },
+   {
+    "input": "In-process notice rings and undo state",
+    "read_by": "syncNotices (_SYNC_NOTICES), sdkNotices (_SDK_BOOT_PROBLEMS, the backend's problems(), _WS_DROPS), dismissedCount and canUndoClear (_rejournal_owed)",
+    "where": "kernel/kernel.py:33005, 25080, 53198",
+    "how_to_snapshot": "Assert they are empty or snapshot them verbatim. A str() fallback or a fault during the dump adds a sync notice with a wall-clock t."
+   },
+   {
+    "input": "Colormap name",
+    "read_by": "_feed_fold_stamp tints",
+    "where": "kernel/kernel.py:69316 (STATE/colormap, default 'aurora')",
+    "how_to_snapshot": "A string in the snapshot. Leave the file absent for the default."
+   },
+   {
+    "input": "Bells (notify-cards.json, session-flags.json)",
+    "read_by": "notify and notifyRaw on every card",
+    "where": "kernel/kernel.py:57247, 57040-57058",
+    "how_to_snapshot": "Copy the file contents into the snapshot. Absent files give null/null."
+   },
+   {
+    "input": "Debug mode and task-tracking switch",
+    "read_by": "dbg_rows/warnRows (kernel.py:57227); build_feed versus _feed_off_frame",
+    "where": "judge.py:1069; kernel.py:11153",
+    "how_to_snapshot": "Keep both absent (debug off, tracking on) and record both booleans in the snapshot."
+   }
+  ],
+  "nondeterminism": [
+   "Build clock: trgb on every card and tree row, the top-level `now`, and `t` on placeholder cards all follow `now`. Verified: now+3600 changed only `now` and 30 trgb values (kernel.py:57060-57085, colormap.py:60-64).",
+   "Clock type: an int and a float now encode differently. Verified: 'now': 1781100000 versus 1781100000.0. The pusher passes an int (kernel.py:72755); /feed.json passes a float (kernel.py:90431).",
+   "First build versus later builds: the first build adopts sessions into session-order.json, so its `order` is [] (verified). It also writes order-audit.jsonl using time.time and getpid (kernel.py:7090, 7026); those values do not reach the output.",
+   "Hostname leaks into selfHost unless ROMP_HOST_NAME is set. Verified: 'TESTHOST' (kernel.py:28699-28701, 57499).",
+   "Wall-clock reads inside a build: _sdk_problem_rows (kernel.py:25095) and _boundary_clear_notices (kernel.py:54595) fired in every build. Neither changed the bytes here (verified with a +30 day shift at fixed now) because both lists were empty. Latent: judge-limit expiry (judge.py:2101), background-task deadline expiry (kernel.py:37995/38001), sync-notice t (kernel.py:32993).",
+   "Kernel boot time _STARTED (kernel.py:134) appears in the sdkNotices and syncNotices sig strings when those lists are non-empty.",
+   "Parse clock sticks: the trailing idle span ends at the first parse's `now` (event_model.py:5452), and the shared parse cache keys on file stats only, so a parse taken at another clock freezes that value.",
+   "Cold versus warm parse: with no client, _warm_fleet_bg does nothing (kernel.py:45093-45096), and perf-bench stubs it. Verified: the no-goal world gave 0 cards and 1,008 bytes cold, and 3 provisional cards and 2,713 bytes warm.",
+   "File mtimes set the alive order, and therefore the order of `asks` (kernel.py:6427), and decide the discovery window relative to `now`.",
+   "World generators read the wall clock: bench_connect_push.write_world at line 99, and bench_chatbuild at line 34 at import time; it also loads a kernel and resets XDG_STATE_HOME on import (lines 26-30).",
+   "githubRepo shells out to git when a session's cwd is inside a git tree (kernel.py:49032-49060). The world root must sit outside any git tree; perf-bench's no_git=True makes git answer as failure.",
+   "In-process registries: jd._active (judging), interrupt stamps (kernel.py:45289), the live tail revision (Sessions.live_rev), notice rings. All empty in a fresh harness process.",
+   "Not sources of nondeterminism here (verified): hash seed (seeds 1/2, 11/22, 3/4 gave byte-identical output), memo hit versus cold derivation (byte-identical), random/uuid4 (no calls during builds), absolute temp paths (0 in the feed JSON), time zone (transcript timestamps parse as UTC-aware, event_model.py:229-251).",
+   "Memory side only, not bytes: the record cache drops a file's records when wall clock minus mtime is at least 120 s (event_model.py:984, 2520, 3501; env ROMP_RECORD_CACHE_DROP_QUIESCENT_S; used by the transcript fold at kernel.py:40052). With mtimes pinned an hour before a frozen NOW, every file reads as quiescent, which shrinks Python's resident record cache in S6."
+  ],
+  "gotchas": [
+   "Do not take the oracle from _cached_feed, _build_feed_locked or /feed.json. The first two add buildId and fire bells, phone pushes, the badge and notify-cards pruning; /feed.json uses a float clock and json.dumps with no default. Call build_feed(NOW, live_map) directly.",
+   "The frame actually sent equals build_feed's return plus buildId (kernel.py:74710) plus ledgers (kernel.py:73443, from the chat build). Leave both out of the per-card comparison.",
+   "Canonical key order sorts object keys only. List order (asks in mtime-desc fold order, then the serving-fold join, parked handoffs and notice cards) still has to match. Python sort_keys compares code points, which matches UTF-8 byte order, so a Rust byte-wise key sort agrees.",
+   "In the oracle, use a default= that raises and allow_nan=False. Production's _wire_default quietly returns str(o) and files a sync notice that changes the next build's syncNotices (kernel.py:65915-65935).",
+   "Freeze time.time only around the warm and the builds, then restore it. Timing code uses monotonic, which this does not touch. perf-bench's install_guards also replaces threading.Thread.start for the whole process (tools/perf-bench.py:600-607).",
+   "Run Python's build from the JSON-decoded live_map, not the in-memory one, so both implementations see the same types.",
+   "Rust tint math: Python round() rounds half to even (Rust f64::round rounds half away from zero), and ramp truncates with int(). The log runs through libm on both sides on this machine. Exact .5 ties are very unlikely away from the clamp ends, but use round_ties_even anyway.",
+   "Keep int and float apart in Rust. The fold treats an int 5 and a float 5.0 as different stamps (kernel.py:57059-57067). Goal-store times keep whatever type the store holds.",
+   "write_world on its own, with no goal store, gives 0 cards cold and only provisional placeholders warm, so goal stores are needed to exercise the per-card branches. Verified: a 3-session world with minted goals gave 6 goal cards with trees.",
+   "Do not import tests/bench_chatbuild.py from the dumper. On import it loads a second kernel, resets XDG_STATE_HOME and reads the wall clock (lines 26-34). Its comment says a fixed epoch falls outside discovery's window, but with mtimes pinned relative to NOW, discovery found 3 of 3 sessions at NOW=1781100000, about 5 months before the wall clock.",
+   "Give each run its own perf-bench shadow and private dir, so parse checkpoints from an earlier run do not turn a cold parse into a restore."
+  ],
+  "open_questions": [
+   "Does the S4 comparison cover the full frame, or only the per-card slice (asks, working, awaiting, bgServices, stateUnknown, servingFoldedIds, absentSids)? Board-level fields (views, boards, order, sessions, selfHost, judgeLimit, clearedForeign, dismissedCount, the notice lists) could be passed through the snapshot verbatim so the full-frame byte check still works.",
+   "Should S2 add a now= parameter to tests/bench_connect_push.write_world (a small edit under tests/), or have the dumper patch bench_connect_push.time as the scratch recipe did?",
+   "Should the gate also include the insertion-order bytes (true wire parity, which romp-json supports), with the canonical sort_keys form as a fallback for diagnosis?",
+   "For S6 memory, what wall clock to mtime relationship is fair? Pinned past mtimes make every file quiescent (wall minus mtime of 120 s or more), so Python's record cache drops entries a live kernel would keep. ROMP_RECORD_CACHE_DROP_QUIESCENT_S is one way to control this.",
+   "Should the world plant the latent clock paths (a background task with a deadline, a judge-limit latch, an interrupt stamp, a capped usage.json for the cap offer, a judge call in flight) so S4 covers them? Each needs NOW and the frozen wall clock written into the snapshot.",
+   "Is a golden test worth writing for trgb rounding at exact .5 ties? None showed up, but Python and Rust round ties differently by default."
+  ]
+ }
+]
