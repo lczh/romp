@@ -32,15 +32,65 @@ _WHEELS = {
 FIRST_RUN_TIMEOUT = 180
 
 
-def wheel_url(system=None, machine=None):
-    key = (system or platform.system(), machine or platform.machine())
+def _darwin_arm64():
+    """Whether this Mac is Apple silicon, read from the hardware (sysctl hw.optional.arm64, absent on an Intel Mac), not
+    from the running Python: an x86_64 Python under Rosetta says platform.machine() 'x86_64' on an arm64 Mac, and setup
+    then installed the x86_64 runtime, which ran translated too (2026-11-25). The runtime is a standalone binary, so it
+    runs natively whatever Python installed it. A direct sysctl call, not a subprocess."""
+    try:
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(ctypes.util.find_library('c') or 'libc.dylib')
+        val, size = ctypes.c_int(0), ctypes.c_size_t(ctypes.sizeof(ctypes.c_int))
+        ok = libc.sysctlbyname(b'hw.optional.arm64', ctypes.byref(val), ctypes.byref(size), None, ctypes.c_size_t(0)) == 0
+        return ok and val.value == 1
+    except Exception:
+        return False
+
+
+def host_platform():
+    """(system, machine) the runtime is chosen for: the hardware's, so an Apple silicon Mac gets the arm64 runtime even
+    when the Python running setup is x86_64 under Rosetta."""
+    system, machine = platform.system(), platform.machine()
+    if system == 'Darwin' and machine == 'x86_64' and _darwin_arm64():
+        machine = 'arm64'
+    return system, machine
+
+
+def _wheel(system=None, machine=None):
+    if system is None or machine is None:
+        host = host_platform()
+        system, machine = system or host[0], machine or host[1]
+    key = (system, machine)
     try:
         tag, digest = _WHEELS[key]
     except KeyError:
         raise RuntimeError('Unsupported Codex runtime platform: %s %s' % key) from None
     name = 'openai_codex_cli_bin-%s-py3-none-%s.whl' % (VERSION, tag)
     return ('https://github.com/openai/codex/releases/download/rust-v%s/%s#sha256=%s'
-            % (VERSION, name, digest))
+            % (VERSION, name, digest)), tag, machine
+
+
+def wheel_url(system=None, machine=None):
+    return _wheel(system, machine)[0]
+
+
+# The cputype in a thin 64-bit Mach-O header (<mach/machine.h>): which Mac an installed runtime was built for.
+_MACHO_MAGIC_64 = 0xFEEDFACF
+_MACHO_CPU = {0x01000007: 'x86_64', 0x0100000C: 'arm64'}
+
+
+def _macho_machine(path):
+    """'x86_64' or 'arm64' for a thin 64-bit Mach-O executable, else None (Linux's ELF, a universal binary, a test's stand-in,
+    an unreadable file): None never asks for a reinstall."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(8)
+    except OSError:
+        return None
+    if len(head) < 8 or int.from_bytes(head[:4], 'little') != _MACHO_MAGIC_64:
+        return None
+    return _MACHO_CPU.get(int.from_bytes(head[4:8], 'little'))
 
 
 def _package_path(target):
@@ -68,7 +118,7 @@ def runtime_path(state_dir):
 
 
 def install_runtime(state_dir):
-    url = wheel_url()  # Refuse unsupported hosts before creating an installation.
+    url, tag, machine = _wheel()  # Refuse unsupported hosts before creating an installation.
     base = Path(state_dir).resolve() / 'codex-runtime'
     base.mkdir(parents=True, exist_ok=True)
     target = base / VERSION
@@ -76,15 +126,21 @@ def install_runtime(state_dir):
     with (base / 'install.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            return _package_path(target)
+            exe = _package_path(target)
+            # An installation built for the other Mac (the x86_64 runtime an x86_64 Python under Rosetta chose on Apple
+            # silicon) is replaced by the hardware's own; one whose build cannot be read stands.
+            if _macho_machine(exe) in (None, machine):
+                return exe
         except RuntimeError:
             pass
         with tempfile.TemporaryDirectory(prefix='.install-', dir=base) as scratch:
             staging = Path(scratch) / 'runtime'
+            # --platform: pip checks a wheel against the RUNNING interpreter's tags, so an x86_64 Python refuses the arm64
+            # wheel without it; naming the wheel's own tag changes nothing where the two agree.
             subprocess.run([
                 sys.executable, '-m', 'pip', '--isolated', 'install', '--quiet',
                 '--disable-pip-version-check', '--no-index', '--no-deps',
-                '--only-binary=:all:', '--require-hashes', '--target', str(staging), url,
+                '--only-binary=:all:', '--platform', tag, '--require-hashes', '--target', str(staging), url,
             ], check=True)
             exe = _package_path(staging)
             result = subprocess.run([str(exe), '--version'], check=True,

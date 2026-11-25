@@ -104,6 +104,55 @@ class ManagedRuntime(unittest.TestCase):
                 self.assertEqual(rt.install_runtime(state), exe)
                 self.assertEqual(install.call_count, calls)
 
+    def test_an_apple_silicon_mac_gets_the_arm64_runtime_under_an_x86_64_python(self):
+        # An x86_64 Python under Rosetta says machine() x86_64 on an arm64 Mac; setup installed the x86_64 runtime, which
+        # then ran translated too (2026-11-25). The hardware decides; an Intel Mac and Linux are unchanged.
+        cases = [(('Darwin', 'x86_64'), True, 'macosx_11_0_arm64'), (('Darwin', 'x86_64'), False, 'macosx_10_9_x86_64'),
+                 (('Darwin', 'arm64'), True, 'macosx_11_0_arm64'), (('Linux', 'x86_64'), False, 'manylinux_2_17_x86_64')]
+        for (system, machine), arm64, tag in cases:
+            with self.subTest(system=system, machine=machine, arm64=arm64):
+                with mock.patch.object(rt.platform, 'system', return_value=system), \
+                        mock.patch.object(rt.platform, 'machine', return_value=machine), \
+                        mock.patch.object(rt, '_darwin_arm64', return_value=arm64):
+                    self.assertIn('-%s.whl' % tag, rt.wheel_url())
+
+    def _install_on_apple_silicon(self, state, existing_header=None):
+        """install_runtime on an arm64 Mac (host_platform pinned), over an existing complete runtime whose bin/codex starts
+        with `existing_header` when given; returns the pip calls it made."""
+        target = Path(state) / 'codex-runtime' / rt.VERSION
+        if existing_header is not None:
+            package(target).write_bytes(existing_header + b'\0' * 24)
+        pips = []
+
+        def run(args, **kwargs):
+            if '--target' in args:
+                pips.append(list(args))
+                package(Path(args[args.index('--target') + 1]))
+            return subprocess.CompletedProcess(args, 0, 'codex-cli ' + rt.VERSION + '\n')
+        with mock.patch.object(rt, 'host_platform', return_value=('Darwin', 'arm64')), \
+                mock.patch.object(rt.subprocess, 'run', side_effect=run):
+            rt.install_runtime(state)
+        return pips
+
+    def test_pip_is_told_the_wheels_own_platform(self):
+        # pip checks a wheel against the running interpreter's tags: without --platform an x86_64 Python refuses the arm64 wheel.
+        with _state_dir() as state:
+            (args,) = self._install_on_apple_silicon(state)
+            self.assertEqual(args[args.index('--platform') + 1], 'macosx_11_0_arm64')
+            self.assertIn('-macosx_11_0_arm64.whl', args[-1])
+
+    def test_a_runtime_built_for_the_other_mac_is_replaced_and_a_matching_one_kept(self):
+        def macho(cpu):
+            return (0xFEEDFACF).to_bytes(4, 'little') + cpu.to_bytes(4, 'little')
+        with _state_dir() as state:
+            self.assertEqual(len(self._install_on_apple_silicon(state, macho(0x01000007))), 1,
+                             "an x86_64 runtime on an arm64 Mac is reinstalled")
+        with _state_dir() as state:
+            self.assertEqual(self._install_on_apple_silicon(state, macho(0x0100000C)), [], "an arm64 runtime stands")
+        with _state_dir() as state:
+            self.assertEqual(self._install_on_apple_silicon(state, b'#!/bin/sh'), [],
+                             "one whose build cannot be read stands")
+
     def test_failed_install_never_publishes_partial_runtime(self):
         with _state_dir() as state:
             old = package(Path(state) / 'codex-runtime/0.144.4', '0.144.4')
