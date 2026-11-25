@@ -19,7 +19,7 @@ The socket protocol is newline-delimited JSON frames, field `t` naming the frame
   kernel → host: attach {kernel:{pid,start,version}, ack:N}, in {data}, ack {offset}, signal {sig},
                  end {grace}, detach, ping
   host → kernel: hello {host, cli:{pid, start, fsid, spawnedAt, login, launch}, journal:{next}, parked:[ids],
-                        selfAnswered:[{rid, event, t}], inflight, inflightScope},
+                        selfAnswered:[{rid, event, t}], inflight, inflightScope, exited, ending},
                  out {offset, data}, stderr {line},
                  exit {code, signal, cause}, fault {kind, text}, busy {kernel}, pong
 One kernel is attached at a time. Connection loss without `detach` is a kernel death to the host; a
@@ -62,6 +62,13 @@ GAP_TYPE = "romp-journal-gap"     # a record the journal could not write: a mark
 UNREADABLE = (None, 0)    # an index entry whose segment is gone (acknowledged and deleted): read_from skips it
 SELF_ANSWERED_KEPT = 16   # the Stop hooks this host answered itself that every hello reports (the newest; a kernel stamps each once)
 END_SENTINEL = object()          # on the stdin pump: close the CLI's stdin after everything queued before it
+# What a host whose CLI is being ended answers (2026-11-25). Once `end` has closed the CLI's stdin it can never take input
+# again, so a re-exec request is refused with this reason (the kernel matches it: no host.reexec-refused row, the connect
+# finishes the end instead), the hello says `ending`, and an `in` line is answered with a fault of kind `input-closed`
+# instead of being queued behind the closed stdin. Before, the refusal read "the CLI's descriptors could not be confirmed"
+# and a kernel attached to the CLI as if it could take input.
+REEXEC_REFUSED_ENDING = "the CLI is ending"
+INPUT_CLOSED_TEXT = "the CLI is ending; its stdin is closed"
 
 # The neutral answer the host gives a parked hook callback when no kernel returned in time, PER EVENT
 # KIND: the empty output, which is what romp's own hook callbacks return when they have nothing to say
@@ -939,7 +946,9 @@ class SessionHost:
 
     def _reexec_check(self, frame: dict):
         """(python, launcher) for a kernel's re-exec request, or a refusal reason: both paths must exist, and the CLI's
-        descriptors must be found (and, on Linux, confirmed against the CLI's own table)."""
+        descriptors must be found (and, on Linux, confirmed against the CLI's own table). A CLI being ended is refused as
+        that, before the descriptor read (2026-11-25): its stdin is closed for good, which the descriptor read only
+        reported as descriptors it could not confirm."""
         python, launcher = str(frame.get("python") or ""), str(frame.get("launcher") or "")
         if not python or not os.path.isfile(python) or not os.access(python, os.X_OK):
             return None, "no such interpreter"
@@ -947,6 +956,8 @@ class SessionHost:
             return None, "no such launcher"
         if self.transport is None or self.cli_pid is None or self.exit_info is not None:
             return None, "no CLI to hand over"
+        if self.ending is not None:
+            return None, REEXEC_REFUSED_ENDING
         if self._reexec_running:
             return None, "a re-exec is in progress"
         if cli_pipe_fds(self.transport) is None:
@@ -965,8 +976,15 @@ class SessionHost:
         the kernel's code. A failure before the exec is a `reexec-failed` line, a fault to the kernel, and the host goes
         on as it was. Round two of the review: the reader ran on through the handover, so records read after the flush
         were counted in the handoff and lost with the process; round three: the quiet check preceded the drain's await,
-        so output arriving while a slow kernel drained entered the stream buffer after the check and was lost."""
+        so output arriving while a slow kernel drained entered the stream buffer after the check and was lost.
+
+        A re-exec deferred to a turn's end whose CLI was told to end meanwhile is dropped, logged (2026-11-25): its stdin
+        is closed, so the handover could only fail at the descriptor read, and that failure's fault made the kernel file
+        a host.reexec-failed row for a CLI that was simply ending."""
         self._reexec_pending = None
+        if self.ending is not None:
+            self.log("reexec-dropped", reason=REEXEC_REFUSED_ENDING)
+            return
         self._reexec_running = True
         told = False
         limits_set = False
@@ -1386,7 +1404,10 @@ class SessionHost:
                             # subagent's output keeps the host's own count open, never this one); inflightScope says so, and a
                             # hello without it comes from a host older than the main count
                             "inflight": self.main_turns, "inflightScope": "main",
-                            "exited": self.exit_info is not None})
+                            "exited": self.exit_info is not None,
+                            # the CLI is being ended (an `end` closed its stdin; 2026-11-25): it can take no input, so a
+                            # kernel must not run a connect against it. A hello without the key is from an older host
+                            "ending": self.ending is not None})
         # each offset is resolved at ITS moment: from memory while unwritten, from the journal once landed, so
         # a record the writer lands during a drain yield is never between two snapshots (finding 4 of the
         # commit 6-7 review); a gap (a failed write) yields nothing and the parked table covers a request there
@@ -1424,11 +1445,20 @@ class SessionHost:
 
     def _queue_in(self, data: str) -> None:   # (the turn-opening test is _opens_turn, module level, so the kernel's tests can pin it)
         """One line from the kernel for the CLI's stdin: bookkeeping now, the write on the stdin pump. A user
-        message opens a turn; a control_response for a request already answered is dropped."""
+        message opens a turn; a control_response for a request already answered is dropped.
+
+        While the CLI is being ended the line is refused with a fault of kind `input-closed`, BEFORE any bookkeeping
+        (2026-11-25): it would queue behind the end sentinel and fail at the closed stdin (a `write-failed` fault, after
+        a user line had opened a turn that could never close and a hook answer had marked its request answered)."""
         try:
             obj = json.loads(data)
         except ValueError:
             obj = None
+        if self.ending is not None:
+            self.log("input-closed", line=str(obj.get("type") or "") if isinstance(obj, dict) else "")   # the kind, never the text
+            if self.attached is not None:
+                self._send(self.attached, {"t": "fault", "kind": "input-closed", "text": INPUT_CLOSED_TEXT})
+            return
         if isinstance(obj, dict):
             if obj.get("type") == "user" and _opens_turn(obj):
                 self.inflight += 1

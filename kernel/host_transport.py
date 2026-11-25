@@ -66,6 +66,14 @@ class HostHelloLost(CLIConnectionError):
     (HostTransport.abort_connect). The session stands down from the host rather than heal: its CLI may still live."""
 
 
+class HostInputClosed(CLIConnectionError):
+    """The host's CLI can take no input: an earlier `end` (a previous kernel's reconnect, say) closed its stdin and the CLI
+    lives on only until it exits (2026-11-25). Raised by `connect` when the hello says `ending`, and by the read stream when
+    the initialize is answered with a fault of kind `input-closed` (or `write-failed`, what a host older than the `ending`
+    field sends for a write to a closed stdin), so the SDK's pending initialize fails at once instead of after its 60 s
+    timeout. The session finishes that end and relaunches on a fresh CLI; never the attach retry, never the crash heal."""
+
+
 def _setting(state_dir, name: str, default: str) -> str:
     try:
         v = (Path(state_dir) / name).read_text().strip()
@@ -229,7 +237,10 @@ class HostTransport(_Base):
     unless the transport is in DETACH mode, where the kernel is leaving and the host keeps the CLI;
     `close()` sends `detach` in detach mode, else `end` and a bounded wait for the exit frame. `stderr`,
     `fault` and `exit` frames go to their callbacks; an `exit` frame ends the read stream (a non-zero code
-    raises ProcessError, as the subprocess transport does).
+    raises ProcessError, as the subprocess transport does). A hello saying the CLI is `ending` makes `connect`
+    detach and raise HostInputClosed, unless the transport is built `ending_ok` (a transport that only ends the
+    CLI: the kill road, the connect finishing an end); the read stream raises it for an `input-closed` fault
+    while the initialize is unanswered (or `write-failed` from a host older than that field; 2026-11-25).
 
     Replay (`HostTransport.from_journal`): `read_messages()` yields the journal's records from the offset
     to the end and then ends; `write()` of a control_request synthesizes the success response the Query
@@ -238,8 +249,11 @@ class HostTransport(_Base):
 
     def __init__(self, sock_path=None, *, kernel=None, ack=sh.ACK_NONE, end_grace=sh.END_GRACE_DEFAULT_S,
                  on_ack=None, on_hello=None, on_stderr=None, on_exit=None, on_fault=None, journal_dir=None, on_reexec=None,
-                 on_lost=None, alive=None):
+                 on_lost=None, alive=None, ending_ok=False):
         self.sock_path = str(sock_path) if sock_path else None
+        self.ending_ok = bool(ending_ok)   # a hello saying `ending` is accepted (an end-only transport), else HostInputClosed
+        self.input_closed = False       # the host said its CLI can take no input (the hello's `ending`, or a fault answering
+        #                                 the initialize): what the connect loop reads to finish the end (2026-11-25)
         self.kernel = dict(kernel or {})
         self.ack_offset = int(ack)
         self.replay_end = None          # the journal's next offset at the attach (the hello's journal.next): records before
@@ -324,6 +338,22 @@ class HostTransport(_Base):
                 else:
                     self._early.append(f)
         self.hello = hello
+        if hello.get("ending") and not self.ending_ok:
+            # an earlier `end` closed this CLI's stdin (2026-11-25): a connect against it can only fail its initialize, at
+            # the SDK's 60 s timeout. Detach (the host keeps its CLI and the end it is running; a failed attach never ends
+            # anything) and say why; the hello stays readable for the identity it names, and on_hello is not called, since
+            # this kernel does not attach to the CLI
+            self.input_closed = True
+            try:
+                await self._send({"t": "detach"})
+            except Exception:
+                pass
+            self._closed = True
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+            raise HostInputClosed("the session host's CLI can take no input: its hello says the CLI is ending")
         try:
             self.replay_end = int(((hello or {}).get("journal") or {}).get("next"))
         except (TypeError, ValueError):
@@ -458,11 +488,25 @@ class HostTransport(_Base):
             self.exit_info = f
             if self.on_exit:
                 self.on_exit(f)
-        elif t == "fault" and self.on_fault:
-            self.on_fault(f)
+        elif t == "fault":
+            if self._init_pending and self._closed_input_fault(f):
+                self.input_closed = True    # the initialize's write met a closed stdin: the read stream raises (2026-11-25)
+            if self.on_fault:
+                self.on_fault(f)
         elif t == "reexec-now" and self.on_reexec:
             self.on_reexec(f)
         return None
+
+    def _closed_input_fault(self, f: dict) -> bool:
+        """Does a fault frame say the CLI's stdin is closed for good (2026-11-25)? `input-closed` always: a host sends it only
+        for a line refused while it ends its CLI. `write-failed` only from a host older than the hello's `ending` field,
+        which has no word of its own for that and fails the write at the closed stdin; this kernel's own hosts say
+        `input-closed` there, and their `write-failed` stays what it was (a CLI that died at its start reaches the exit
+        frame and its ProcessError, the launch-failure road, never a relaunch)."""
+        kind = f.get("kind")
+        if kind == "input-closed":
+            return True
+        return kind == "write-failed" and isinstance(self.hello, dict) and "ending" not in self.hello
 
     def _advance(self, out: dict) -> None:
         """Acknowledge one record: acknowledged means RECEIVED by this process (not persisted); the offset moves
@@ -524,6 +568,13 @@ class HostTransport(_Base):
         while True:
             for f in pending:
                 out = self._dispatch_side(f)
+                if self.input_closed and self._init_pending:
+                    # the host answered the initialize's write with a closed stdin (2026-11-25): the stream's error fails the
+                    # SDK's pending initialize at once (its reader hands the error to every pending control request), where
+                    # waiting cost the full 60 s timeout and a retry against the same closed stdin. The held replay is not
+                    # handed over or acknowledged: the journal keeps it for the replay after the CLI's exit
+                    raise HostInputClosed("the session host's CLI can take no input: the host answered the initialize "
+                                          "with fault %s" % f.get("kind"))
                 if out is not None:
                     # The Query's initialize must be answered AHEAD of a replay: the SDK client connects, starts
                     # its reader and awaits the initialize before anything consumes the message stream, whose
