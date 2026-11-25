@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Install ROMP's pinned CLI separately from the Python SDK's runtime dependency.
 
-The CLI wheel is an official release artifact, not yet published on PyPI. Keep
-its complete package layout (including sandbox and code-mode helpers) intact.
+The CLI wheel is an official release artifact, fetched from OpenAI's GitHub
+release by digest. The same wheels are on PyPI as openai-codex-cli-bin (the four
+pinned digests below match its 0.169.0 upload; checked 2026-11-25), but the
+pinned SDK requires its own older cli-bin, so the runtime is installed here,
+apart from it. Keep its complete package layout (including sandbox and
+code-mode helpers) intact.
 """
 import fcntl
 import json
