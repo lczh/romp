@@ -262,7 +262,9 @@ class TheAskWaitsForAQuietSession(unittest.TestCase):
         self.assertFalse(s.quiet(), "…and nothing reads quiet in the instant before that turn shows")
         s._switch_wait_said = ""
         self.assertFalse(s._try_switch_reconnect())
-        self.assertIn("a turn owed for 1 finished background task running", [m for m in be._logs if "waiting" in m][-1])
+        said = [m for m in be._logs if "waiting" in m][-1]
+        self.assertIn("before the reconnect — a turn owed for 1 finished background task; nothing is cut", said,
+                      "said as owed, not as running (review 2026-11-25)")
         self.assertEqual(s.relaunch_waits(), "the turn for 1 finished background task", "the pick's words say what holds it")
         self._cli_opens_turn(s)
         s._on_task_event("task_started", {"task_id": "t2", "task_type": "local_bash"})   # the turn starts a new watcher
@@ -303,6 +305,29 @@ class TheAskWaitsForAQuietSession(unittest.TestCase):
         s._on_task_event("task_notification", {"task_id": "t-sub", "status": "completed"})   # no flag on this frame: the start's
         self.assertEqual(s._notice_marks, {}, "no mark for a subagent's own task")
         self.assertEqual(len(s._asks), 1, "its end is what the ask waited for: carried at once")
+
+    def test_a_synchronous_agents_end_raises_no_mark_but_a_backgrounded_one_does(self):
+        # review 2026-11-25: a local_agent registered in the foreground and never backgrounded hands its result to the call
+        # that blocked on it, so no turn follows its end; its mark only held the relaunch NOTICE_TURN_WAIT_S past the turn
+        be, s = self._armed()
+        s._asks.clear(); s._switch_wanted = "always fast"
+        self._cli_opens_turn(s)                         # the turn whose Task call blocks on the agent
+        s._on_task_event("task_started", {"task_id": "a-sync", "task_type": "local_agent", "is_backgrounded": False})
+        s._on_task_event("task_notification", {"task_id": "a-sync", "status": "completed"})
+        self.assertEqual(s._notice_marks, {}, "no turn is owed for a synchronous agent")
+        self.assertTrue(self._turn_result(s), "the turn's result carries the ask at once")
+        self.assertEqual(len(s._asks), 1)
+        s._asks.clear(); s._switch_wanted = "always fast"
+        self._cli_opens_turn(s)
+        s._on_task_event("task_started", {"task_id": "a-bg", "task_type": "local_agent", "is_backgrounded": False})
+        s._on_task_event("task_updated", {"task_id": "a-bg", "patch": {"is_backgrounded": True}})   # backgrounded by the user
+        self.assertFalse(self._turn_result(s), "the backgrounded agent runs on")
+        s._on_task_event("task_notification", {"task_id": "a-bg", "status": "completed"})
+        self.assertEqual(list(s._notice_marks), ["a-bg"], "a backgrounded agent's end owes a turn, as any background task's")
+        s._on_task_event("task_started", {"task_id": "b-fg", "task_type": "local_bash", "is_backgrounded": False})
+        s._on_task_event("task_notification", {"task_id": "b-fg", "status": "completed"})
+        self.assertIn("b-fg", s._notice_marks, "a foreground task of another type keeps its mark")
+        self.assertEqual(s._asks, [])
 
     def test_the_fallback_lowers_a_mark_no_turn_answered_and_the_tick_carries_the_ask(self):
         # a notification the CLI folded into a running turn, or answered with no turn: NOTICE_TURN_WAIT_S of nothing (no turn

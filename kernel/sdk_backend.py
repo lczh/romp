@@ -9985,7 +9985,10 @@ class SdkSession:
             return ", ".join(parts[:-1]) + " and " + parts[-1]
         return parts[0] if parts else ""
 
-    def _busy_words(self) -> str:
+    def _busy_words(self, running: bool = False) -> str:
+        """What holds a relaunch, in words. `running`: the words end in "running" (the waiting line's), said after the
+        work that runs and never after a turn owed for a finished task, which has not started (review 2026-11-25: the
+        line read "a turn owed for 1 finished background task running"), so that turn is said last."""
         parts = []
         if getattr(self, "inflight", 0):
             parts.append("a turn in flight")
@@ -9995,15 +9998,19 @@ class SdkSession:
             parts.append("a queued turn")
         if self._ask_parked():
             parts.append("a question waiting on you")
-        n = 0 if getattr(self, "inflight", 0) or getattr(self, "_cli_working", False) else self._notice_count()
-        if n:   # (a turn in flight is the turn owed, or the one ahead of it: said as the turn)
-            parts.append("a turn owed for %d finished background task%s" % (n, "" if n == 1 else "s"))
         a, b = self.live_work()
         if a:
             parts.append("%d subagent%s" % (a, "" if a == 1 else "s"))
         if b:
             parts.append("%d background task%s" % (b, "" if b == 1 else "s"))
-        return ", ".join(parts) or "live work"
+        words = ", ".join(parts)
+        if running and words:
+            words += " running"
+        n = 0 if getattr(self, "inflight", 0) or getattr(self, "_cli_working", False) else self._notice_count()
+        if n:   # (a turn in flight is the turn owed, or the one ahead of it: said as the turn)
+            owed = "a turn owed for %d finished background task%s" % (n, "" if n == 1 else "s")
+            words = words + ", " + owed if words else owed
+        return words or ("live work running" if running else "live work")
 
     def _notice_count(self) -> int:
         """How many "notification turn owed" marks stand now (_notice_live): read only, for the words."""
@@ -10065,8 +10072,8 @@ class SdkSession:
                 if say:
                     self._switch_wait_said = why
             if say:
-                self.backend._log("%s (%s): waiting for the session to go quiet before the reconnect — %s running; "
-                                  "nothing is cut" % (why, self.name, self._busy_words()))
+                self.backend._log("%s (%s): waiting for the session to go quiet before the reconnect — %s; "
+                                  "nothing is cut" % (why, self.name, self._busy_words(running=True)))
             return False
         # A relaunch is a CLI launch, so it draws on the machine-wide launch budget every spawn draws on (2026-10-07: one
         # change of the machine default made every follower's ask at once, and the 30 s tick carries every standing ask
@@ -15137,13 +15144,19 @@ class SdkSession:
                     # notification for a task this kernel never saw end, makes the CLI open a turn of its own for it right
                     # now; a relaunch must not be carried in the instant before that turn shows. Not for a subagent's own
                     # task, whose notification goes to the subagent; not for a later end frame of a task already ended.
+                    # Not for a synchronous agent either (review 2026-11-25): a local_agent registered in the foreground and
+                    # never backgrounded hands its result to the call that blocked on it, so no turn follows its end, and
+                    # its mark, raised mid-turn, only held the relaunch NOTICE_TURN_WAIT_S past that turn's end. A
+                    # foreground task of another type keeps its mark, as before.
                     owned = d.get("owned_by_subagent") is True
                     sub_owned = getattr(self, "_bg_sub_owned", None)
                     if sub_owned is not None:
                         owned = owned or tid in sub_owned
                         sub_owned.discard(tid)
+                    sync_agent = fg is not None and tid in fg and \
+                        ((gone or {}).get("type") or d.get("task_type")) == "local_agent"
                     marks = getattr(self, "_notice_marks", None)
-                    if marks is not None and not owned and (
+                    if marks is not None and not owned and not sync_agent and (
                             gone is not None or (subtype == "task_notification" and not (gone_ids and tid in gone_ids))):
                         marks[tid] = time.monotonic()
                     self._note_bg_ended(tid)
