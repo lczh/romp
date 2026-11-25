@@ -341,6 +341,18 @@ class TheAskWaitsForAQuietSession(unittest.TestCase):
         self.assertTrue(s._try_switch_reconnect(), "a later ask: no mark lingers, quiet at once")
         self.assertEqual(len(s._asks), 1)
 
+    def test_the_wakers_last_look_stands_down_while_a_notification_turn_is_owed(self):
+        # a task's end landing between a carried ask and its teardown: the last look reads the mark and stands down
+        import types
+        be, s = self._armed()
+        s._host = types.SimpleNamespace(end_grace=120.0)
+        s._reconnect = True; s._reconnect_switch_why = "always fast"; s._switch_wanted = ""
+        s._on_task_event("task_notification", {"task_id": "t-unseen", "status": "completed"})   # a task this kernel never saw start
+        self.assertTrue(s._switch_teardown_check(), "vetoed: the CLI is opening the notification's turn")
+        self.assertEqual((s._reconnect, s._switch_wanted, s._host.end_grace), (False, "always fast", 120.0))
+        self.assertIn("the CLI started work between the ask and the reconnect — a turn owed for 1 finished background task; "
+                      "the reconnect stands down", be._logs[-1])
+
     def test_a_teardown_drops_the_marks_with_the_cli_that_owed_them(self):
         be, s = self._armed()
         with s._sub_lock:

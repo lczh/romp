@@ -277,7 +277,20 @@ class _Harness(unittest.TestCase):
         self._wait(lambda: s.inflight == 0 and not s._cli_working, "the turn settled")
 
     def _monitor_ends(self, c):
+        """The monitor's end as the CLI streams it: its task_notification, then the turn the CLI opens of its own to hand
+        the model that notification (an init, a reply, a result). A relaunch waiting for the monitor is carried at that
+        turn's result, never at the end frame, which the turn's start races (2026-11-25): asserted here before the turn."""
+        n = len(_Client.instances)
         self._push(c, _SystemMessage("task_notification", {"task_id": "t-mon", "status": "completed"}, uuid=self._uid()))
+        self._wait(lambda: not any(s.live_work()[1] for s in self.sessions if s.client is c), "the monitor's end handled")
+        self._settle()
+        self.assertEqual(len(_Client.instances), n, "no relaunch at the end frame: the CLI owes the notification a turn")
+        self._push(c, _SystemMessage("init", {"model": "claude-x", "permissionMode": "acceptEdits", "session_id": FSID},
+                                     uuid=self._uid()))
+        self._push(c, _AssistantMessage([_TextBlock("the monitor finished")], uuid=self._uid()))
+        self._push(c, _result(uuid=self._uid(), subtype="success", is_error=False, num_turns=1, session_id=FSID,
+                              duration_ms=1, duration_api_ms=1, total_cost_usd=0.01,
+                              usage={"input_tokens": 1, "output_tokens": 1}, result="ok", parent_tool_use_id=None))
 
     def _effort_markers(self):
         p = os.path.join(self.state, "states", SID + ".jsonl")
