@@ -192,9 +192,14 @@ class FakeHost:
     one-fed-text-at-a-time hold (SdkSession._untaken) releases on; a host that echoes nothing holds every text after
     the first for good."""
 
-    def __init__(self, path, records, busy=False, exit_after=None, answer_init=None, echo_turns=False, parked=()):
+    def __init__(self, path, records, busy=False, exit_after=None, answer_init=None, echo_turns=False, parked=(),
+                 ending=None, in_fault=None, heal_on_end=False):
         self.path, self.records, self.busy, self.exit_after = path, records, busy, exit_after
         self.parked = list(parked)          # the request ids its hello names as still open (sent before this attach)
+        self.ending = ending                # the hello's `ending` (2026-11-25); None: no such key, a host older than the field
+        self.in_fault = in_fault            # a fault kind every `in` line is answered with instead (a closed stdin), or None
+        self.signals = []                   # the `signal` frames' names, in order
+        self.heal_on_end = heal_on_end      # an `end` ends this CLI and the next attach meets a fresh one (no ending, no fault)
         self.answer_init = answer_init      # None: every control request answered; else answer_init(attach_no) -> bool
         self.echo_turns = echo_turns
         self.next_offset = len(records)     # the journal position of the next record this host writes (echo_turns)
@@ -219,8 +224,11 @@ class FakeHost:
                             writer.write(sh.encode_frame({"t": "busy", "kernel": {"pid": 7}})); await writer.drain(); continue
                         self.attaches += 1
                         answering = self.answer_init is None or self.answer_init(self.attaches)
-                        writer.write(sh.encode_frame({"t": "hello", "protocol": 1, "host": {"pid": 10, "start": "h", "version": "v"},
-                                                      "cli": {"pid": 11, "start": "c", "fsid": SID}, "journal": {"next": len(self.records)}, "parked": list(self.parked)}))
+                        hello = {"t": "hello", "protocol": 1, "host": {"pid": 10, "start": "h", "version": "v"},
+                                 "cli": {"pid": 11, "start": "c", "fsid": SID}, "journal": {"next": len(self.records)}, "parked": list(self.parked)}
+                        if self.ending is not None:
+                            hello["ending"] = bool(self.ending)
+                        writer.write(sh.encode_frame(hello))
                         for off, rec in enumerate(self.records):
                             if off > int(f.get("ack", -1)):
                                 writer.write(sh.encode_frame({"t": "out", "offset": off, "data": rec}))
@@ -230,6 +238,12 @@ class FakeHost:
                         await writer.drain()
                     elif f["t"] == "end":
                         writer.write(sh.encode_frame({"t": "exit", "code": 0, "cause": "end"})); await writer.drain()
+                        if self.heal_on_end:
+                            self.ending, self.in_fault = None, None
+                    elif f["t"] == "signal":
+                        self.signals.append(f.get("sig"))
+                    elif f["t"] == "in" and self.in_fault:
+                        writer.write(sh.encode_frame({"t": "fault", "kind": self.in_fault, "text": "CLIConnectionError"})); await writer.drain()
                     elif f["t"] == "in":
                         obj = json.loads(f["data"])
                         if obj.get("type") == "control_request" and answering:
@@ -376,6 +390,103 @@ class TransportOverSocket(unittest.TestCase):
             fh.close()
         run(go())
 
+    def test_a_hello_saying_the_cli_is_ending_refuses_the_connect_and_detaches(self):
+        # 2026-11-25: a host whose CLI an earlier `end` closed said nothing of it, and the kernel attached as is. Its hello
+        # now says `ending`: the connect detaches (the host keeps its CLI and its end) and raises HostInputClosed, with no
+        # on_hello (this kernel does not attach to that CLI) and the hello kept for the identity it names. A transport
+        # built ending_ok (one that only ends the CLI) connects as before, and so does any transport to a host older than
+        # the field (no `ending` key)
+        async def go():
+            fh = FakeHost(self._path(), [{"type": "assistant"}], ending=True); await fh.start()
+            hellos = []
+            t = ht.HostTransport(fh.path, kernel={"pid": 1}, on_hello=hellos.append)
+            self.assertFalse(t.input_closed)
+            with self.assertRaises(ht.HostInputClosed) as cm:
+                await t.connect()
+            self.assertIsInstance(cm.exception, ht.CLIConnectionError, "a connection error to every caller that catches those")
+            self.assertEqual(str(cm.exception), "the session host's CLI can take no input: its hello says the CLI is ending")
+            self.assertTrue(t.input_closed)
+            self.assertEqual(hellos, [], "no on_hello: nothing attached")
+            self.assertEqual((t.hello or {}).get("host"), {"pid": 10, "start": "h", "version": "v"}, "the hello's identity stays readable")
+            self.assertFalse(t.is_ready())
+            await asyncio.sleep(0.1)
+            self.assertEqual([f["t"] for f in fh.got], ["attach", "detach"], "detached at once; never an `end`, never an `in`")
+            t2 = ht.HostTransport(fh.path, kernel={"pid": 1}, ending_ok=True, end_grace=5)
+            await t2.connect()
+            self.assertTrue(t2.is_ready()); self.assertFalse(t2.input_closed)
+            await t2.end_and_close()
+            self.assertEqual((t2.exit_info or {}).get("cause"), "end", "the end-only transport ends it")
+            fh.close()
+            fh2 = FakeHost(self._path(), [])           # an older host: no `ending` key
+            await fh2.start()
+            t3 = ht.HostTransport(fh2.path, kernel={"pid": 1})
+            await t3.connect()
+            self.assertTrue(t3.is_ready()); self.assertNotIn("ending", t3.hello)
+            await t3.close()
+            fh2.close()
+        run(go())
+
+    def _initialize_meets(self, in_fault, ending, records=({"type": "assistant", "n": 0},)):
+        """Connect to a FakeHost answering every `in` with `in_fault`, start the reader, write the initialize as the
+        Query does, and return (what the reader raised or None after 1.5 s, the records it yielded, the transport,
+        the faults the callback saw, the seconds the read took)."""
+        async def go():
+            fh = FakeHost(self._path(), list(records), ending=ending, in_fault=in_fault); await fh.start()
+            faults, acks = [], []
+            t = ht.HostTransport(fh.path, kernel={"pid": 1}, on_fault=faults.append, on_ack=acks.append)
+            await t.connect()
+            got, raised = [], []
+            async def read():
+                try:
+                    async for m in t.read_messages():
+                        got.append(m)
+                except Exception as e:
+                    raised.append(e)
+            reader = asyncio.ensure_future(read())
+            await asyncio.sleep(0.05)
+            t0 = time.monotonic()
+            await t.write(json.dumps({"type": "control_request", "request_id": "req_1_x", "request": {"subtype": "initialize"}}))
+            try:
+                await asyncio.wait_for(asyncio.shield(reader), 1.5)
+            except asyncio.TimeoutError:
+                pass
+            took = time.monotonic() - t0
+            reader.cancel()
+            try:
+                await reader
+            except BaseException:
+                pass
+            await t.close()
+            fh.close()
+            return (raised[0] if raised else None), got, t, faults, acks, took
+        return run(go())
+
+    def test_an_initialize_met_by_a_closed_stdin_fails_the_read_at_once(self):
+        # 2026-11-25: the host answered the initialize's write with a fault, the kernel only logged it, and the SDK's
+        # initialize waited out its 60 s timeout before a retry met the same closed stdin. Now that fault, while the
+        # initialize is unanswered, ends the read stream with HostInputClosed, which the SDK's reader hands to the pending
+        # initialize at once. The held replay is not handed over or acknowledged (the journal keeps it)
+        err, got, t, faults, acks, took = self._initialize_meets("input-closed", ending=False)
+        self.assertIsInstance(err, ht.HostInputClosed)
+        self.assertEqual(str(err), "the session host's CLI can take no input: the host answered the initialize with fault input-closed")
+        self.assertLess(took, 1.0, "at once, not at the SDK's timeout")
+        self.assertTrue(t.input_closed)
+        self.assertEqual((got, acks), ([], []), "nothing of the held replay handed over or acknowledged")
+        self.assertEqual([f.get("kind") for f in faults], ["input-closed"], "the fault still reaches its callback")
+        # a host older than the `ending` field has no word of its own: its write to the closed stdin fails as write-failed
+        err, got, t, faults, acks, took = self._initialize_meets("write-failed", ending=None)
+        self.assertIsInstance(err, ht.HostInputClosed)
+        self.assertEqual(str(err), "the session host's CLI can take no input: the host answered the initialize with fault write-failed")
+        self.assertLess(took, 1.0)
+
+    def test_a_write_failed_from_a_host_that_knows_the_ending_field_is_not_read_as_a_closed_stdin(self):
+        # a host on this code says input-closed for a closed stdin; its write-failed is something else (a CLI that died at
+        # its start breaks the pipe before its exit frame), which keeps its own road: the exit frame's ProcessError
+        err, got, t, faults, acks, took = self._initialize_meets("write-failed", ending=False)
+        self.assertIsNone(err, "no HostInputClosed: the read waits on, as before")
+        self.assertFalse(t.input_closed)
+        self.assertEqual([f.get("kind") for f in faults], ["write-failed"])
+
     def test_a_stop_hook_its_cli_sent_before_this_kernel_attached_is_marked_unwatched(self):
         # the feed across a restart (plans/federated-push.md, 2026-10-14): a hosted CLI ends a turn while no kernel is
         # attached, its Stop hook waits at the host, and the hello names it among the open requests. The transport marks
@@ -454,6 +565,206 @@ class TransportOverSocket(unittest.TestCase):
 
     def test_the_unwatched_key_is_the_backends(self):
         self.assertEqual(ht.UNWATCHED_STOP_KEY, sb.UNWATCHED_STOP_KEY)
+
+
+class PostEndTurnHost:
+    """A host whose CLI, once `end` closes its stdin, runs the turn(s) it owes a background task's notification (an init, an
+    assistant message, a result each), starts background work in the last of them, and so does not exit: the CLI of
+    2026-11-25. It honors the end grace as the host does (a forced end, code -9, at the deadline; a later `end` with a
+    shorter grace pulls the deadline in) and exits 143 on a SIGTERM, as the installed CLI does. `turns`: how many such turns,
+    `gap` seconds apart. `tick`: seconds between the new watcher's progress records after the last turn, or None for a CLI
+    that streams nothing more (a bash watcher reports nothing until it ends). Every frame it got is kept, with the time it
+    came."""
+
+    def __init__(self, path, turns=1, gap=0.0, tick=0.1):
+        self.path, self.turns, self.gap, self.tick = path, turns, gap, tick
+        self.got = []
+        self.server = None
+        self.deadline = None
+
+    async def start(self):
+        self.server = await asyncio.start_unix_server(self._client, path=self.path)
+
+    def _out(self, writer, off, rec):
+        writer.write(sh.encode_frame({"t": "out", "offset": off, "data": rec}))
+
+    async def _client(self, reader, writer):
+        fr = sh.FrameReader()
+        off = 0
+        exited = asyncio.Event()
+
+        async def exit_with(code, cause):
+            if not exited.is_set():
+                exited.set()
+                writer.write(sh.encode_frame({"t": "exit", "code": code, "cause": cause}))
+                await writer.drain()
+
+        async def grace():
+            while not exited.is_set():
+                await asyncio.sleep(0.05)
+                if self.deadline is not None and time.time() >= self.deadline:
+                    await exit_with(-9, "end-forced")
+
+        async def post_end_turns():
+            nonlocal off
+            for i in range(self.turns):
+                if i:
+                    await asyncio.sleep(self.gap)
+                for rec in ({"type": "system", "subtype": "init", "session_id": SID},
+                            {"type": "assistant", "message": {"content": []}},
+                            {"type": "system", "subtype": "task_started", "task_id": "t-new%d" % i},
+                            {"type": "result", "subtype": "success", "session_id": SID}):
+                    self._out(writer, off, rec); off += 1
+                await writer.drain()
+            if self.tick is None:
+                return                           # silent from here: the grace, a SIGTERM or the socket ends it
+            while not exited.is_set():           # the new watcher's progress: the work that holds the CLI
+                await asyncio.sleep(self.tick)
+                self._out(writer, off, {"type": "system", "subtype": "task_progress", "task_id": "t-new0"}); off += 1
+                await writer.drain()
+
+        tasks = [asyncio.ensure_future(grace())]
+        try:
+            while not exited.is_set():
+                chunk = await reader.read(65536)
+                if not chunk:
+                    return
+                for f in fr.feed(chunk):
+                    self.got.append(dict(f, at=time.time()))
+                    if f["t"] == "attach":
+                        writer.write(sh.encode_frame({"t": "hello", "protocol": 1, "host": {"pid": 10, "start": "h"},
+                                                      "cli": {"pid": 11, "start": "c", "fsid": SID}, "journal": {"next": 0}}))
+                        await writer.drain()
+                    elif f["t"] == "in":
+                        obj = json.loads(f["data"])
+                        if obj.get("type") == "control_request":
+                            self._out(writer, off, {"type": "control_response", "response": {
+                                "subtype": "success", "request_id": obj["request_id"], "response": {}}}); off += 1
+                            await writer.drain()
+                    elif f["t"] == "end":
+                        dl = time.time() + float(f["grace"])
+                        first = self.deadline is None
+                        self.deadline = dl if first else min(self.deadline, dl)
+                        if first:
+                            tasks.append(asyncio.ensure_future(post_end_turns()))
+                    elif f["t"] == "signal" and f.get("sig") == "TERM":
+                        await exit_with(143, "end")
+        except (ConnectionResetError, asyncio.IncompleteReadError):
+            return
+        finally:
+            for t in tasks:
+                t.cancel()
+
+    def close(self):
+        if self.server:
+            self.server.close()
+
+
+class TheEndOfASwitchIsBounded(unittest.TestCase):
+    """2026-11-25: a switch's teardown sends `end` with the 1200 s grace so a turn the CLI opened in the last instant is
+    finished, not killed. But with its stdin closed the CLI does not exit at that turn's end while background work runs, and
+    the notification turn had started a new watcher: the CLI lived until the host's SIGKILL at exactly 1200 s, with the
+    kernel's session waiting in close() all along. With term_after_result set, the wait reads the records still streaming for
+    the turn boundary: a CLI still alive that long after a turn's result is ended with SIGTERM, then `end` with the kill
+    bound."""
+
+    def _path(self):
+        d = tempfile.mkdtemp(dir=os.environ.get("ROMP_TESTS_SYSTEM_TMPDIR") or None)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return os.path.join(d, "h.sock")
+
+    async def _attached(self, fh, end_grace, term_after_result):
+        await fh.start()
+        t = ht.HostTransport(fh.path, kernel={"pid": 1}, end_grace=end_grace)
+        t.term_after_result = term_after_result
+        said = []
+        t.on_post_end_term = said.append
+        await t.connect()
+        reader = asyncio.ensure_future(t.read_messages().__anext__())
+        await t.write(json.dumps({"type": "control_request", "request_id": "req_1_x", "request": {"subtype": "initialize"}}))
+        await asyncio.wait_for(reader, 5)          # the initialize answered: close() takes the `end` road
+        return t, said
+
+    def test_a_cli_still_alive_after_its_post_end_turn_is_ended_with_sigterm_within_the_bound(self):
+        async def go():
+            fh = PostEndTurnHost(self._path())
+            t, said = await self._attached(fh, end_grace=1200.0, term_after_result=0.3)
+            t0 = time.time()
+            await asyncio.wait_for(t.close(), 30)
+            took = time.time() - t0
+            self.assertLess(took, 5.0, "ended within the bound, never the 1200 s grace")
+            self.assertEqual((t.exit_info or {}).get("code"), 143, "the CLI's own SIGTERM shutdown, not a SIGKILL")
+            kinds = [f["t"] for f in fh.got]
+            self.assertEqual(kinds[-3:], ["end", "signal", "end"], kinds)
+            first_end, term, second_end = fh.got[-3:]
+            self.assertEqual((first_end["grace"], term["sig"], second_end["grace"]), (1200.0, "TERM", sh.END_GRACE_KILL_S),
+                             "the switch's grace, then SIGTERM, then the kill bound that pulls the host's deadline in")
+            self.assertGreaterEqual(term["at"] - first_end["at"], 0.3, "not before the turn's result plus the bound")
+            self.assertEqual(said, [None], "reported once, as sent")
+            self.assertIsNone(t.term_after_result, "spent: once per teardown")
+            fh.close()
+        run(go())
+
+    def test_each_turn_after_the_end_is_finished_before_the_sigterm(self):
+        async def go():
+            fh = PostEndTurnHost(self._path(), turns=2, gap=0.2)   # a second notification turn opens 0.2 s after the first
+            t, said = await self._attached(fh, end_grace=1200.0, term_after_result=0.5)
+            await asyncio.wait_for(t.close(), 30)
+            self.assertEqual((t.exit_info or {}).get("code"), 143)
+            term = next(f for f in fh.got if f["t"] == "signal")
+            end = next(f for f in fh.got if f["t"] == "end")
+            self.assertGreaterEqual(term["at"] - end["at"], 0.2 + 0.5,
+                                    "the second turn's init disarmed the first result's SIGTERM; its own result armed it")
+            fh.close()
+        run(go())
+
+    def test_a_wall_clock_running_slow_still_gets_the_sigterm(self):
+        # review 2026-11-25: the wait's reads time out on the loop's monotonic clock, but the SIGTERM's due time was read on
+        # the wall clock, which the system's time daemon slews; with the wall clock a little slow the SIGTERM's read timed
+        # out just before term_at by time.time(), was taken for the deadline, and the wait returned with no SIGTERM. The
+        # stand-in host's progress records hid it (each 0.05 s re-wait landed after term_at), so this CLI is silent after its
+        # result, like a bash watcher. The wall clock runs 2% slow here, exaggerated so the outcome is deterministic.
+        real, t0 = time.time, time.time()
+        slow = types.SimpleNamespace(time=lambda: t0 + (real() - t0) * 0.98, monotonic=time.monotonic, sleep=time.sleep)
+
+        async def go():
+            fh = PostEndTurnHost(self._path(), tick=None)
+            t, said = await self._attached(fh, end_grace=1200.0, term_after_result=1.0)
+            with mock.patch.object(ht, "time", slow):
+                await asyncio.wait_for(t.close(), 30)
+            kinds = [f["t"] for f in fh.got]
+            self.assertEqual(kinds[-3:], ["end", "signal", "end"], kinds)
+            self.assertEqual((t.exit_info or {}).get("code"), 143, "the CLI's own SIGTERM shutdown")
+            self.assertEqual(said, [None])
+            fh.close()
+        run(go())
+
+    def test_records_arriving_closer_together_than_a_read_timeout_do_not_put_the_sigterm_off(self):
+        # review 2026-11-25: the due time was checked only when a read timed out, so a CLI streaming records less than 50 ms
+        # apart put the SIGTERM off until the first quieter gap, or the end grace; it is checked after each chunk as well
+        async def go():
+            fh = PostEndTurnHost(self._path(), tick=0.01)
+            t, said = await self._attached(fh, end_grace=1200.0, term_after_result=0.3)
+            t0 = time.time()
+            await asyncio.wait_for(t.close(), 10)
+            self.assertLess(time.time() - t0, 5.0, "within the bound, though records never paused")
+            self.assertEqual((t.exit_info or {}).get("code"), 143)
+            self.assertEqual(said, [None])
+            fh.close()
+        run(go())
+
+    def test_without_the_bound_the_wait_is_the_end_grace_as_before(self):
+        async def go():
+            fh = PostEndTurnHost(self._path())
+            t, said = await self._attached(fh, end_grace=1.5, term_after_result=None)
+            t0 = time.time()
+            await asyncio.wait_for(t.close(), 30)
+            self.assertGreaterEqual(time.time() - t0, 1.4, "waited out the grace")
+            self.assertEqual((t.exit_info or {}).get("cause"), "end-forced")
+            self.assertNotIn("signal", [f["t"] for f in fh.got], "no SIGTERM on a road that did not ask for one")
+            self.assertEqual(said, [])
+            fh.close()
+        run(go())
 
 
 class TransportOverJournal(unittest.TestCase):
@@ -638,6 +949,35 @@ class BackendHostRules(unittest.TestCase):
         t.on_fault({"t": "fault", "kind": "reader-behind", "text": "the journal lags"})
         self.assertEqual(len(rows()), 1, "any other fault stays a log line")
         self.assertTrue(any("reader-behind" in m for m in be._test_logs))
+
+    def test_a_host_refusing_a_re_exec_because_its_cli_is_ending_files_no_refusal_row(self):
+        """2026-11-25: a host ending its CLI (an earlier `end` closed its stdin) has nothing to hand over and nothing wrong
+        with it, so its refusal ("the CLI is ending") is a log line, never a host.reexec-refused row or a problem; the attach
+        that follows reads the hello's `ending` and the connect finishes the end. Any other refusal still files its row. A
+        line refused with `input-closed` is likewise a plain log line, where every other fault is a problem."""
+        d, be = self._be()
+        be.code_version = "def67890"
+        ht.write_spawn_spec(d, SID, {"sid": SID, "version": "abc12345"})
+        s = types.SimpleNamespace(sid=SID, name="web")
+        lease = {"version": "abc12345", "holder": {"pid": 1, "start": "a", "kind": "host"}}
+        async def ask(reason):
+            with mock.patch.object(ht, "request_reexec", mock.AsyncMock(return_value={"ok": False, "reason": reason})):
+                return await be._host_reexec_on_skew(s, lease)
+        self.assertIsNone(asyncio.run(ask("the CLI is ending")), "the plain attach follows")
+        self.assertEqual(getattr(s, "_host_reexec_wait", ""), "ran",
+                         "the connect reads the lease again first: an ending host that exits before the attach takes the "
+                         "orphan road, not an attach into nobody filed as a launch error")
+        s._host_reexec_wait = ""
+        self.assertNotIn("host.reexec-refused", self._kinds(d))
+        self.assertIn("host (web): the session host is ending its CLI, so it is not re-executed into def67890; the connect "
+                      "finishes that end and relaunches the session", be._test_logs)
+        be._on_host_fault(s, {"t": "fault", "kind": "input-closed", "text": "the CLI is ending; its stdin is closed"})
+        self.assertIn("host (web): fault input-closed: the CLI is ending; its stdin is closed", be._test_logs)
+        self.assertEqual([p["text"] for p in be._problems if "ending" in p["text"] or "input-closed" in p["text"]], [],
+                         "neither is a problem for the error center")
+        self.assertIsNone(asyncio.run(ask("no such launcher")))
+        self.assertEqual(self._kinds(d), ["host.reexec-refused"], "any other refusal files its row, as before")
+        self.assertEqual(getattr(s, "_host_reexec_wait", ""), "", "and waits for nothing, as before")
 
     def test_the_reexec_wait_needs_a_listener_not_a_socket_path(self):
         """Round two of the re-exec review: the kernel's wait for the re-executed host passed on the lease's version, the holder
@@ -938,6 +1278,61 @@ class BackendHostRules(unittest.TestCase):
         rows = [json.loads(l) for l in (Path(d) / "states" / (SID + ".jsonl")).read_text().splitlines()]
         self.assertEqual(rows[-1]["state"], "waiting", "waiting on its host; the next send tries the attach again")
         self.assertEqual((sb.read_reg(Path(d), SID) or {}).get("queue"), ["kept"], "no crash-resume nudge")
+
+    # _finish_ending_host, the connect loop's road for a host whose CLI an earlier `end` cut off from its stdin
+    # (2026-11-25): CPU-only, so CI runs it (its SDK-gated end-to-end tests skip where no claude_agent_sdk is installed)
+    def _ending_session(self, be, marked):
+        return types.SimpleNamespace(sid=SID, name="web", backend=be, _mark_cut_spend=lambda: marked.append(1))
+
+    def test_finishing_an_ending_host_marks_the_cut_signals_term_ends_and_records_the_end(self):
+        d, be = self._be(short=True)
+        host, stop = self._serve_fake_host(d)
+        self.addCleanup(stop)
+        host.ending = True
+        marked = []
+        s = self._ending_session(be, marked)
+        failed = types.SimpleNamespace(ack_offset=-1, hello={"host": {"pid": 10, "start": "h"}})
+        with mock.patch.object(be, "_file_host_log_rows") as rows:
+            self.assertTrue(asyncio.run(sb.SdkSession._finish_ending_host(s, failed)), "the CLI is gone: relaunch")
+        self.assertEqual(host.signals, ["TERM"], "the CLI is ended with SIGTERM")
+        self.assertIn("end", [f["t"] for f in host.got], "then `end`, with the kill bound")
+        self.assertEqual(marked, [1], "the SIGTERM's cut is marked for the spend record, as _term_for_relaunch marks it")
+        self.assertEqual(be._host_recently_ended.get(SID), "10:h", "the host is one this kernel ended, not a death")
+        self.assertEqual(s._relaunch_termed[0], "host")
+        rows.assert_called_once()
+
+    def test_finishing_an_ending_host_retries_a_busy_answer_that_names_this_kernel(self):
+        # the failed attach's own connection, not yet read as gone by the host: a `busy` naming this kernel, retried
+        d, be = self._be(short=True)
+        host, stop = self._serve_fake_host(d)
+        self.addCleanup(stop)
+        host.ending, host.busy = True, True
+        def own(kernel):
+            host.busy = False                     # the host has now read the detach
+            return True
+        marked = []
+        with mock.patch.object(be, "_is_own_kernel", side_effect=own), mock.patch.object(be, "_file_host_log_rows"):
+            ok = asyncio.run(sb.SdkSession._finish_ending_host(self._ending_session(be, marked),
+                                                               types.SimpleNamespace(ack_offset=-1, hello=None)))
+        self.assertTrue(ok)
+        self.assertEqual(host.signals, ["TERM"])
+
+    def test_finishing_an_ending_host_held_by_another_kernel_stands_down(self):
+        # a `busy` naming another kernel while the lease still reads live: the end cannot be confirmed, so False (the
+        # caller stands down), and nothing is signalled through a connection this kernel does not have
+        d, be = self._be(short=True)
+        host, stop = self._serve_fake_host(d)
+        self.addCleanup(stop)
+        host.ending, host.busy = True, True
+        marked = []
+        with mock.patch.object(be, "_is_own_kernel", return_value=False), \
+             mock.patch.object(be, "_host_lease", return_value=({}, "attach")), mock.patch.object(be, "_file_host_log_rows"):
+            ok = asyncio.run(sb.SdkSession._finish_ending_host(self._ending_session(be, marked),
+                                                               types.SimpleNamespace(ack_offset=-1, hello=None)))
+        self.assertFalse(ok, "another kernel holds the host: stand down")
+        self.assertEqual(host.signals, [], "no SIGTERM")
+        self.assertEqual(marked, [], "no cut marked")
+        self.assertNotIn(SID, be._host_recently_ended)
 
     def _marked(self, d, holder="999999996:2", **reg):
         base = {"sid": SID, "name": "web", "alive": True, "lastSid": SID, "hostAttachFailed": {"host": holder, "t": 1.0, "tries": 4}}
@@ -1821,6 +2216,59 @@ class EndToEnd(unittest.TestCase):
         kinds = [l["kind"] for l in self._events()]
         self.assertNotIn("host.died", kinds)
 
+    def test_a_cli_an_earlier_kernel_ended_is_finished_and_the_session_relaunches_on_a_fresh_cli(self):
+        """The 2026-11-25 restart incident end to end, synthetic: a turn runs under a real host; the kernel leaves (a drain,
+        the host keeps the CLI); an earlier kernel's reconnect teardown reaches the host as an `end` with the long switch
+        grace from a connection that then drops, so the CLI's stdin is closed and the CLI lives on in its long turn (a real
+        CLI's background task kept it alive past the EOF). The next kernel's send used to attach as is, fail its initialize
+        after 60 s, retry, and end in a crash when the old end's deadline killed the CLI. Now the attach reads the hello's
+        `ending`, the session ends that CLI (SIGTERM, the kill bound) and relaunches on a fresh CLI and host, and the send
+        runs there: no crash row, no launch error, no attach retry, in seconds."""
+        import socket as _socket
+        be = self._backend()
+        self.assertTrue(be.send(self.sid, "start long sleep=30"))
+        self._wait(lambda: (sb.read_lease(self.d, self.sid) or {}).get("holder", {}).get("kind") == "host", what="a host-held lease")
+        self._wait(lambda: len(list(sh.read_journal_dir(ht.host_dir(self.d, self.sid)))) >= 2, what="the init and assistant records")
+        old = sb.read_lease(self.d, self.sid)
+        be.drain(timeout=5)
+        # the earlier kernel's teardown: `end` with the switch grace, and that kernel gone before the CLI exits
+        k = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        k.settimeout(5)
+        k.connect(str(ht.host_sock(self.d, self.sid)))
+        k.sendall(sh.encode_frame({"t": "attach", "kernel": {"pid": 999999991, "start": "1", "version": "t315"}, "ack": -1}))
+        fr, frames = sh.FrameReader(), []
+        while not any(f.get("t") == "hello" for f in frames):   # loop-ok: the hello, bounded by the socket's timeout
+            frames.extend(fr.feed(k.recv(65536)))
+        k.sendall(sh.encode_frame({"t": "end", "grace": 1200}))
+        hostlog = ht.host_dir(self.d, self.sid) / "host.log"
+        self._wait(lambda: hostlog.exists() and '"end-requested"' in hostlog.read_text(), what="the earlier end at the host")
+        k.close()
+        self.assertEqual(sb.proc_start(old["pid"]), old["start"], "the CLI lives on past its stdin's end, in its long turn")
+        be2 = self._backend()
+        t0 = time.time()
+        self.assertTrue(be2.send(self.sid, "after the relaunch sleep=0"))
+        def fresh():
+            lease = sb.read_lease(self.d, self.sid) or {}
+            return lease.get("pid") not in (None, old["pid"]) and (lease.get("holder") or {}).get("kind") == "host"
+        self._wait(fresh, timeout=20, what="a fresh CLI under a fresh host")
+        took = time.time() - t0
+        new = sb.read_lease(self.d, self.sid)
+        self.assertNotEqual(new["holder"]["pid"], old["holder"]["pid"], "a fresh host, not the old one")
+        self.assertNotEqual(sb.proc_start(old["pid"]), old["start"], "the ending CLI was ended")
+        self.assertLess(took, 15, "in seconds, not the 60 s initialize timeout and its retry")
+        def ran():
+            return any('"type":"result"' in l for p in Path(self.tdir).glob("*.jsonl") for l in p.read_text().splitlines())
+        self._wait(ran, timeout=20, what="the send's turn on the fresh CLI")
+        kinds = [l["kind"] for l in self._events()]
+        for bad in ("crash.heal", "crash.loop", "host.reexec-refused", "host.attach-failed", "host.died"):
+            self.assertNotIn(bad, kinds, "no %s row: %r" % (bad, kinds))
+        text = "\n".join(self.logs)
+        self.assertNotIn("attach did not complete", text)
+        self.assertNotIn("failed to start", text)
+        self.assertNotIn("launchError", sb.read_reg(Path(self.d), self.sid) or {})
+        self.assertIn("host (web): the session host's CLI can take no input: an earlier end (a previous kernel's reconnect) "
+                      "already closed its stdin; ending it now and relaunching the session on a fresh CLI", text)
+
     def _events(self):
         p = Path(self.d) / sb.SESSION_EVENTS_FILE
         return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
@@ -1966,6 +2414,115 @@ class AttachStandDown(unittest.TestCase):
         self._wait(lambda: self.host.attaches >= 8, timeout=40, what="the eighth attach: the seventh's timeout was a retry")
         self.assertNotIn("host.attach-failed", self._kinds(), "three recovered timeouts and one more never reach the bound")
         self.assertNotIn("hostAttachFailed", sb.read_reg(Path(self.d), self.sid) or {})
+
+
+@unittest.skipUnless(SDK, "the SDK is not importable here")
+class AttachToAHostWhoseCliTakesNoInput(unittest.TestCase):
+    """The real connect loop against a fake host whose CLI an earlier `end` closed (2026-11-25). Before: the kernel attached
+    as is, the initialize failed after the SDK's 60 s timeout, the attach was retried and failed the same way, and the old
+    end's deadline then killed the CLI mid-connect, filed as a launch error and a crash. Now the session finishes that end
+    (signal TERM, `end` with the kill bound, the exit awaited) and relaunches; the fake host then serves a CLI that answers
+    (heal_on_end), standing in for the fresh one. Both ways the host can say it: the hello's `ending`, and, for a host older
+    than that field, the initialize answered with `write-failed`. The SDK's initialize timeout is left at its 60 s, so a
+    finish within a few seconds proves nothing waited it out. The host lease names this test process and is beaten."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(self._sweep)
+        Path(self.d, "session-hosts").write_text("on")
+        for sub in ("sdk", "states", "names", "hosts"):
+            os.makedirs(os.path.join(self.d, sub), exist_ok=True)
+        self.sid = str(__import__("uuid").uuid4())
+        cwd = os.path.join(self.d, "proj"); os.makedirs(cwd)
+        sb.write_reg(Path(self.d), self.sid, {"sid": self.sid, "name": "web", "cwd": cwd, "alive": True, "mode": "bypassPermissions",
+                                              "effort": "high", "lastSid": self.sid})
+        me, start = os.getpid(), sb.proc_start(os.getpid())
+        self._beating = True
+        def beat():
+            while self._beating:      # loop-ok: the lease heartbeat, ended by the test's cleanup
+                sb.write_lease(self.d, {"sid": self.sid, "fsid": self.sid, "pid": me, "start": start,
+                                        "holder": {"pid": me, "start": start, "kind": "host"}, "version": "t315", "t": time.time()})
+                time.sleep(1.0)
+        import threading
+        threading.Thread(target=beat, daemon=True).start()
+        self.logs = []
+        self.be = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None, log=self.logs.append, code_version="t315")
+        self.loop = asyncio.new_event_loop()
+        self.host = None
+
+    def _serve(self, **kw):
+        import threading
+        self.host = FakeHost(str(ht.host_sock(self.d, self.sid)), [], **kw)
+        started = threading.Event()
+        def run_loop():
+            asyncio.set_event_loop(self.loop)
+            self.loop.run_until_complete(self.host.start()); started.set()
+            self.loop.run_forever()
+        threading.Thread(target=run_loop, daemon=True).start()
+        self.assertTrue(started.wait(5))
+
+    def _sweep(self):
+        self._beating = False
+        try:
+            self.be.drain(timeout=3)
+        except Exception:
+            pass
+        if self.host:
+            self.loop.call_soon_threadsafe(self.host.close)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        sb.remove_lease(self.d, self.sid)
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _kinds(self):
+        p = Path(self.d) / sb.SESSION_EVENTS_FILE
+        return [json.loads(l)["kind"] for l in p.read_text().splitlines()] if p.exists() else []
+
+    def _connected(self):
+        s = self.be.sessions.get(self.sid)
+        return s is not None and s.client is not None
+
+    def _relaunch_through_the_end(self):
+        t0 = time.time()
+        self.assertTrue(self.be.connect(self.sid))
+        deadline = t0 + 15
+        while time.time() < deadline and not self._connected():   # loop-ok: a bounded wait on the connected client
+            time.sleep(0.05)
+        took = time.time() - t0
+        self.assertTrue(self._connected(), "connected after the relaunch; log tail: %s" % "\n".join(self.logs[-15:]))
+        self.assertLess(took, 10, "no 60 s initialize timeout waited out")
+        self.assertEqual(self.host.signals, ["TERM"], "the ending CLI was ended with SIGTERM")
+        self.assertEqual([f.get("grace") for f in self.host.got if f.get("t") == "end"], [sh.END_GRACE_KILL_S],
+                         "one `end`, with the kill bound (the host pulls the earlier end's deadline in)")
+        kinds = self._kinds()
+        for bad in ("crash.heal", "crash.loop", "host.reexec-refused", "host.attach-failed", "host.died"):
+            self.assertNotIn(bad, kinds, "no %s row: %r" % (bad, kinds))
+        text = "\n".join(self.logs)
+        self.assertNotIn("attach did not complete", text, "never the attach retry")
+        self.assertNotIn("failed to start", text, "never a launch error")
+        self.assertNotIn("launchError", sb.read_reg(Path(self.d), self.sid) or {})
+        self.assertIn("host (web): the session host's CLI can take no input: an earlier end (a previous kernel's reconnect) "
+                      "already closed its stdin; ending it now and relaunching the session on a fresh CLI", text)
+        self.assertIn("host (web): the CLI exited (end, code 0); relaunching the session", text)
+        planned = [p["text"] for p in self.be._problems if "can take no input" in p["text"] or "relaunching the session" in p["text"]]
+        self.assertEqual(planned, [], "the road's own lines are not problems for the error center")
+        return kinds
+
+    def test_a_hello_saying_ending_is_ended_and_relaunched_without_an_initialize(self):
+        self._serve(ending=True, in_fault="input-closed", heal_on_end=True)   # as a real ending host answers any line
+        self._relaunch_through_the_end()
+        firsts = [f["t"] for f in self.host.got][:4]
+        self.assertEqual(firsts, ["attach", "detach", "attach", "signal"],
+                         "the refused attach wrote nothing to the CLI: detached at once, then the end's own connection")
+        inits = [f for f in self.host.got if f.get("t") == "in"]
+        self.assertTrue(inits, "the relaunched connection initialized")
+        self.assertGreater(self.host.got.index(inits[0]), self.host.got.index({"t": "signal", "sig": "TERM"}),
+                           "no initialize before the end: only the relaunch's")
+
+    def test_a_host_older_than_the_ending_field_answering_write_failed_is_ended_and_relaunched(self):
+        # the protocol-1 hosts running when this ships: no `ending` in the hello, and the initialize's write fails at the
+        # closed stdin with write-failed. Read as a closed stdin while the initialize is unanswered
+        self._serve(in_fault="write-failed", heal_on_end=True)
+        self._relaunch_through_the_end()
 
 
 if __name__ == "__main__":

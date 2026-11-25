@@ -358,6 +358,90 @@ class AdoptedCli(unittest.TestCase):
         self.assertEqual((a.returncode, getattr(a, "exited", None)), (None, True),
                          "gone with the exit unknown: returncode None (the exit frame's word for unknown), never 0")
 
+    def test_an_adopted_clis_descriptors_are_found_for_the_next_re_exec_until_its_stdin_closes(self):
+        """2026-11-25: cli_pipe_fds read only a subprocess transport, which an adopted CLI has none of, so a host that had
+        re-executed once could never hand its CLI over again. The adopted transport keeps its three pipe transports; the
+        descriptors are found through them, and a closed stdin (an `end`) is still no descriptors."""
+        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        def stop():
+            child.kill(); child.wait(timeout=10)
+        self.addCleanup(stop)
+        # the adoption takes ownership of the descriptors it is handed (os.fdopen): give it duplicates
+        fds = {"stdin": os.dup(child.stdin.fileno()), "stdout": os.dup(child.stdout.fileno()), "stderr": os.dup(child.stderr.fileno())}
+        t = sh.AdoptedCliTransport({"max_buffer_size": 65536}, lambda line: None, {"cli_pid": child.pid, "fds": fds})
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(t.connect())
+            self.assertEqual(sh.cli_pipe_fds(t), fds, "the adopted CLI's three descriptors, as the handoff named them")
+            loop.run_until_complete(t.end_input())
+            loop.run_until_complete(asyncio.sleep(0.05))             # the pipe transport closes its file on the next pass
+            self.assertIsNone(sh.cli_pipe_fds(t), "a closed stdin: no descriptors to hand over")
+            for pt in t._pipe_transports.values():
+                pt.close()
+            loop.run_until_complete(asyncio.sleep(0.05))
+        finally:
+            if t._stderr_task is not None:
+                t._stderr_task.cancel()
+                try:
+                    loop.run_until_complete(t._stderr_task)
+                except BaseException:
+                    pass
+            loop.close()
+
+
+class AnEndingHostTakesNoInput(unittest.TestCase):
+    """2026-11-25: a line from the kernel while the host ends its CLI (an `end` has closed the CLI's stdin) is refused with
+    an `input-closed` fault BEFORE any bookkeeping. It used to be counted (a user line opened a turn that could never close,
+    a hook answer marked its request answered) and then queued behind the end sentinel, to fail at the closed stdin with a
+    `write-failed` fault. In-process host on a private state root, the kernel's writer a stand-in."""
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state, True)
+
+    def _host(self):
+        d = Path(self.state) / "hosts" / SID
+        d.mkdir(parents=True, mode=0o700)
+        p = d / "spawn.json"
+        p.write_text(json.dumps({"sid": SID, "name": "web", "version": "abc12345", "state_dir": self.state, "protocol": 1,
+                                 "cli_path": FAKE, "cwd": self.state, "max_buffer_size": 65536}))
+        h = sh.SessionHost(str(p), lease_api={"write_lease": lambda *a, **k: None, "remove_lease": lambda *a, **k: None,
+                                              "proc_start": lambda pid: "1"})
+        self.addCleanup(h.journal.close)
+        h._stdin_q = asyncio.Queue()
+        h.attached = _Writer()
+        return h
+
+    def test_a_line_fed_to_an_ending_host_is_refused_before_any_bookkeeping(self):
+        h = self._host()
+        user = json.dumps({"type": "user", "message": {"role": "user", "content": "a synthetic question"}})
+        answer = json.dumps({"type": "control_response", "response": {"subtype": "success", "request_id": "req_9_aaaa", "response": {}}})
+        h._queue_in(user)                                              # not ending: counted and queued, as before
+        self.assertEqual((h.inflight, h.main_turns, h._stdin_q.qsize()), (1, 1, 1))
+        h.ending = (h.now() + 60, "end")
+        h._queue_in(user)
+        h._queue_in(answer)
+        self.assertEqual((h.inflight, h.main_turns), (1, 1), "the refused user line opened no turn")
+        self.assertNotIn("req_9_aaaa", h.parked.answered, "the refused answer marked nothing answered")
+        self.assertEqual(h._stdin_q.qsize(), 1, "nothing queued behind the closed stdin")
+        self.assertEqual([(f["t"], f["kind"], f["text"]) for f in h.attached.frames],
+                         [("fault", "input-closed", "the CLI is ending; its stdin is closed")] * 2)
+        rows = [json.loads(l) for l in (Path(self.state) / "hosts" / SID / "host.log").read_text().splitlines()]
+        self.assertEqual([(r["kind"], r.get("line")) for r in rows if r["kind"] == "input-closed"],
+                         [("input-closed", "user"), ("input-closed", "control_response")])
+        self.assertNotIn("a synthetic question", json.dumps(rows), "the kind of the line, never its text")
+
+    def test_a_re_exec_asked_of_an_ending_host_is_refused_as_ending_before_the_descriptor_read(self):
+        h = self._host()
+        h.transport = types.SimpleNamespace()                          # no descriptors to find: the old refusal's road
+        h.cli_pid = 4242
+        frame = {"python": sys.executable, "launcher": os.path.join(BIN, "romp-session-host")}
+        self.assertEqual(h._reexec_check(frame), (None, "the CLI's descriptors could not be confirmed"),
+                         "not ending: the descriptor read decides, as before")
+        h.ending = (h.now() + 60, "end")
+        self.assertEqual(h._reexec_check(frame), (None, "the CLI is ending"))
+
 
 class _Writer:
     """The kernel connection's writer as _on_client uses it: frames written, a drain, a close."""
@@ -879,6 +963,116 @@ class HostProcess(unittest.TestCase):
         self.assertEqual(self._lease().get("version"), "abc12345", "the old host, the old version, still serving")
         self.assertEqual([r["kind"] for r in self._hostlog() if r["kind"].startswith("reexec")], ["reexec-refused"])
         k.close()
+
+    def _logged(self, kind, timeout=10):
+        """The first host.log row of `kind`, waited for (the event the host writes), failing at the deadline."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:                                   # loop-ok: the event is the host's own log row
+            rows = [r for r in self._hostlog() if r["kind"] == kind]
+            if rows:
+                return rows[0]
+            time.sleep(0.05)
+        self.fail("no %r row in host.log within %ss: %r" % (kind, timeout, [r["kind"] for r in self._hostlog()]))
+
+    def test_a_host_ending_its_cli_refuses_a_re_exec_as_ending_says_so_in_the_hello_and_closes_input(self):
+        """The 2026-11-25 restart incident, synthetic: an earlier kernel's reconnect sent `end`, which closed the CLI's stdin,
+        and the CLI lived on (a background task kept the real one alive past the EOF; a long turn stands in for it here).
+        That kernel left mid-close. The next kernel's re-exec request was refused as "the CLI's descriptors could not be
+        confirmed" (the closed stdin pipe's fileno() raised), the hello said nothing of the end, so the kernel attached as
+        is, and its initialize failed with write-failed after a 60 s timeout, twice. Now the refusal names the ending, the
+        host lives on, the hello says `ending`, and a line fed to it is refused with `input-closed` before any bookkeeping:
+        a user line opens no turn."""
+        host, sock, spec = self._start()
+        k, _ = self._attach(sock, pid=1111)
+        k.send({"t": "in", "data": self._user("long sleep=20")})
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "assistant", timeout=15)
+        k.send({"t": "end", "grace": 60})                               # the earlier kernel's reconnect teardown
+        self._logged("end-requested")
+        k.close()                                                       # that kernel leaves mid-close: no detach
+        self._logged("kernel-lost")
+        k2 = KernelSide(sock)                                           # the next kernel's re-exec request (its own connection)
+        ans = self._reexec(k2)
+        k2.close()
+        self.assertEqual((ans.get("ok"), ans.get("reason")), (False, "the CLI is ending"),
+                         "refused as ending, never as descriptors it could not confirm: %r" % ans)
+        self.assertEqual(sh.REEXEC_REFUSED_ENDING, "the CLI is ending", "the constant the kernel matches")
+        self.assertIsNone(host.poll(), "the host lives on, ending its CLI")
+        self.assertEqual([r.get("reason") for r in self._hostlog() if r["kind"] == "reexec-refused"], ["the CLI is ending"])
+        k3, hello = self._attach(sock, pid=2222)
+        self.assertIs(hello.get("ending"), True, "the hello says the CLI is being ended: %r" % hello)
+        self.assertIs(hello.get("exited"), False)
+        self.assertEqual(hello["inflight"], 1, "the long turn still runs")
+        k3.send({"t": "in", "data": self._user("one more sleep=0")})
+        fault = k3.recv_until(lambda f: f.get("t") == "fault", timeout=10)
+        self.assertEqual((fault["kind"], fault["text"]), ("input-closed", "the CLI is ending; its stdin is closed"),
+                         "refused, not queued behind the closed stdin")
+        self.assertEqual([r.get("line") for r in self._hostlog() if r["kind"] == "input-closed"], ["user"], "the line's kind, never its text")
+        self.assertNotIn("write-failed", [r["kind"] for r in self._hostlog()])
+        k3.send({"t": "detach"})
+        k4, hello4 = self._attach(sock, pid=3333)
+        self.assertEqual(hello4["inflight"], 1, "the refused user line opened no turn (it read 2 before the fix)")
+        self.assertNotIn("one more", open(self.fake_log).read(), "nothing reached the CLI")
+        k4.close()
+
+    def test_a_host_re_execs_twice(self):
+        """An adopted CLI's descriptors are found for the next re-exec (2026-11-25): AdoptedCliTransport kept no subprocess
+        transport, so cli_pipe_fds found nothing and every host that had re-executed once refused every later re-exec with
+        "the CLI's descriptors could not be confirmed". The transport now keeps its three pipe transports: a second re-exec
+        runs on the same host pid and the same CLI, and a turn round-trips after each."""
+        host, sock, spec = self._start()
+        spec_path = Path(self.state) / "hosts" / SID / "spawn.json"
+        cli_pid = self._lease()["pid"]
+
+        def bump(version):                                              # what the kernel rewrites before it asks
+            spec_path.write_text(json.dumps(dict(json.loads(spec_path.read_text()), version=version)))
+        k, _ = self._attach(sock)
+        bump("def67890")
+        ans1 = self._reexec(k, version="def67890")
+        self.assertEqual((ans1.get("ok"), ans1.get("when")), (True, "now"), "the first re-exec: %r" % ans1)
+        k.close()
+        self._lease_version_becomes("def67890")
+        k2, hello2 = self._attach(sock, pid=4343)
+        self.assertEqual(hello2["host"]["version"], "def67890")
+        k2.send({"t": "in", "data": self._user("after one sleep=0")})
+        k2.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        bump("0123abcd")
+        ans2 = self._reexec(k2, version="0123abcd")
+        self.assertEqual((ans2.get("ok"), ans2.get("when")), (True, "now"),
+                         "the adopted host re-execs again (it refused with the descriptors reason before the fix): %r" % ans2)
+        k2.close()
+        lease = self._lease_version_becomes("0123abcd")
+        self.assertEqual((lease["pid"], lease["holder"]["pid"]), (cli_pid, host.pid), "the same CLI, the same host pid, twice over")
+        k3, hello3 = self._attach(sock, pid=4444)
+        self.assertEqual((hello3["host"]["version"], hello3["cli"]["pid"]), ("0123abcd", cli_pid))
+        k3.send({"t": "in", "data": self._user("after two sleep=0")})
+        res = k3.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        self.assertEqual(res["data"]["type"], "result")
+        self.assertEqual([r["kind"] for r in self._hostlog() if r["kind"] in ("reexec", "reexeced", "reexec-refused")],
+                         ["reexec", "reexeced", "reexec", "reexeced"])
+        k3.close()
+
+    def test_a_re_exec_deferred_to_the_turns_end_is_dropped_when_the_cli_is_ended_meanwhile(self):
+        """A re-exec deferred to a turn's end, and an `end` before that end (2026-11-25): the handover would read the closed
+        stdin's descriptors and fail, and its `reexec-failed` fault made the kernel file a host.reexec-failed row for a CLI
+        that was simply ending. It is dropped, logged, and the CLI ends as asked."""
+        host, sock, spec = self._start()
+        k, _ = self._attach(sock)
+        spec_path = Path(self.state) / "hosts" / SID / "spawn.json"
+        spec_path.write_text(json.dumps(dict(json.loads(spec_path.read_text()), version="def67890")))
+        k.send({"t": "in", "data": self._user("slow sleep=1.5")})
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "assistant", timeout=15)
+        ans = self._reexec(k)
+        self.assertEqual((ans.get("ok"), ans.get("when")), (True, "at-turn-end"))
+        k.send({"t": "end", "grace": 30})
+        ex = k.recv_until(lambda f: f.get("t") == "exit", timeout=20)
+        self.assertEqual(ex["cause"], "end")
+        self.assertEqual(self._logged("reexec-dropped").get("reason"), "the CLI is ending")
+        kinds = [r["kind"] for r in self._hostlog()]
+        self.assertNotIn("reexec-failed", kinds)
+        self.assertNotIn("reexec", kinds)
+        self.assertEqual([f for f in k.frames if f.get("t") == "fault"], [], "no fault: nothing failed, the CLI was ending")
+        k.close()
+
     def test_a_turn_that_folded_a_queued_message_leaves_no_open_turn_for_the_next_attach(self):
         """The stuck-Working shape (2026-09-18): the host counted every user line fed and took one off per result, so a
         turn that folded a second message (the real CLI answers messages typed while it works with the running turn's
@@ -1362,6 +1556,37 @@ class HostProcess(unittest.TestCase):
         again = k2.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "control_request")
         self.assertEqual(again["data"]["request_id"], req["data"]["request_id"], "re-sent from the table although its journal write failed")
         k2.close()
+
+    def test_a_switch_teardown_ends_a_cli_its_end_left_running_with_sigterm_through_the_real_host(self):
+        # 2026-11-25, the kernel's half (HostTransport.term_after_result) against this host, not the protocol stand-in: a
+        # switch's teardown sends `end` with the 1200 s grace; the CLI runs one more turn, starts background work and does
+        # not exit. The host must forward the kernel's `signal TERM` while ending, and the `end` with the kill bound that
+        # follows must pull its deadline in; the CLI's own SIGTERM shutdown (143) then ends the wait, not the grace's SIGKILL
+        host, sock, spec = self._start(env_extra={"FAKE_CLI_EOF_TURN": "1"})
+        ht = sb._ht()
+
+        async def go():
+            t = ht.HostTransport(sock, kernel={"pid": 4242, "start": "1", "version": "abc12345"}, ack=-1, end_grace=1200.0)
+            t.term_after_result = 0.5
+            said = []
+            t.on_post_end_term = said.append
+            await t.connect()
+            first = asyncio.ensure_future(t.read_messages().__anext__())
+            await t.write(json.dumps({"type": "control_request", "request_id": "req_1_x", "request": {"subtype": "initialize"}}))
+            await asyncio.wait_for(first, 10)           # the initialize answered: close() takes the `end` road
+            t0 = time.time()
+            await asyncio.wait_for(t.close(), 30)
+            return time.time() - t0, t.exit_info, said
+
+        took, exit_info, said = asyncio.run(go())
+        self.assertLess(took, 15.0, "ended within the bound, never the 1200 s grace")
+        self.assertEqual(((exit_info or {}).get("code"), (exit_info or {}).get("cause")), (143, "end"),
+                         "the CLI's own SIGTERM shutdown, not the forced end's SIGKILL")
+        self.assertEqual(said, [None])
+        rows = [(r["kind"], r.get("graceS"), r.get("sig")) for r in self._hostlog()
+                if r["kind"] in ("end-requested", "signalled", "end-grace-shortened", "end-forced")]
+        self.assertEqual(rows, [("end-requested", 1200.0, None), ("signalled", None, "TERM"),
+                                ("end-grace-shortened", sh.END_GRACE_KILL_S, None)], rows)
 
     @unittest.skipUnless(SDK_SITE, "the SDK venv is not on this machine; the pipe transport covered the host")
     def test_the_sdk_transport_drives_the_fake_cli_the_same_way(self):

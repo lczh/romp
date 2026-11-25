@@ -1970,12 +1970,18 @@ fast mode or a login that landed on another credential. The subagents and
 monitors inside that CLI would end with it, so the relaunch waits until the
 session is quiet: no turn running or queued, no subagent, no background task and
 no question waiting on you. It happens at the event that ends the last of that
-work, never on a timer. Meanwhile four of these settings show that they are
-waiting: the Billing sub-line says what the relaunch waits for; the effort badge
-shows switching-dots and the chat line says what it waits for; for bypass mode,
-the mode badge shows switching-dots and the dropdown's Bypass row and the tab's
-hover say what it waits for; and the fast badge shows switching-dots for the
-opt-in. The per-session environment and the two corrections show no mark.
+work, never on a timer. A finished background task still counts until the turn
+Claude Code opens to report it has ended, since that turn can start new work; if
+no such turn starts within 20 seconds, the kernel's periodic check lets the
+relaunch go. During the relaunch, an old CLI still running a few seconds after
+its last turn ended (background work keeps it alive) is ended the way a Restart
+ends it, not left for the twenty-minute grace. Meanwhile four of these settings
+show that they are waiting: the Billing sub-line says what the relaunch waits
+for; the effort badge shows switching-dots and the chat line says what it waits
+for; for bypass mode, the mode badge shows switching-dots and the dropdown's
+Bypass row and the tab's hover say what it waits for; and the fast badge shows
+switching-dots for the opt-in. The per-session environment and the two
+corrections show no mark.
 A relaunch is a CLI launch, so it waits as well for one of the machine-wide
 launch slots a boot's resumes and the other spawns share (three unless
 `ROMP_BOOT_RESUME_CONCURRENCY` says otherwise): a change of the machine default
@@ -2741,7 +2747,17 @@ its version). The host answers at once: `ok` with `when` `now` when its CLI is
 idle, `at-turn-end` when a turn is open (the exec waits for that turn's
 `result`, the event, never a timer), or `ok` false with a reason when it cannot
 hand its descriptors over, in which case the kernel attaches to the old host as
-before and files a `host.reexec-refused` row. To re-exec, the host holds its
+before and files a `host.reexec-refused` row. One refusal is not a fault: `the
+CLI is ending`, from a host whose CLI an earlier `end` has already cut off from
+its stdin (a previous kernel's reconnect, for instance). Its hello says so
+(`ending`), and input sent to it is answered with an `input-closed` fault, not
+taken. The kernel files no row for it. It reads the lease again, and if the
+host still lives, the connect finishes that end itself: `signal TERM`, then
+`end` with the short kill bound, then the exit frame. It relaunches the session
+on a fresh CLI, never the crash road (2026-11-25: an attach to such a host used
+to fail every write and file the session as crashed). A host that has
+re-executed once can re-execute again: the adopted transport keeps the pipe
+handles the descriptor check reads. To re-exec, the host holds its
 stdout reader (no further record is taken off the CLI; bytes not yet read stay
 in the pipe, which survives the exec), drains its stdin pump and its journal
 writer, drains the attached kernel's socket backlog to the last byte (five

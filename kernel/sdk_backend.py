@@ -6144,12 +6144,25 @@ def fast_capable(model, state_dir=None) -> bool:
 
 RETRY_UPGRADE_S = 600.0   # ten minutes between attempts to get a fallen-back session onto its picked model again: the
 SWITCH_END_GRACE_S = 1200.0   # the host's end grace for a Model switch's reconnect: a CLI that opened a turn of its own in the instant
-#   between the quiet read and the host's `end` FINISHES it (stdin is closed; it exits at the turn's end) instead of dying at the
-#   default 120 s — three sessions were force-killed mid-turn that way on 2026-09-17 (the manager's default is for a user's own switch)
+#   between the quiet read and the host's `end` FINISHES it instead of dying at the default 120 s — three sessions were force-killed
+#   mid-turn that way on 2026-09-17 (the manager's default is for a user's own switch). A CLI with stdin closed does NOT exit at the
+#   turn's end while background work runs (2026-11-25: a notification turn started a new watcher and the CLI lived until the host's
+#   SIGKILL at exactly this grace, twice in one day), so the teardown also ends it with SIGTERM SWITCH_POST_RESULT_TERM_S after that
+#   turn's result (HostTransport.term_after_result, set by _switch_teardown_check)
 
 #   fallback's cause is outside romp's view (the user 2026-09-17: a trigger in the task's context, which ages out of
 #   the window), so a fixed cadence is the designed read, the same exception the kernel's usage poll documents; each
 #   attempt itself waits for a turn boundary (request_reconnect), never cutting a turn.
+SWITCH_POST_RESULT_TERM_S = 5.0   # after a switch teardown's `end`, a CLI still alive this long after a turn's result is waiting on
+#   background work, which the relaunch cuts anyway: it is ended with SIGTERM (relaunch_now's road, the CLI's own clean shutdown,
+#   code 143) instead of waiting out SWITCH_END_GRACE_S. Five seconds is the SDK transport's own EOF-to-SIGTERM wait.
+NOTICE_TURN_WAIT_S = 20.0   # how long a "notification turn owed" mark (SdkSession._notice_marks) waits for the turn the CLI opens
+#   for a finished background task. The CLI dequeues the notification at once and the turn's first frame is its init, written
+#   before any API call (the host journals show the task's end frames, then the init); so 20 s with no turn open, no result
+#   and no work atom means no turn is coming for it (the CLI folded the notification into a turn already running, or
+#   opened none). The exact event (a turn that opened after the mark reaching its result) lowers a mark; this bound is
+#   only the fallback, read by quiet(), which the kernel's 30 s tick asks through want_switch_reconnect. Too short
+#   would let a switch's teardown race the notification turn again; too long only delays a relaunch.
 
 THINKING_SUMMARIES_KW = {"type": "adaptive", "display": "summarized"}   # the SDK's typed ThinkingConfigAdaptive
 
@@ -7114,8 +7127,23 @@ class SdkSession:
         self._bg_foreground: set[str] = set()        # live task ids registered in the FOREGROUND (task_started
         #   is_backgrounded false: a synchronous agent its spawning call blocks on) and not backgrounded since: the
         #   background level never lists them, so _on_bg_level leaves them to their bookends
+        self._bg_sub_owned: set[str] = set()         # live task ids a SUBAGENT owns (task_started owned_by_subagent true):
+        #   their notification goes to that subagent and opens no main-thread turn, so their end raises no mark below
+        self._notice_marks: dict[str, float] = {}    # "notification turn owed" marks (2026-11-25): task id -> the
+        #   time.monotonic() of its end. A background task's end is exactly when the CLI opens a turn of its own to hand
+        #   the model the notification, and that turn reads as nothing for the first moments (inflight rises at its init,
+        #   _cli_working at its first work atom), so a standing relaunch ask carried at the end raced it: the teardown's
+        #   `end` closed the CLI's stdin while the turn started a new watcher, and the CLI lived until the host's SIGKILL
+        #   20 minutes later (twice on one day). quiet() is False while a mark is up; the result of a turn that OPENED
+        #   after the mark (_turn_open_mono) lowers it, and NOTICE_TURN_WAIT_S of nothing lowers it as the fallback
+        #   (_notice_owed). Cleared with the live work at a teardown (_drop_live_work).
+        self._turn_open_mono = 0.0                   # time.monotonic() of the open of the turn in flight or last settled:
+        #   the feeder's pop from idle, or a turn frame the CLI streamed with nothing in flight (0.0: unknown, a turn first
+        #   seen at its result); the settle lowers only the marks raised before it (_lower_notice_marks)
+        self._notice_activity = 0.0                  # time.monotonic() of the last result settle or streamed work atom:
+        #   the fallback's NOTICE_TURN_WAIT_S counts from the later of this and the mark
         self._sub_lock = threading.Lock()            #   hooks mutate on the loop thread; snapshot() reads from the kernel thread
-        #                                                (guards _subagents AND _bg_tasks)
+        #                                                (guards _subagents AND _bg_tasks, and the notice marks above)
         self._thinking = None                        # the thinking stretch streaming RIGHT NOW: {"t": its first
         #   system/thinking_tokens frame, "last": its latest}, or None. Set by the first frame (_on_thinking_frame),
         #   ended by the next assistant message, the result, an api_retry, an interrupt or the CLI going away
@@ -8306,6 +8334,9 @@ class SdkSession:
         # terminates and then kills the process, so a CLI that has already drained the text into a turn
         # finishes that turn when it fits in the grace, and the text's record then exists in a transcript no
         # frame reported; a turn that does not fit is cut with the process. Do not design against a kill here.
+        # (Under a session host the grace is the host's end grace and it ends in SIGKILL with no SIGTERM rung; and a
+        # CLI with background work running does not exit at a turn's end once its stdin is closed, 2026-11-25: a switch
+        # teardown bounds that wait itself, _switch_teardown_check.)
         # The hold's release (the drained turn's first frame, _on_message) counts that turn, so the deferred
         # arm fires at its result.
         quiet = self.inflight == 0 and self._untaken is None
@@ -8315,6 +8346,7 @@ class SdkSession:
                     busy_work = bool(self._subagents or self._bg_tasks)   # that registered since the caller looked
                 busy_work = busy_work or bool(getattr(self, "_cli_working", False))   # …or a turn the CLI opened itself
                 busy_work = busy_work or bool(getattr(self, "_cwd_request_open", False))   # …or a move's set_cwd sent since (quiet())
+                busy_work = busy_work or self._notice_owed()   # …or a finished task's notification turn still to open (quiet())
                 if busy_work:
                     self.backend._log("reconnect (%s): live work registered before the reconnect ran; not "
                                       "reconnected, ask again when it is quiet" % self.name)
@@ -9217,15 +9249,70 @@ class SdkSession:
         queue held a billing pick back from that window until picks stopped being parked, so the relaunch's own gate
         says it now (_cwd_request_open, raised and lowered around the request by move(), whose end carries a standing
         ask: _end_cwd_request). Not the move's settle arm, which a lost turn-less result leaves standing and which a
-        reconnect is one of the events that lower: gated on it, the two would wait on each other."""
+        reconnect is one of the events that lower: gated on it, the two would wait on each other. A background task that
+        just ENDED is work too (2026-11-25): the CLI owes the model a turn for its notification and opens it in the same
+        instant, before any frame says so, so a "notification turn owed" mark holds quiet() False until that turn's
+        result (_notice_marks, _notice_owed)."""
         if getattr(self, "inflight", 0) or getattr(self, "_pending", None) or getattr(self, "_cli_working", False):
             return False
         if getattr(self, "_cwd_request_open", False):
             return False
         if self._ask_parked():
             return False   # a permission or picker ask waiting on the user: the turn is alive, only paused (audit 2026-09-17)
+        if self._notice_owed():
+            return False   # a finished background task's notification turn is still to come
         a, b = self.live_work()
         return not (a or b)
+
+    def _notice_live(self, now: float) -> list:
+        """The task ids whose "notification turn owed" mark still stands at `now` (time.monotonic()). Pure, so the
+        snapshot's words (relaunch_waits) can read it from any thread; the caller holds _sub_lock. While a turn is open a
+        mark stands (its result decides, _lower_notice_marks); otherwise a mark stands until NOTICE_TURN_WAIT_S have
+        passed since the later of its own stamp and the last result or work atom (_notice_activity), the fallback for a
+        notification the CLI folded into a turn already running, or answered with no turn at all."""
+        marks = getattr(self, "_notice_marks", None)
+        if not marks:
+            return []
+        if getattr(self, "inflight", 0) or getattr(self, "_cli_working", False):
+            return list(marks)
+        act = float(getattr(self, "_notice_activity", 0.0) or 0.0)
+        return [tid for tid, t in marks.items() if now - max(t, act) < NOTICE_TURN_WAIT_S]
+
+    def _notice_owed(self) -> bool:
+        """Is a finished background task's notification turn still owed (a mark up, _notice_marks)? Marks the fallback
+        has run out (_notice_live) are lowered here, and said once in the log, so the relaunch carried without the turn
+        says why. Any thread: quiet() is read on the loop and by the kernel's tick, which asks this through
+        want_switch_reconnect every 30 s. Never call it with _sub_lock held (it takes the lock)."""
+        lock = getattr(self, "_sub_lock", None)
+        if lock is None or not getattr(self, "_notice_marks", None):
+            return False
+        with lock:
+            live = self._notice_live(time.monotonic())
+            gone = [tid for tid in self._notice_marks if tid not in live]
+            for tid in gone:
+                del self._notice_marks[tid]
+        if gone:
+            self.backend._log("background tasks (%s): no turn came for %d finished background task%s within %.0f s; a "
+                              "relaunch no longer waits for one" % (self.name, len(gone), "" if len(gone) == 1 else "s",
+                                                                    NOTICE_TURN_WAIT_S))
+        return bool(live)
+
+    def _lower_notice_marks(self) -> None:
+        """At a turn's result (the settle, before it carries a standing ask): the turn that just ended handed the model
+        every notification queued before it opened, so the marks raised before its open (_turn_open_mono) are lowered. A
+        mark raised while the turn ran stands: that notification may be queued for the turn the CLI opens next, and the
+        result of a turn already running when a task ended carried a relaunch into that turn's open before (2026-11-25).
+        Stamps the activity the fallback counts from (_notice_activity)."""
+        lock = getattr(self, "_sub_lock", None)
+        if lock is None:
+            return
+        opened = float(getattr(self, "_turn_open_mono", 0.0) or 0.0)
+        with lock:
+            self._notice_activity = time.monotonic()
+            marks = getattr(self, "_notice_marks", None)
+            if marks and opened:
+                for tid in [tid for tid, t in marks.items() if t < opened]:
+                    del marks[tid]
 
     def _ask_parked(self) -> bool:
         """A permission prompt or a picker question is standing for this session: _mark_producing's own gate. A turn parked on
@@ -9877,6 +9964,12 @@ class SdkSession:
         elif not cut and getattr(self, "_pending", None):
             n = len(self._pending)
             parts.append("%d queued message%s" % (n, "" if n == 1 else "s"))
+        if not cut and not parts:
+            # a finished background task's notification turn, still to open (2026-11-25, _notice_marks): the relaunch
+            # waits for it, so the pick does not read as held by nothing; Apply now ends nothing that has started
+            n = self._notice_count()
+            if n:
+                parts.append("the turn for %d finished background task%s" % (n, "" if n == 1 else "s"))
         if self._ask_parked():
             parts.append("its question to you" if cut else "your answer to its question")
         lock = getattr(self, "_sub_lock", None)
@@ -9892,7 +9985,10 @@ class SdkSession:
             return ", ".join(parts[:-1]) + " and " + parts[-1]
         return parts[0] if parts else ""
 
-    def _busy_words(self) -> str:
+    def _busy_words(self, running: bool = False) -> str:
+        """What holds a relaunch, in words. `running`: the words end in "running" (the waiting line's), said after the
+        work that runs and never after a turn owed for a finished task, which has not started (review 2026-11-25: the
+        line read "a turn owed for 1 finished background task running"), so that turn is said last."""
         parts = []
         if getattr(self, "inflight", 0):
             parts.append("a turn in flight")
@@ -9907,7 +10003,22 @@ class SdkSession:
             parts.append("%d subagent%s" % (a, "" if a == 1 else "s"))
         if b:
             parts.append("%d background task%s" % (b, "" if b == 1 else "s"))
-        return ", ".join(parts) or "live work"
+        words = ", ".join(parts)
+        if running and words:
+            words += " running"
+        n = 0 if getattr(self, "inflight", 0) or getattr(self, "_cli_working", False) else self._notice_count()
+        if n:   # (a turn in flight is the turn owed, or the one ahead of it: said as the turn)
+            owed = "a turn owed for %d finished background task%s" % (n, "" if n == 1 else "s")
+            words = words + ", " + owed if words else owed
+        return words or ("live work running" if running else "live work")
+
+    def _notice_count(self) -> int:
+        """How many "notification turn owed" marks stand now (_notice_live): read only, for the words."""
+        lock = getattr(self, "_sub_lock", None)
+        if lock is None or not getattr(self, "_notice_marks", None):
+            return 0
+        with lock:
+            return len(self._notice_live(time.monotonic()))
 
     def want_switch_reconnect(self, why: str) -> None:
         """Something wants this session relaunched so the connect can carry what it decided: a Model switch (Always fast:
@@ -9961,8 +10072,8 @@ class SdkSession:
                 if say:
                     self._switch_wait_said = why
             if say:
-                self.backend._log("%s (%s): waiting for the session to go quiet before the reconnect — %s running; "
-                                  "nothing is cut" % (why, self.name, self._busy_words()))
+                self.backend._log("%s (%s): waiting for the session to go quiet before the reconnect — %s; "
+                                  "nothing is cut" % (why, self.name, self._busy_words(running=True)))
             return False
         # A relaunch is a CLI launch, so it draws on the machine-wide launch budget every spawn draws on (2026-10-07: one
         # change of the machine default made every follower's ask at once, and the 30 s tick carries every standing ask
@@ -10045,6 +10156,11 @@ class SdkSession:
             if host is not None:
                 try:
                     host.end_grace = max(float(getattr(host, "end_grace", 0) or 0), SWITCH_END_GRACE_S)
+                    # …and bounded (2026-11-25): a CLI still alive SWITCH_POST_RESULT_TERM_S after a turn's result past
+                    # the `end` is held by background work that turn started (stdin closed, it does not exit), which
+                    # the relaunch cuts anyway; it is ended with SIGTERM then, relaunch_now's road, not at 1200 s
+                    host.term_after_result = SWITCH_POST_RESULT_TERM_S
+                    host.on_post_end_term = lambda err, why=why: self._said_post_end_term(why, err)
                 except Exception as e:
                     self.backend._log("%s (%s): could not lengthen the host's end grace: %s" % (why, self.name, e))
             return False
@@ -10070,6 +10186,20 @@ class SdkSession:
         self.backend._log("%s (%s): the CLI started work between the ask and the reconnect — %s; the reconnect stands "
                           "down and the ask waits for the next quiet moment; nothing is cut" % (why, self.name, self._busy_words()))
         return True
+
+    def _said_post_end_term(self, why: str, err) -> None:
+        """The host transport's report from a switch teardown's wait (HostTransport.term_after_result): the CLI ran a turn
+        after the `end` and was still alive SWITCH_POST_RESULT_TERM_S after its result, so it was asked to end with
+        SIGTERM (err None), or that request failed (the end grace still ends it). Loop thread."""
+        if err is None:
+            self.backend._log("%s (%s): the CLI ran a turn after its input was closed and was still running %.0f s after "
+                              "that turn's result (background work it started holds it); asked the session host to end it "
+                              "with SIGTERM instead of waiting out the %.0f s end grace"
+                              % (why, self.name, SWITCH_POST_RESULT_TERM_S, SWITCH_END_GRACE_S))
+        else:
+            self.backend._log("%s (%s): could not ask the session host to end the CLI with SIGTERM after its post-close "
+                              "turn (%s: %s); the end grace ends it" % (why, self.name, type(err).__name__, _mask_ids(err)),
+                              problem=True)
 
     def _maybe_seed_fallback_cause(self) -> None:
         """A standing fallback with no cause on record (it happened under an earlier kernel, whose frame this one never
@@ -11064,8 +11194,9 @@ class SdkSession:
         prev = (read_reg(self.backend.state_dir, self.sid) or {}).get("spawnedAt")
         # work kept for a reattach that reached a NEW CLI instead (the host died during its re-exec and the connect spawned
         # again): it ran in the old CLI and ended with it, so it is retired here, the session told, as at any teardown
-        if getattr(self, "_sub_lock", None) is not None and (getattr(self, "_bg_tasks", None) or getattr(self, "_subagents", None)):
-            self._drop_live_work("a fresh CLI")
+        if getattr(self, "_sub_lock", None) is not None and (getattr(self, "_bg_tasks", None) or getattr(self, "_subagents", None)
+                                                             or getattr(self, "_notice_marks", None)):
+            self._drop_live_work("a fresh CLI")   # (a notification turn the old CLI owed is gone with it too)
         self.backend._update_reg(self.sid, spawnedAt=int(spawned_at), spawnedAtCli=str(cli_ident or ""))
         if isinstance(prev, int) and not isinstance(prev, bool) and prev > 0 and int(spawned_at) != prev:
             _RESTAMPS[self.sid] = (prev, int(spawned_at))   # the kernel's build counts what the move dropped, once (memos
@@ -11288,6 +11419,8 @@ class SdkSession:
                         # parked-op drain re-runs right after a delivery (2026-09-03) — a gap between the pop
                         # and this increment read as idle and could feed the op behind into this very turn
                         self.inflight += 1
+                        if fresh:
+                            self._turn_open_mono = time.monotonic()   # this pop opens the turn (_lower_notice_marks)
                         self._inflight_texts.append(item)   # the fed-turn twin — see its init comment
                         # the hold, armed under the same lock as the pop: nothing else feeds until the CLI has
                         # taken this text (_untaken_taken clears it). The transcript mark is taken below,
@@ -11613,6 +11746,29 @@ class SdkSession:
                     self._rewind_failed(e)
                     continue
                 host = self._host
+                if (not connected and host is not None and getattr(self, "_host_is_attach", False)
+                        and getattr(host, "exit_info", None) is None
+                        and (isinstance(e, _ht().HostInputClosed) or getattr(host, "input_closed", False))):
+                    # the attach reached a host whose CLI can take no input (2026-11-25): an earlier `end`, typically a
+                    # previous kernel's reconnect teardown, closed its stdin, and the CLI lives on only until it exits (a
+                    # background task kept one alive for the whole 1200 s switch grace). Its hello said `ending`, or the
+                    # initialize met the closed stdin. Retrying the attach failed the same way after a 60 s timeout each,
+                    # and the old end's deadline then killed the CLI mid-connect, filed as a crash. Instead, finish that
+                    # end now (SIGTERM, the kill bound) and take the relaunch it began: a fresh CLI resuming the
+                    # conversation. Never the crash heal or a launch error: nothing failed to start. Every other failed
+                    # attach keeps the detach and the bounded retry below
+                    if self.ended:
+                        self.detached = True       # the session was ended meanwhile: its own kill road ends the host
+                        break
+                    if await self._finish_ending_host(host):
+                        self.inflight = 0
+                        self._reconnect = True
+                        self._reattach_keeps_cli = False   # a fresh CLI: the ended one's work is gone (the loop top retires it)
+                        continue
+                    self._host_stand_down(e, said="session %s: its session host's CLI can take no input (an earlier end closed "
+                                                  "its stdin) and did not confirm the end this kernel asked for; the next "
+                                                  "message tries again" % self.name)
+                    break
                 if (not connected and host is not None and getattr(host, "hello", None) is not None
                         and getattr(host, "_init_pending", False) and getattr(host, "exit_info", None) is None):
                     # the attach reached the host (hello) but the connect did not complete (the initialize timed
@@ -11671,6 +11827,71 @@ class SdkSession:
                 self._host_is_attach = False
             if self.ended or not self._reconnect:
                 break        # drain ended on its own (process exit) or we're shutting down → done
+
+    async def _finish_ending_host(self, failed) -> bool:
+        """Finish the end an earlier `end` began on this session's host (2026-11-25; the connect loop's HostInputClosed road).
+        The CLI's stdin is closed, so it can take no input, and it would otherwise live until that end's own deadline (the
+        1200 s switch grace, with a background task keeping it past the EOF). A connection of its own (the failed attach
+        detached; a `busy` answer naming this kernel is that detach not yet read, retried briefly), `signal TERM`, `end`
+        with the kill bound (END_GRACE_KILL_S: the host pulls the old deadline in to it, and kills at it), and the bounded
+        wait for the exit frame. Then: the host.log rows not yet filed are filed (the failed transport's hello names the
+        host), the host is recorded as one this kernel ended, so the next connect waits for its lease to go instead of
+        reading a death, and the SIGTERM is recorded for the loop top (the CLI proven gone). The host's directory is left
+        in place: the next connect replays the journal past the last acknowledged offset (what the CLI wrote after the
+        earlier kernel stopped reading) before it spawns the fresh host. True when the CLI is gone (the exit frame, or a
+        host no longer there), False when the end could not be confirmed (another kernel holds the host, or a host that
+        still lives did not answer): the caller stands down."""
+        ht = _ht()
+        be = self.backend
+        # problem=False on the planned lines: this runs inside the connect loop's `except`, where an unflagged line counts
+        # as that exception's report in the error center, and this road is the kernel's, not a failure the user must see
+        be._log("host (%s): the session host's CLI can take no input: an earlier end (a previous kernel's reconnect) "
+                "already closed its stdin; ending it now and relaunching the session on a fresh CLI" % self.name, problem=False)
+        sock = ht.host_sock(be.state_dir, self.sid)
+        retry_until = time.time() + 3.0
+        while True:                            # loop-ok: bounded, a `busy` answer naming this kernel retried until retry_until
+            # the failed attach's offset: the host replays only what lies past it (the records are not read here; the
+            # journal keeps them for the replay after the exit)
+            t = ht.HostTransport(str(sock), kernel=be._kernel_identity(), ack=getattr(failed, "ack_offset", -1),
+                                 end_grace=ht.sh.END_GRACE_KILL_S, ending_ok=True)
+            try:
+                await asyncio.wait_for(t.connect(), timeout=5.0)
+                break
+            except Exception as e:
+                t._drop_before_hello()
+                busy = getattr(t, "busy_with", None)
+                if isinstance(busy, dict) and be._is_own_kernel(busy) and time.time() < retry_until:
+                    await asyncio.sleep(0.1)
+                    continue
+                gone = be._host_lease(self.sid, if_unreadable="attach")[1] != "attach"
+                be._log("host (%s): the connection to end the CLI failed (%s: %s); %s"
+                        % (self.name, type(e).__name__, _mask_ids(e),
+                           "the host is gone, so is its CLI" if gone else "the host still holds the CLI"), problem=not gone)
+                return gone
+        self._mark_cut_spend()             # the SIGTERM cuts work since the CLI's last result, as _term_for_relaunch records it
+        try:
+            await t.signal("TERM")
+        except Exception as e:
+            be._log("host (%s): could not ask the session host for SIGTERM (%s); its end bound ends the CLI"
+                    % (self.name, type(e).__name__), problem=False)
+        await t.end_and_close()
+        if t.exit_info is None:
+            gone = be._host_lease(self.sid, if_unreadable="attach")[1] != "attach"
+            be._log("host (%s): no exit frame after the end; %s" % (
+                self.name, "the host is gone, so is its CLI" if gone else "the host still holds the CLI"), problem=not gone)
+            if not gone:
+                return False
+        else:
+            be._log("host (%s): the CLI exited (%s, code %s); relaunching the session"
+                    % (self.name, t.exit_info.get("cause"), t.exit_info.get("code")), problem=False)
+        h = ((getattr(t, "hello", None) or getattr(failed, "hello", None) or {}).get("host") or {})
+        be._host_recently_ended[self.sid] = "%s:%s" % (h.get("pid"), h.get("start"))
+        self._relaunch_termed = ("host", t)
+        try:
+            be._file_host_log_rows(self)
+        except Exception as e:
+            be._log("host (%s): filing the host's log rows failed: %s" % (self.name, e), problem=True)
+        return True
 
     def _host_stand_down(self, exc, said=None) -> None:
         """Four attaches reached a live host and none completed (the initialize timed out each time: a wedged
@@ -12920,6 +13141,9 @@ class SdkSession:
             with self._lock:
                 if self.inflight == 0:
                     self.inflight = 1
+                    # the turn's open, for the "notification turn owed" marks its result lowers (_lower_notice_marks); a
+                    # turn first seen at its RESULT opened at a moment no frame showed, so it proves nothing (0.0)
+                    self._turn_open_mono = 0.0 if isinstance(msg, ResultMessage) else time.monotonic()
                     self.since = int(time.time())
                     self._interrupted = False
                     self._intr_level = 0
@@ -13590,7 +13814,9 @@ class SdkSession:
                 failed = []
                 _settle_steps = [("the turn-end count", lambda: self.backend._turn_completed(self.sid)),
                                  #   ↑ a landed result re-arms the crash-resume budget + bumps turn_seq
-                                 ("the 'waiting' state write", lambda: self._mark("waiting"))]
+                                 ("the 'waiting' state write", lambda: self._mark("waiting")),
+                                 # the notification marks this turn answered, ahead of the standing ask's carry below
+                                 ("the notification-turn marks", self._lower_notice_marks)]
                 if own_clear:   # the no-flip /clear echo retire (guarded like the other file/lock steps; still ahead of the woken feeder)
                     _settle_steps.append(("the /clear echo retire", lambda: self.backend.retire_clear_echoes(self.sid, own_clear)))
                 if own_clear or _had_taken:   # mirror the emptied take list even if the retire above removed no echo (a no-op retire skips its own persist), so a restart restores nothing stale
@@ -13622,7 +13848,9 @@ class SdkSession:
                     self._wake_set()
                 elif getattr(self, "_switch_wanted", ""):   # a standing ask (a pick, a Model switch): carried only if the
                     self._try_switch_reconnect()   #   session is quiet now — RE-CHECKED here, so the subagents and background
-                    #                                tasks this turn launched hold it until the event that ends the last of them
+                    #                                tasks this turn launched hold it until the event that ends the last of them,
+                    #                                and a task that ended while this turn ran holds it for the turn the CLI owes
+                    #                                its notification (the marks lowered above are only those before this turn)
                 for what, err in failed:
                     # The report is guarded too: _log runs the kernel's log callback
                     # bare, and a callback raising here (a closed stderr under a service restart) would
@@ -14707,6 +14935,9 @@ class SdkSession:
             self._bg_tasks.clear()
             if getattr(self, "_bg_foreground", None) is not None:   # getattr: __new__-built test doubles
                 self._bg_foreground.clear()
+            for attr in ("_bg_sub_owned", "_notice_marks"):        # the CLI that owed a notification turn is gone
+                if getattr(self, attr, None) is not None:
+                    getattr(self, attr).clear()
         if died:
             note = task_death_notice(died, did=CUT_BY.get(cut_by, ""))
             with self._lock:
@@ -14959,6 +15190,8 @@ class SdkSession:
                         gone_ids.pop(tid, None)   # an explicit start brings an id back (a resumed agent reuses its id)
                     if subtype == "task_started" and d.get("is_backgrounded") is False and fg is not None:
                         fg.add(tid)               # registered in the foreground: the level will not list it
+                if d.get("owned_by_subagent") is True and getattr(self, "_bg_sub_owned", None) is not None:
+                    self._bg_sub_owned.add(tid)   # a subagent's own task: its notification goes to that subagent
                 if not entry.get("toolUseId") and d.get("tool_use_id"):
                     entry["toolUseId"] = str(d.get("tool_use_id"))   # a level-made entry learns it from its bookend…
                     changed = True                                   # …and mirrors it, once (the box joins on it)
@@ -14995,6 +15228,25 @@ class SdkSession:
                     changed = gone is not None
                     ended = True
                     wf = (gone or {}).get("type") == "local_workflow" or tid in self._wf_agents
+                    # "notification turn owed" (2026-11-25, _notice_marks): the task's FIRST end (it was live), or a
+                    # notification for a task this kernel never saw end, makes the CLI open a turn of its own for it right
+                    # now; a relaunch must not be carried in the instant before that turn shows. Not for a subagent's own
+                    # task, whose notification goes to the subagent; not for a later end frame of a task already ended.
+                    # Not for a synchronous agent either (review 2026-11-25): a local_agent registered in the foreground and
+                    # never backgrounded hands its result to the call that blocked on it, so no turn follows its end, and
+                    # its mark, raised mid-turn, only held the relaunch NOTICE_TURN_WAIT_S past that turn's end. A
+                    # foreground task of another type keeps its mark, as before.
+                    owned = d.get("owned_by_subagent") is True
+                    sub_owned = getattr(self, "_bg_sub_owned", None)
+                    if sub_owned is not None:
+                        owned = owned or tid in sub_owned
+                        sub_owned.discard(tid)
+                    sync_agent = fg is not None and tid in fg and \
+                        ((gone or {}).get("type") or d.get("task_type")) == "local_agent"
+                    marks = getattr(self, "_notice_marks", None)
+                    if marks is not None and not owned and not sync_agent and (
+                            gone is not None or (subtype == "task_notification" and not (gone_ids and tid in gone_ids))):
+                        marks[tid] = time.monotonic()
                     self._note_bg_ended(tid)
                     if fg is not None:
                         fg.discard(tid)
@@ -15020,7 +15272,10 @@ class SdkSession:
                 self.backend._log("background tasks (%s): registry mirror write failed: %s" % (self.name, e))
         if changed or sub_changed:
             self.backend._poke()
-            self._try_switch_reconnect()   # a task's end may be what a switch's ask waited for
+            # a task's end may be what a switch's ask waited for — but an end that raised a notification mark above holds
+            # quiet() until the turn the CLI owes for it reaches its result, whose settle carries the ask (2026-11-25:
+            # carried here, the ask's teardown raced that turn and closed the CLI's stdin as it started new work)
+            self._try_switch_reconnect()
 
     def request_stop_task(self, tool_use_id: str) -> bool:
         """Stop ONE background task by the id the chat box shows (its tool-use id). Resolved to the
@@ -16278,6 +16533,11 @@ class SdkBackend:
             # re-executed host that is not coming, with a second row (2026-09-22)
             sess._host_reexec_closed = False
             return
+        if f.get("kind") == "input-closed":
+            # a line refused because the CLI is being ended (2026-11-25): an `end` this kernel sent, or, at a connect, an
+            # earlier kernel's, which the connect finishes (HostInputClosed). A road the kernel takes, not a problem
+            self._log("host (%s): fault %s: %s" % (sess.name, f.get("kind"), f.get("text")), problem=False)
+            return
         self._log("host (%s): fault %s: %s" % (sess.name, f.get("kind"), f.get("text")), problem=True)
 
     async def _host_reexec_on_skew(self, sess, lease):
@@ -16315,6 +16575,16 @@ class SdkBackend:
                 return None
             launcher = str(Path(__file__).resolve().parent.parent / "bin" / "romp-session-host")
             ans = await ht.request_reexec(ht.host_sock(self.state_dir, sess.sid), sys.executable, launcher, self.code_version)
+            if not ans.get("ok") and ans.get("reason") == ht.sh.REEXEC_REFUSED_ENDING:
+                # the host is ending its CLI (an earlier `end`, a previous kernel's reconnect, closed its stdin): nothing to
+                # hand over, and nothing wrong with the host, so no host.reexec-refused row (2026-11-25). The attach that
+                # follows reads the hello's `ending` and the connect finishes that end, then relaunches on a fresh CLI
+                self._log("host (%s): the session host is ending its CLI, so it is not re-executed into %s; the connect "
+                          "finishes that end and relaunches the session" % (sess.name, self.code_version), problem=False)
+                # an ending host is about to exit: the connect reads the lease again first, so a host that exits between
+                # this answer and the attach takes the orphan road, not an attach into nobody filed as a launch error
+                sess._host_reexec_wait = "ran"
+                return None
             if not ans.get("ok"):
                 problem_row(self.state_dir, "the session host for %s runs code version %s and refused to re-exec into %s (%s); attached as is"
                             % (sess.name, was or "unknown", self.code_version, ans.get("reason") or "no reason"), "host.reexec-refused",
@@ -21359,7 +21629,9 @@ class SdkBackend:
         holder = (lease or {}).get("holder") or {}
         holder_key = (holder.get("pid"), holder.get("start"))   # WHICH host this end is for (a later holder is a new host)
         async def go():
-            t = ht.HostTransport(str(sock), kernel=ident, ack=-1, end_grace=ht.sh.END_GRACE_KILL_S)
+            # ending_ok: a host already ending its CLI (an earlier `end`) is ended all the same, its deadline pulled in to the
+            # kill bound; it is not a connect for a Query (2026-11-25: its hello's `ending` makes a plain transport refuse)
+            t = ht.HostTransport(str(sock), kernel=ident, ack=-1, end_grace=ht.sh.END_GRACE_KILL_S, ending_ok=True)
             try:
                 # a bounded hello: a host whose loop is stalled accepts the connection from the backlog and never
                 # writes hello (the lease TTL is 12 s; a live host answers in milliseconds)
@@ -21391,7 +21663,7 @@ class SdkBackend:
                     if self._host_lease(sid, if_unreadable="unreadable")[1] != "attach":
                         self._log("host (%s): this kernel's own end of the session carried it" % sid[:8])
                         return
-                    t = ht.HostTransport(str(sock), kernel=ident, ack=-1, end_grace=ht.sh.END_GRACE_KILL_S)
+                    t = ht.HostTransport(str(sock), kernel=ident, ack=-1, end_grace=ht.sh.END_GRACE_KILL_S, ending_ok=True)
                     try:
                         await asyncio.wait_for(t.connect(), timeout=5.0)
                     except Exception as e2:
@@ -24098,6 +24370,8 @@ class SdkBackend:
         # NOW, so re-assert 'working' if a prior state write settled ahead of it (e.g. a separate turn
         # queued in the CLI that started streaming after the previous turn's Result). Only on the
         # transition, so it never spams the log. This is what makes the signal self-heal without a count.
+        if not atom.get("_echo_text") and not atom.get("command") and not atom.get("isApiError"):
+            sess._notice_activity = time.monotonic()   # the CLI is at work: a notification mark's fallback counts from here
         if not atom.get("_echo_text") and not atom.get("command") and not atom.get("isApiError") \
                 and getattr(sess, "_first_out_t", None) is None and getattr(sess, "inflight", 0):
             sess._first_out_t = time.time()   # the turn's FIRST streamed work atom — turns.jsonl's firstOutT (T304)

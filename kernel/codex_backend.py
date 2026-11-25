@@ -2829,11 +2829,18 @@ class CodexBackend:
         never a re-create over a conversation romp has records of. The re-created thread is still turn-less
         with an empty file, so its first record is a ROOT and the episode boundary lands where it would have.
 
-        The resume reply is never read here, and the pinned SDK validates it only after the app-server
-        has answered success, so a reply its models cannot parse is not a failed resume: it is logged
-        once, without any value from the reply, and the turn goes on to turn/start, the next gate, which
-        stays loud about a thread the server does not hold (2026-09-19, after a session parked forever
-        on such a reply across a kernel restart).
+        The resume reply is never read here, so the full-history reply is no longer requested: the
+        resume sends `excludeTurns`, a stable ThreadResumeParams flag on the pinned runtime, and the
+        reply carries the thread's metadata without its turns. By default the app-server returns the
+        whole history, megabytes on a long thread, which the pinned SDK validated on every restart only
+        for the backend to discard it, and which logged a parse failure whenever that history held an
+        item kind the SDK's models predate (2026-11-25). The pinned SDK validates the reply only after
+        the app-server has answered success, so a reply its models still cannot parse is not a failed
+        resume: it is logged once, without any value from the reply, and the turn goes on to
+        turn/start, the next gate, which stays loud about a thread the server does not hold
+        (2026-09-19, after a session parked forever on such a reply across a kernel restart). That
+        tolerance stays as the safety net for a runtime that ignores the flag or adds a metadata field
+        the SDK cannot model.
         """
         with s.lock:
             if s.dead:
@@ -2867,7 +2874,10 @@ class CodexBackend:
             self.push()
             return True
         try:
-            c.thread_resume(tid, {"cwd": cwd, **_approval_params(s.mode),
+            # excludeTurns: the reply is discarded, so ask for the thread's metadata only, never its whole
+            # history (2026-11-25; the pinned SDK passes a plain dict through, so the 0.144.4 models need
+            # not know the key)
+            c.thread_resume(tid, {"cwd": cwd, "excludeTurns": True, **_approval_params(s.mode),
                                   **_execution_permissions(cwd, thread_start=True), **self._postal_params()})
         except Exception as e:
             if _is_response_model_mismatch(e):
@@ -2882,7 +2892,8 @@ class CodexBackend:
                 # the first error's location, which names whichever union member pydantic tries first),
                 # naming the SDK that actually raised (the installed one, which need not be the pin), and
                 # proceed: turn/start is the authoritative gate and stays loud if the thread is really not
-                # there.
+                # there. Since the resume sends excludeTurns the reply holds no items, so this is the
+                # safety net, not the expected path (2026-11-25).
                 self.log("codex thread/resume for %s succeeded, but %s cannot read the reply: %s; the "
                          "app-server has resumed the thread, so the turn proceeds and turn/start decides. "
                          "A newer openai-codex reads those items."

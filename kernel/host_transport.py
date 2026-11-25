@@ -66,6 +66,14 @@ class HostHelloLost(CLIConnectionError):
     (HostTransport.abort_connect). The session stands down from the host rather than heal: its CLI may still live."""
 
 
+class HostInputClosed(CLIConnectionError):
+    """The host's CLI can take no input: an earlier `end` (a previous kernel's reconnect, say) closed its stdin and the CLI
+    lives on only until it exits (2026-11-25). Raised by `connect` when the hello says `ending`, and by the read stream when
+    the initialize is answered with a fault of kind `input-closed` (or `write-failed`, what a host older than the `ending`
+    field sends for a write to a closed stdin), so the SDK's pending initialize fails at once instead of after its 60 s
+    timeout. The session finishes that end and relaunches on a fresh CLI; never the attach retry, never the crash heal."""
+
+
 def _setting(state_dir, name: str, default: str) -> str:
     try:
         v = (Path(state_dir) / name).read_text().strip()
@@ -229,7 +237,10 @@ class HostTransport(_Base):
     unless the transport is in DETACH mode, where the kernel is leaving and the host keeps the CLI;
     `close()` sends `detach` in detach mode, else `end` and a bounded wait for the exit frame. `stderr`,
     `fault` and `exit` frames go to their callbacks; an `exit` frame ends the read stream (a non-zero code
-    raises ProcessError, as the subprocess transport does).
+    raises ProcessError, as the subprocess transport does). A hello saying the CLI is `ending` makes `connect`
+    detach and raise HostInputClosed, unless the transport is built `ending_ok` (a transport that only ends the
+    CLI: the kill road, the connect finishing an end); the read stream raises it for an `input-closed` fault
+    while the initialize is unanswered (or `write-failed` from a host older than that field; 2026-11-25).
 
     Replay (`HostTransport.from_journal`): `read_messages()` yields the journal's records from the offset
     to the end and then ends; `write()` of a control_request synthesizes the success response the Query
@@ -238,8 +249,11 @@ class HostTransport(_Base):
 
     def __init__(self, sock_path=None, *, kernel=None, ack=sh.ACK_NONE, end_grace=sh.END_GRACE_DEFAULT_S,
                  on_ack=None, on_hello=None, on_stderr=None, on_exit=None, on_fault=None, journal_dir=None, on_reexec=None,
-                 on_lost=None, alive=None):
+                 on_lost=None, alive=None, ending_ok=False):
         self.sock_path = str(sock_path) if sock_path else None
+        self.ending_ok = bool(ending_ok)   # a hello saying `ending` is accepted (an end-only transport), else HostInputClosed
+        self.input_closed = False       # the host said its CLI can take no input (the hello's `ending`, or a fault answering
+        #                                 the initialize): what the connect loop reads to finish the end (2026-11-25)
         self.kernel = dict(kernel or {})
         self.ack_offset = int(ack)
         self.replay_end = None          # the journal's next offset at the attach (the hello's journal.next): records before
@@ -248,6 +262,11 @@ class HostTransport(_Base):
         #                                 the consumer reads the transport through a buffered stream a record ahead, so the
         #                                 transport's current offset is never the handled record's; the tag is
         self.end_grace = float(end_grace)
+        self.term_after_result = None   # seconds, or None: after this transport's `end`, a CLI that ran a turn and is still alive
+        #                                 this long after its result is ended with SIGTERM (then `end` with the kill bound), not
+        #                                 left to the end grace: with stdin closed it does not exit while background work runs
+        #                                 (2026-11-25). Set per teardown by the session (SdkSession._switch_teardown_check)
+        self.on_post_end_term = None    # called with None once that SIGTERM was asked for, or with the exception that stopped it
         self.on_ack, self.on_hello, self.on_stderr, self.on_exit, self.on_fault = on_ack, on_hello, on_stderr, on_exit, on_fault
         self.on_reexec = on_reexec      # the host's `reexec-now`: it is about to exec into the kernel's code and close this socket
         self.on_lost = on_lost          # the socket ended without this kernel asking (no detach, no close): called with this
@@ -324,6 +343,22 @@ class HostTransport(_Base):
                 else:
                     self._early.append(f)
         self.hello = hello
+        if hello.get("ending") and not self.ending_ok:
+            # an earlier `end` closed this CLI's stdin (2026-11-25): a connect against it can only fail its initialize, at
+            # the SDK's 60 s timeout. Detach (the host keeps its CLI and the end it is running; a failed attach never ends
+            # anything) and say why; the hello stays readable for the identity it names, and on_hello is not called, since
+            # this kernel does not attach to the CLI
+            self.input_closed = True
+            try:
+                await self._send({"t": "detach"})
+            except Exception:
+                pass
+            self._closed = True
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+            raise HostInputClosed("the session host's CLI can take no input: its hello says the CLI is ending")
         try:
             self.replay_end = int(((hello or {}).get("journal") or {}).get("next"))
         except (TypeError, ValueError):
@@ -436,16 +471,82 @@ class HostTransport(_Base):
             self._last_ack_t = time.time()
 
     async def _wait_exit(self, timeout: float) -> None:
-        deadline = time.time() + timeout
-        while self.exit_info is None and time.time() < deadline:
+        """Read the host's frames until its exit frame or `timeout`. The CLI's records still streaming are dropped (the
+        session's receive loop is gone), except that with term_after_result set they are read for the turn boundary: a
+        main-thread result arms a SIGTERM that many seconds later, the next turn's init or assistant message disarms it
+        (that turn is finished first, then its own result arms it again), and the exit frame ends the wait as ever. Once
+        sent, the TERM is followed by `end` with the kill bound, which pulls the host's deadline in (session_host._end), and
+        the wait shrinks to match: the CLI's own shutdown takes about two seconds (relaunch_now).
+
+        Every bound here is on the event loop's own clock, the one asyncio.wait_for times out on, and a timed-out read is
+        told apart by the bound that read was given, never by reading a clock again (review 2026-11-25): the wall clock
+        (time.time()) is slewed and stepped by the system's time daemon while the loop's monotonic clock is not, so with
+        the wall clock running a little slow the SIGTERM's read timed out a hair before term_at by time.time(), was taken
+        for the deadline, and the wait returned with no SIGTERM, leaving the CLI alive beside the relaunch. The due time
+        is also checked after each chunk, so records arriving closer together than a read's timeout cannot put it off.
+
+        Known residual: a post-`end` turn that parks on a control request nobody answers once the session has gone (a
+        permission ask) never reaches a result, so nothing arms the SIGTERM and the wait is the end grace; the host's own
+        TERM step before its forced end (session_host._grace_loop, a follow-up) is what bounds that one."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        term_at = None
+        while self.exit_info is None and loop.time() < deadline:
+            term_bound = term_at is not None and term_at <= deadline   # this read times out at the SIGTERM's due time
+            until = term_at if term_bound else deadline
             try:
-                chunk = await asyncio.wait_for(self._reader.read(65536), timeout=max(0.05, deadline - time.time()))
-            except (asyncio.TimeoutError, Exception):
+                chunk = await asyncio.wait_for(self._reader.read(65536), timeout=max(0.05, until - loop.time()))
+            except asyncio.TimeoutError:
+                if not term_bound:
+                    return
+                term_at = None
+                deadline = await self._term_after_result(deadline)
+                continue
+            except Exception:
                 return
             if not chunk:
                 return
             for f in self._fr.feed(chunk):
-                self._dispatch_side(f)
+                out = self._dispatch_side(f)
+                if out is not None and self.term_after_result is not None:
+                    term_at = self._post_end_turn(out.get("data"), term_at, loop.time())
+            if term_at is not None and self.exit_info is None and loop.time() >= term_at:
+                term_at = None                          # due while records kept coming: no read timed out for it
+                deadline = await self._term_after_result(deadline)
+
+    def _post_end_turn(self, data, term_at, now: float):
+        """When the post-`end` SIGTERM is due (on the clock `now` is read from), given one CLI record read in _wait_exit:
+        armed at a main-thread result, disarmed by the next turn's open (its init, or an assistant message), unchanged by
+        anything else (a background task's progress, a subagent's frames: the very work that holds the CLI after its
+        turn)."""
+        if not isinstance(data, dict) or data.get("parent_tool_use_id"):
+            return term_at
+        kind = data.get("type")
+        if kind == "result":
+            return now + float(self.term_after_result)
+        if kind == "assistant" or (kind == "system" and data.get("subtype") == "init"):
+            return None
+        return term_at
+
+    async def _term_after_result(self, deadline: float) -> float:
+        """Send the post-`end` SIGTERM and `end` with the kill bound (once per teardown: term_after_result is spent), report
+        it, and return the deadline the exit wait keeps from here, on the loop's clock like `deadline` (unchanged when the
+        request failed)."""
+        self.term_after_result = None
+        err = None
+        try:
+            await self.signal("TERM")
+            await self._send({"t": "end", "grace": sh.END_GRACE_KILL_S})
+        except Exception as e:
+            err = e
+        if self.on_post_end_term is not None:
+            try:
+                self.on_post_end_term(err)
+            except Exception:
+                pass
+        if err is not None:
+            return deadline
+        return min(deadline, asyncio.get_running_loop().time() + sh.END_GRACE_KILL_S + 5.0)
 
     def _dispatch_side(self, f: dict):
         """A non-record frame; returns the record for an `out` frame, else None."""
@@ -458,11 +559,25 @@ class HostTransport(_Base):
             self.exit_info = f
             if self.on_exit:
                 self.on_exit(f)
-        elif t == "fault" and self.on_fault:
-            self.on_fault(f)
+        elif t == "fault":
+            if self._init_pending and self._closed_input_fault(f):
+                self.input_closed = True    # the initialize's write met a closed stdin: the read stream raises (2026-11-25)
+            if self.on_fault:
+                self.on_fault(f)
         elif t == "reexec-now" and self.on_reexec:
             self.on_reexec(f)
         return None
+
+    def _closed_input_fault(self, f: dict) -> bool:
+        """Does a fault frame say the CLI's stdin is closed for good (2026-11-25)? `input-closed` always: a host sends it only
+        for a line refused while it ends its CLI. `write-failed` only from a host older than the hello's `ending` field,
+        which has no word of its own for that and fails the write at the closed stdin; this kernel's own hosts say
+        `input-closed` there, and their `write-failed` stays what it was (a CLI that died at its start reaches the exit
+        frame and its ProcessError, the launch-failure road, never a relaunch)."""
+        kind = f.get("kind")
+        if kind == "input-closed":
+            return True
+        return kind == "write-failed" and isinstance(self.hello, dict) and "ending" not in self.hello
 
     def _advance(self, out: dict) -> None:
         """Acknowledge one record: acknowledged means RECEIVED by this process (not persisted); the offset moves
@@ -524,6 +639,13 @@ class HostTransport(_Base):
         while True:
             for f in pending:
                 out = self._dispatch_side(f)
+                if self.input_closed and self._init_pending:
+                    # the host answered the initialize's write with a closed stdin (2026-11-25): the stream's error fails the
+                    # SDK's pending initialize at once (its reader hands the error to every pending control request), where
+                    # waiting cost the full 60 s timeout and a retry against the same closed stdin. The held replay is not
+                    # handed over or acknowledged: the journal keeps it for the replay after the CLI's exit
+                    raise HostInputClosed("the session host's CLI can take no input: the host answered the initialize "
+                                          "with fault %s" % f.get("kind"))
                 if out is not None:
                     # The Query's initialize must be answered AHEAD of a replay: the SDK client connects, starts
                     # its reader and awaits the initialize before anything consumes the message stream, whose

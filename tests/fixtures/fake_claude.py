@@ -30,6 +30,9 @@ Behaviour:
                        bgagent-delay=S seconds after the result (default 0.05) and bgagent-gap=S apart (default 0.05):
                        output the main conversation never opened a turn for
   * Stdin end-of-file: finish the current turn, then exit 0 (probe finding 4).
+  * FAKE_CLI_EOF_TURN (env, any value): at stdin end-of-file, instead, the installed CLI's shape while background work
+    runs (2026-11-25): one more turn (the one it owes a finished task's notification), which starts a new background
+    task, then no exit and no more output until a signal; SIGTERM is its own clean shutdown, code 143.
   * SIGINT, or an `interrupt` control request (the SDK's interrupt()): the current turn ends with an
     `interrupted` result, as the real CLI's does.
   * FAKE_CLI_LOG (env): every stdin line is appended there, so a test can see what reached the CLI.
@@ -238,6 +241,18 @@ def _trigger_watch(path: str, delay: float, count: int) -> None:
               "session_id": SESSION_ID, "uuid": str(uuid.uuid4()), "n": "trigger%d" % i})
 
 
+def _eof_turn_then_wait() -> int:
+    """FAKE_CLI_EOF_TURN: with stdin closed, the turn a finished task's notification is owed, a new background task started
+    in it, and then the wait for that work, silent, that only a signal ends (SIGTERM: exit 143, as the installed CLI's
+    shutdown handler exits)."""
+    signal.signal(signal.SIGTERM, lambda *a: os._exit(143))
+    run_turn("sleep=0.05")
+    emit({"type": "system", "subtype": "task_started", "task_id": "t-eof", "task_type": "local_bash",
+          "description": "watch", "session_id": SESSION_ID})
+    while True:   # loop-ok: held until a signal, as the CLI waits on its background work
+        time.sleep(0.2)
+
+
 def main() -> int:
     global _turns
     if len(sys.argv) > 1 and sys.argv[1] in ("-v", "--version"):
@@ -254,6 +269,8 @@ def main() -> int:
     while True:
         text = _turns.get()
         if text is None:
+            if os.environ.get("FAKE_CLI_EOF_TURN"):
+                return _eof_turn_then_wait()
             return 0          # end-of-file: the current turn (if any) has finished above (probe finding 4)
         run_turn(text)
 

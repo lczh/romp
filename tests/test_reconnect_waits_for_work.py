@@ -260,6 +260,21 @@ class _Harness(unittest.TestCase):
                    "the relaunch")
         return self._Client.instances[1]
 
+    def _task_end_and_its_turn(self, c, tid="t-watch"):
+        """A background task's end as the CLI streams it: its task_notification, then the turn the CLI opens of its own to
+        hand the model that notification (its init, a reply, its result). A relaunch waiting for the task is carried at
+        that turn's result, never at the end frame, which the turn's start races (2026-11-25): asserted here, before the
+        turn is streamed, for every caller."""
+        n = len(self._Client.instances)
+        self._task(c, "task_notification", tid=tid, status="completed")
+        self._wait(lambda: self.s.live_work()[1] == 0, "the task's end handled")
+        self._settle()
+        self.assertEqual(len(self._Client.instances), n, "no relaunch at the task's end: the CLI owes its notification a turn")
+        self.assertFalse(c.torn_down, "…and the CLI's input stays open for it")
+        self._init(c)
+        self._push(c, _AssistantMessage([_TextBlock("the watcher finished")], uuid=self._uid()))
+        self._result_frame(c)
+
     def _turn(self, c, text):
         """One more turn on client `c`, written to the transcript and ended by its result"""
         s = self.s
@@ -322,7 +337,7 @@ class APickWaitsForAQuietSession(_Harness):
         self.assertEqual(snap["relaunchWaits"], "1 background task", "…and on what")
         waits = [l for l in self.lines if "waiting for the session to go quiet" in l]
         self.assertTrue(waits and waits[-1].startswith("billing (web)") and "nothing is cut" in waits[-1], self.lines)
-        self._task(c1, "task_notification", status="completed")        # the task's own end is the deciding event
+        self._task_end_and_its_turn(c1)        # the task's end, and the turn the CLI owes it: that turn's result decides
         c2 = self._relaunched()
         self.assertTrue(c1.torn_down)
         self._wait(lambda: not s.snapshot()["authPending"], "the pick applied at the connect")
@@ -360,7 +375,7 @@ class APickWaitsForAQuietSession(_Harness):
         said.append(s.snapshot().get("relaunchWaits"))
         self.assertEqual(said, ["the running turn", "the running turn and 1 background task", "1 background task"],
                          "what the pending mark says it waits on, at each step")
-        self._task(c1, "task_notification", status="completed")
+        self._task_end_and_its_turn(c1)
         self._relaunched()
 
     def test_a_quiet_session_still_applies_a_pick_at_once(self):
@@ -369,6 +384,95 @@ class APickWaitsForAQuietSession(_Harness):
         self.assertTrue(self.be.set_effort(SID, "high"))
         self._relaunched()
         self.assertTrue(any("effort (web): the session is quiet — reconnecting now" in l for l in self.lines), self.lines)
+
+
+class ATaskEndsNotificationTurnHoldsTheRelaunch(_Harness):
+    """2026-11-25: a pick waiting on a background task was carried AT the task's end. That end is exactly when the CLI opens
+    a turn of its own to hand the model the notification, and the turn reads as nothing for its first moments (inflight
+    rises at its init, the working mark at its first work atom), so the quiet read, the loop-side re-check and the waker's
+    last look all passed in the same instant. The teardown's `end` closed the CLI's stdin, the notification turn started a
+    new watcher, and the CLI ran on until the session host's SIGKILL at the 1200 s switch grace, holding the user's sends,
+    twice in one day. The end now raises a "notification turn owed" mark, and the relaunch is carried at the result of a
+    turn that opened after it (SdkSession._notice_marks)."""
+
+    def _waiting_on_a_task(self):
+        s, c1 = self.s, self._first_turn()
+        self._with_a_background_task(c1)
+        self._end_turn(c1)
+        self.assertTrue(self.be.set_auth(SID, "login"))
+        self._settle()
+        self.assertEqual(s._switch_wanted, "billing", "the premise: the pick waits on the task")
+        return s, c1
+
+    def test_the_end_does_not_tear_down_until_the_notification_turns_result(self):
+        s, c1 = self._waiting_on_a_task()
+        self._task(c1, "task_notification", status="completed")
+        self._wait(lambda: s.live_work()[1] == 0, "the task's end handled")
+        self._settle()
+        self.assertEqual((len(self._Client.instances), c1.torn_down), (1, False), "no teardown at the end frame")
+        self.assertFalse(s.quiet(), "the CLI owes the notification a turn: not quiet")
+        self.assertEqual(s.snapshot()["relaunchWaits"], "the turn for 1 finished background task", "…and the pick says so")
+        self._init(c1)                                   # the notification turn opens: still nothing
+        self._push(c1, _AssistantMessage([_TextBlock("the watcher finished; checking the result")], uuid=self._uid()))
+        self._wait(lambda: s.inflight == 1, "the CLI's own turn counted")
+        self._settle()
+        self.assertEqual((len(self._Client.instances), c1.torn_down), (1, False), "not while its turn runs")
+        self._result_frame(c1)
+        c2 = self._relaunched()                          # its result: nothing left running, the relaunch goes now
+        self.assertTrue(c1.torn_down)
+        self._wait(lambda: not s.snapshot()["authPending"], "the pick applied at the connect")
+        self.assertTrue(any("billing (web): the session is quiet — reconnecting now" in l for l in self.lines), self.lines)
+        self.assertEqual(s._notice_marks, {})
+        self.assertFalse(any("[romp]" in t for t in s.pending() + c2.writes), "nothing was cut, so nothing is reported")
+
+    def test_a_notification_turn_that_starts_new_work_keeps_the_relaunch_waiting(self):
+        s, c1 = self._waiting_on_a_task()
+        self._task(c1, "task_notification", status="completed")
+        self._init(c1)
+        self._task(c1, "task_started", tid="t-watch-2", description="watch the next run", task_type="local_bash")
+        self._result_frame(c1)
+        self._wait(lambda: s.inflight == 0 and s.live_work()[1] == 1, "the notification turn ended, its watcher running")
+        self._settle()
+        self.assertEqual(len(self._Client.instances), 1, "the new watcher holds the relaunch, as any task does")
+        self.assertEqual(s.snapshot()["relaunchWaits"], "1 background task")
+        self._task_end_and_its_turn(c1, tid="t-watch-2")
+        self._relaunched()
+
+    def test_a_task_that_ends_while_a_turn_runs_waits_for_the_turn_after_it(self):
+        """The running turn's result is not the notification turn: the notification waits in the CLI's queue for the turn
+        it opens next, and the result of the turn already running carried the relaunch into that turn's open before."""
+        s, c1 = self._waiting_on_a_task()
+        s.enqueue("one more thing")
+        self._wait(lambda: "one more thing" in c1.writes, "the turn fed")
+        self._init(c1)
+        self._push(c1, _AssistantMessage([_TextBlock("on it")], uuid=self._uid()))
+        self._wait(lambda: s._untaken is None and s.inflight == 1, "the turn open")
+        self._transcript_append("one more thing")
+        self._task(c1, "task_notification", status="completed")     # the task ends while that turn runs
+        self._end_turn(c1)
+        self._settle()
+        self.assertEqual((len(self._Client.instances), c1.torn_down), (1, False),
+                         "that turn's result does not carry the relaunch: the notification's own turn is still to come")
+        self._init(c1)
+        self._push(c1, _AssistantMessage([_TextBlock("the watcher finished")], uuid=self._uid()))
+        self._result_frame(c1)
+        self._relaunched()
+
+    def test_with_no_turn_for_the_notification_the_tick_carries_the_relaunch_after_the_bound(self):
+        s, c1 = self._waiting_on_a_task()
+        real = sb.NOTICE_TURN_WAIT_S
+        sb.NOTICE_TURN_WAIT_S = 0.3
+        self.addCleanup(setattr, sb, "NOTICE_TURN_WAIT_S", real)
+        self._task(c1, "task_notification", status="completed")
+        self._wait(lambda: s.live_work()[1] == 0, "the task's end handled")
+        self.be.retry_model_upgrades(time.time())        # the kernel's tick, inside the bound
+        self._settle(0.1)
+        self.assertEqual(len(self._Client.instances), 1, "inside the bound the mark stands")
+        time.sleep(0.4)
+        self.be.retry_model_upgrades(time.time())        # the tick past it, no turn opened, nothing streamed
+        self._relaunched()
+        self.assertTrue(any("background tasks (web): no turn came for 1 finished background task" in l for l in self.lines),
+                        self.lines)
 
 
 class ARestartCutsAndSaysWhatItCut(_Harness):
@@ -710,7 +814,7 @@ class ABypassPickWaitsAsAMarkOfItsOwn(_Harness):
         self._wait(lambda: not s._cli_working, "the old CLI's turn ended")
         self._settle()
         self.assertEqual(len(self._Client.instances), 1, "the task still holds the relaunch")
-        self._task(c1, "task_notification", status="completed")
+        self._task_end_and_its_turn(c1)
         c2 = self._relaunched()
         self.assertEqual(c2.options.permission_mode, "bypassPermissions", "the relaunch carries the flag")
         self._wait(lambda: not s.snapshot().get("modePending"), "applied at the connect")
@@ -745,7 +849,7 @@ class ABypassPickWaitsAsAMarkOfItsOwn(_Harness):
         self.assertEqual((snap.get("modePending"), snap["authPending"]), (False, True), "only the bypass pick is withdrawn")
         self.assertTrue(s._switch_wanted, "the billing pick still needs its relaunch")
         self.assertEqual(set(((sb.read_reg(self.state, SID) or {}).get("relaunchWait") or {}).get("picks") or {}), {"billing"})
-        self._task(c1, "task_notification", status="completed")
+        self._task_end_and_its_turn(c1)
         c2 = self._relaunched()
         self.assertEqual(c2.options.permission_mode, "acceptEdits", "it carries the mode as it stands now")
         self._wait(lambda: not s.snapshot()["authPending"], "the billing pick applied")
