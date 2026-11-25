@@ -709,3 +709,55 @@ def _free_port():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CliOfferedVersions(unittest.TestCase):
+    """2026-11-24: the versions the CLI offers (STATE/cli-models.json, written at each connect by the SDK backend) fold
+    into the catalog with no credential, as plain rows rather than the learned lookahead's marked ones."""
+
+    def setUp(self):
+        _reset_catalog()
+        self._p = jd.STATE / jd._mf.CLI_MODELS_FILE
+        self._p.unlink(missing_ok=True)
+
+    def tearDown(self):
+        self._p.unlink(missing_ok=True)
+        _reset_catalog()
+
+    def test_an_offered_version_joins_the_pickers_unmarked(self):
+        self.assertNotIn("claude-opus-9-9", km._VERSION_FAMILY)
+        jd._mf.note_cli_models(jd.STATE, {"models": [{"value": "opus", "resolvedModel": "claude-opus-9-9"},
+                                                      {"value": "sonnet", "resolvedModel": "claude-sonnet-4-6"}]})
+        err = io.StringIO()
+        with redirect_stderr(err):
+            cat = km._versions_catalog()
+        self.assertEqual(cat["opus"][0], {"value": "claude-opus-9-9", "label": "Opus 9.9"}, "newest first, no mark")
+        self.assertEqual(km._version_family("claude-opus-9-9"), "opus", "a pin the pick memory may record")
+        self.assertIn("claude-opus-9-9", err.getvalue(), "the addition is said once on stderr")
+        self.assertEqual(km._catalog_status["source"], "cli")
+        self.assertEqual([v["value"] for v in cat["sonnet"]].count("claude-sonnet-4-6"), 1, "a seeded id is not doubled")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            km._versions_catalog()
+        self.assertEqual(err.getvalue(), "", "a second read folds nothing and says nothing")
+
+    def test_a_seed_based_reapply_loses_nothing_for_long(self):
+        jd._mf.note_cli_models(jd.STATE, {"models": [{"value": "opus", "resolvedModel": "claude-opus-9-9"}]})
+        with redirect_stderr(io.StringIO()):
+            km._versions_catalog()
+            km._apply_model_catalog(km.merge_model_catalog(km._MODEL_SEED, []), "api")   # an API refresh's merge
+            self.assertNotIn("claude-opus-9-9", km._VERSION_FAMILY)
+            km._versions_catalog()
+        self.assertIn("claude-opus-9-9", km._VERSION_FAMILY, "the next picker read restores the offered id")
+        self.assertEqual(km._catalog_status["source"], "api", "an API-grown catalog keeps its source label")
+
+    def test_boot_folds_them_before_any_picker_asks(self):
+        jd._mf.note_cli_models(jd.STATE, {"models": [{"value": "fable", "resolvedModel": "claude-fable-9-1"}]})
+        with patch.dict(os.environ, {"ROMP_MODEL_CATALOG": "off"}), redirect_stderr(io.StringIO()):
+            km._model_catalog_boot(_async=False)
+        self.assertEqual(km._VERSION_FAMILY.get("claude-fable-9-1"), "fable")
+
+    def test_no_file_changes_nothing(self):
+        before = {fam: [dict(v) for v in vs] for fam, vs in km.MODEL_VERSIONS.items()}
+        self.assertEqual(km._fold_cli_models(), [])
+        self.assertEqual(km.MODEL_VERSIONS, before)

@@ -25,6 +25,13 @@ _WHEELS = {
 }
 
 
+# The bound on the staged binary's first `--version`. It is the first exec of a freshly unpacked ~100 MB executable,
+# and macOS scans such a binary before it runs (syspolicyd), keyed by its path, so every setup run pays it again in a
+# new staging directory: 27 s on an Intel Mac (2026-11-24), where 15 s refused every install. A later run of the same
+# file answers in milliseconds, so this bound is generous only on the one call that needs it.
+FIRST_RUN_TIMEOUT = 180
+
+
 def wheel_url(system=None, machine=None):
     key = (system or platform.system(), machine or platform.machine())
     try:
@@ -81,7 +88,7 @@ def install_runtime(state_dir):
             ], check=True)
             exe = _package_path(staging)
             result = subprocess.run([str(exe), '--version'], check=True,
-                                    capture_output=True, text=True, timeout=15)
+                                    capture_output=True, text=True, timeout=FIRST_RUN_TIMEOUT)
             if result.stdout.strip() != 'codex-cli ' + VERSION:
                 raise RuntimeError('Downloaded Codex runtime has an unexpected version')
             # A corrupt previous installation can be repaired; other versions remain intact.

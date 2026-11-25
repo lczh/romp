@@ -10781,7 +10781,11 @@ class SdkSession:
         if v:
             self._cli_version_seen = v
         self._fast_support_connect = None if v else _mf.support_from_payload(info)
-        self._learn_fast_support(info, cli=v or getattr(self, "_cli_version_seen", "") or "")
+        told = self._learn_fast_support(info, cli=v or getattr(self, "_cli_version_seen", "") or "")
+        # …and which model VERSIONS this CLI offers (resolvedModel per option): the pickers' catalog grows from it on a
+        # machine with no Models API credential (model_fast.note_cli_models, kernel._fold_cli_models). One models frame
+        # per answer: when the fast table's change already sent it, the pickers' re-read folds these ids in too.
+        self._note_cli_models(info, cli=v or getattr(self, "_cli_version_seen", "") or "", tell=not told)
         self._note_fast_list_silent(info, v or getattr(self, "_cli_version_seen", "") or "")
         if self._adopt_fast_state(info):
             self.backend._poke()
@@ -10835,6 +10839,28 @@ class SdkSession:
             self.backend._log("fast support (%s): the CLI's model list could not be read: %s" % (self.name, e))
             return False
         return self._note_fast_support(support, cli=cli)
+
+    def _note_cli_models(self, d, cli="", tell=True) -> bool:
+        """Record the model versions a CLI payload offers (model_fast.note_cli_models: add-only, write-on-new) and, when
+        one is new, tell the kernel through the on_model_fast_changed hook, whose models frame makes every open picker
+        re-read /models, where the kernel folds the new ids into its catalog (tell=False: the caller's own change already
+        sent that frame). Returns whether an id was new. Never
+        raises into the connect or the init handler: a failed write is logged and learns nothing."""
+        try:
+            new = _mf.note_cli_models(getattr(self.backend, "state_dir", None), d, cli=cli)
+        except Exception as e:
+            self.backend._log("model list (%s): the CLI's model versions could not be recorded: %s" % (self.name, e))
+            return False
+        if new:
+            self.backend._log("model list (%s): Claude Code%s offers %s" % (
+                self.name, " " + cli if cli else "", ", ".join(_mf.cli_model_ids(d))))
+            hook = getattr(type(self.backend), "on_model_fast_changed", None) if tell else None
+            if hook:
+                try:
+                    hook()
+                except Exception as e:
+                    self.backend._log("model list (%s): models frame hook failed: %s" % (self.name, e))
+        return new
 
     def _note_fast_support(self, support, cli="") -> bool:
         """Write `support` ({id: bool}) to the learned table under `cli`'s stamp (model_fast.note: write-on-change,
@@ -12949,7 +12975,8 @@ class SdkSession:
                 self._cli_version_seen = _ver   # stamps the fast table's rows a later connect writes before its own init
             # …and the learned fast table: an init reporting fast mode ON names the model it runs on, which is proof
             # of support for that id (the connect-time answer's model list rides _do_adopt_server_info)…
-            self._learn_fast_support(d, cli=_ver)
+            _told = self._learn_fast_support(d, cli=_ver)
+            self._note_cli_models(d, cli=_ver, tell=not _told)   # the versions it offers, when an init carries the list
             # …and that connect-time list, re-said under THIS CLI's version when its initialize answer named none (a
             # CLI that predates the field there): unversioned, the connect could not flip a row a newer CLI had
             # stamped, nor advance the stamp of one it confirmed; the init's version settles both. Once per connect.

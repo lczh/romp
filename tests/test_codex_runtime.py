@@ -92,6 +92,10 @@ class ManagedRuntime(unittest.TestCase):
                     self.assertIn('--no-index', args)
                     self.assertIn('--only-binary=:all:', args)
                     self.assertIn('#sha256=', args[-1])
+                else:
+                    # the first run of the staged binary gets the macOS first-exec scan's bound, not a tight one
+                    self.assertEqual(kwargs.get('timeout'), rt.FIRST_RUN_TIMEOUT)
+                    self.assertGreaterEqual(rt.FIRST_RUN_TIMEOUT, 120)
                 return subprocess.CompletedProcess(args, 0, 'codex-cli ' + rt.VERSION + '\n')
             with mock.patch.object(rt.subprocess, 'run', side_effect=run) as install:
                 exe = rt.install_runtime(state)

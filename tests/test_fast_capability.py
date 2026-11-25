@@ -405,7 +405,10 @@ class TheBackendWrites(unittest.TestCase):
         asyncio.run(s._do_adopt_server_info())
         self.assertFalse((Path(be.state_dir) / mf.MODEL_FAST_FILE).exists(),
                          "a CLI that predates the field said nothing: no row, Opus is not learned as off")
-        self.assertEqual(frames, [], "…and no models frame")
+        # the one models frame is the version list's (2026-11-24: the answer offers versions new to this machine); the
+        # fast table learned nothing from it
+        self.assertEqual(frames, [1], "…the frame is the offered versions', not a fast change")
+        self.assertEqual(mf.read_cli_models(be.state_dir), ["claude-fable-5-1", "claude-opus-5-5"])
         self.assertIsNone(mf.fast_known("opus", be.state_dir))
         self.assertTrue(sb.fast_capable("opus", be.state_dir), "the seed stands")
         self.assertTrue(sb.fast_capable("claude-opus-5-5", be.state_dir))
@@ -934,3 +937,77 @@ class TheModelsPayload(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheCliOffersModelVersions(unittest.TestCase):
+    """2026-11-24: the versions a CLI's initialize answer resolves its options to are recorded (model_fast.note_cli_models),
+    so the kernel's catalog can grow from them on a machine with no Models API credential (a login-only install)."""
+
+    def setUp(self):
+        self._hook = getattr(sb.SdkBackend, "on_model_fast_changed", None)
+
+    def tearDown(self):
+        if self._hook is None:
+            try:
+                del sb.SdkBackend.on_model_fast_changed
+            except AttributeError:
+                pass
+        else:
+            sb.SdkBackend.on_model_fast_changed = self._hook
+
+    def test_the_ids_are_the_resolved_versions_never_aliases_tags_or_snapshots(self):
+        info = {"models": [
+            {"value": "default", "resolvedModel": "claude-opus-9-9"},
+            {"value": "opus", "resolvedModel": "claude-opus-9-9"},                       # a duplicate collapses
+            {"value": "claude-fable-9-1[1m]", "resolvedModel": "claude-fable-9-1"},
+            {"value": "sonnet", "resolvedModel": "claude-sonnet-9-9-20990101"},          # a snapshot → its version
+            {"value": "claude-haiku-9-9[1m]"},                                           # no resolvedModel: the value
+            {"value": "haiku"},                                                          # an alias alone: nothing
+            {"value": "us.anthropic.claude-opus-4-6-v1:0"}, "junk", {"value": ""}]}
+        self.assertEqual(mf.cli_model_ids(info),
+                         ["claude-opus-9-9", "claude-fable-9-1", "claude-sonnet-9-9", "claude-haiku-9-9"])
+        self.assertEqual(mf.cli_model_ids({"fast_mode_state": "off"}), [], "an answer with no list offers nothing")
+
+    def test_add_only_and_write_on_new(self):
+        root = tempfile.mkdtemp()
+        self.assertTrue(mf.note_cli_models(root, {"models": [{"value": "opus", "resolvedModel": "claude-opus-9-9"}]}, cli="9.0.0"))
+        self.assertEqual(mf.read_cli_models(root), ["claude-opus-9-9"])
+        p = Path(root) / mf.CLI_MODELS_FILE
+        before = p.stat().st_mtime_ns
+        self.assertFalse(mf.note_cli_models(root, {"models": [{"value": "opus", "resolvedModel": "claude-opus-9-9"}]}),
+                         "a known id is no news")
+        self.assertEqual(p.stat().st_mtime_ns, before, "…and no rewrite")
+        # an older CLI that offers less never removes what a newer one offered
+        self.assertTrue(mf.note_cli_models(root, {"models": [{"value": "opus", "resolvedModel": "claude-opus-5"}]}),
+                        "a version new to the file is recorded")
+        self.assertEqual(mf.read_cli_models(root), ["claude-opus-5", "claude-opus-9-9"])
+        p.write_text("not json")
+        self.assertEqual(mf.read_cli_models(root), [], "an unreadable file reads as nothing")
+
+    def test_the_connect_records_them_and_sends_one_frame(self):
+        be = _backend()
+        s = _sess(be)
+        frames = []
+        sb.SdkBackend.on_model_fast_changed = staticmethod(lambda: frames.append(1))
+
+        class _Client:
+            async def get_server_info(self):
+                return _server_info()
+        s.client = _Client()
+        asyncio.run(s._do_adopt_server_info())
+        self.assertEqual(mf.read_cli_models(be.state_dir), ["claude-fable-5-2", "claude-opus-4-8", "claude-opus-5-5",
+                                                             "claude-sonnet-5-5"])
+        self.assertEqual(frames, [1], "the fast change and the new versions share one models frame")
+        self.assertTrue(any("model list (web)" in m and "claude-opus-5-5" in m for m in be._logs), be._logs)
+        # a list with nothing new for the fast table but a new version still tells the pickers, once
+        frames.clear()
+        more = _server_info()
+        more["models"] = list(more["models"]) + [{"value": "claude-opus-9-9", "resolvedModel": "claude-opus-9-9"}]
+
+        class _Client2:
+            async def get_server_info(self):
+                return more
+        s.client = _Client2()
+        asyncio.run(s._do_adopt_server_info())
+        self.assertIn("claude-opus-9-9", mf.read_cli_models(be.state_dir))
+        self.assertEqual(frames, [1], "the new version alone sends the frame")
