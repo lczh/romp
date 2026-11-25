@@ -1970,7 +1970,12 @@ fast mode or a login that landed on another credential. The subagents and
 monitors inside that CLI would end with it, so the relaunch waits until the
 session is quiet: no turn running or queued, no subagent, no background task and
 no question waiting on you. It happens at the event that ends the last of that
-work, never on a timer. Meanwhile four of these settings show that they are
+work, never on a timer. A finished background task still counts until the turn
+Claude Code opens to report it has ended, since that turn can start new work; if
+no such turn starts within 20 seconds, the kernel's periodic check lets the
+relaunch go. During the relaunch, an old CLI still running a few seconds after
+its last turn ended (background work keeps it alive) is ended the way a Restart
+ends it, not left for the twenty-minute grace. Meanwhile four of these settings show that they are
 waiting: the Billing sub-line says what the relaunch waits for; the effort badge
 shows switching-dots and the chat line says what it waits for; for bypass mode,
 the mode badge shows switching-dots and the dropdown's Bypass row and the tab's
