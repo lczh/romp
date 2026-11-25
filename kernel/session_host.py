@@ -651,11 +651,15 @@ class AdoptedCliTransport(PipeCliTransport):
             raise RuntimeError("the handoff's descriptors are not the CLI's pipes")
         limit = int(self.spec.get("max_buffer_size") or 100 * 1024 * 1024)
         stdout_reader = asyncio.StreamReader(limit=limit)
-        await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(stdout_reader), os.fdopen(int(fds["stdout"]), "rb", buffering=0))
+        out_t, _ = await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(stdout_reader), os.fdopen(int(fds["stdout"]), "rb", buffering=0))
         stderr_reader = asyncio.StreamReader(limit=limit)
-        await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(stderr_reader), os.fdopen(int(fds["stderr"]), "rb", buffering=0))
+        err_t, _ = await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(stderr_reader), os.fdopen(int(fds["stderr"]), "rb", buffering=0))
         w_transport, w_protocol = await loop.connect_write_pipe(asyncio.streams.FlowControlMixin, os.fdopen(int(fds["stdin"]), "wb", buffering=0))
         stdin_writer = asyncio.StreamWriter(w_transport, w_protocol, None, loop)
+        # the three pipe transports, kept so cli_pipe_fds can find this CLI's descriptors for the NEXT re-exec (2026-11-25):
+        # an adopted process has no subprocess transport to ask, so every host that had re-executed once refused every later
+        # re-exec with "the CLI's descriptors could not be confirmed"
+        self._pipe_transports = {"stdin": w_transport, "stdout": out_t, "stderr": err_t}
         self.proc = _AdoptedProcess(int(self.handoff["cli_pid"]), stdin_writer, stdout_reader, stderr_reader)
         self._stderr_task = asyncio.ensure_future(self._relay_stderr())
 
@@ -678,16 +682,22 @@ def _pipe_fds_match_cli(pid, fds: dict) -> bool:
 def cli_pipe_fds(transport) -> dict | None:
     """The CLI's three pipe descriptors as this host holds them: stdin's write end, stdout's and stderr's read ends,
     from the transport's asyncio pipe transports (the SDK's anyio Process wraps an asyncio Process; the pipe fallback
-    holds one directly). None when any is missing. On Linux each is confirmed against the CLI's own descriptor table
-    (/proc/<pid>/fd/0,1,2 by pipe inode), so a wrong descriptor is a refusal, never a CLI fed from the wrong end."""
+    holds one directly; an adopted CLI, the three pipe transports AdoptedCliTransport kept). None when any is missing or
+    closed (a closed pipe's fileno() raises: the stdin an `end` closed). On Linux each is confirmed against the CLI's own
+    descriptor table (/proc/<pid>/fd/0,1,2 by pipe inode), so a wrong descriptor is a refusal, never a CLI fed from the
+    wrong end."""
     proc = getattr(transport, "_process", None) or getattr(transport, "proc", None)
     aproc = getattr(proc, "_process", None) or proc                # anyio.Process -> asyncio.subprocess.Process
     ptrans = getattr(aproc, "_transport", None)
-    if ptrans is None:
+    kept = getattr(transport, "_pipe_transports", None) if ptrans is None else None   # an adopted CLI (2026-11-25)
+    if ptrans is None and not isinstance(kept, dict):
         return None
     out = {}
     for name, n in (("stdin", 0), ("stdout", 1), ("stderr", 2)):
-        pt = ptrans.get_pipe_transport(n) if hasattr(ptrans, "get_pipe_transport") else None
+        if ptrans is not None:
+            pt = ptrans.get_pipe_transport(n) if hasattr(ptrans, "get_pipe_transport") else None
+        else:
+            pt = kept.get(name)
         pipe = pt.get_extra_info("pipe") if pt is not None else None
         try:
             out[name] = int(pipe.fileno())

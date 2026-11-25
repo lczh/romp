@@ -359,6 +359,38 @@ class AdoptedCli(unittest.TestCase):
                          "gone with the exit unknown: returncode None (the exit frame's word for unknown), never 0")
 
 
+    def test_an_adopted_clis_descriptors_are_found_for_the_next_re_exec_until_its_stdin_closes(self):
+        """2026-11-25: cli_pipe_fds read only a subprocess transport, which an adopted CLI has none of, so a host that had
+        re-executed once could never hand its CLI over again. The adopted transport keeps its three pipe transports; the
+        descriptors are found through them, and a closed stdin (an `end`) is still no descriptors."""
+        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        def stop():
+            child.kill(); child.wait(timeout=10)
+        self.addCleanup(stop)
+        # the adoption takes ownership of the descriptors it is handed (os.fdopen): give it duplicates
+        fds = {"stdin": os.dup(child.stdin.fileno()), "stdout": os.dup(child.stdout.fileno()), "stderr": os.dup(child.stderr.fileno())}
+        t = sh.AdoptedCliTransport({"max_buffer_size": 65536}, lambda line: None, {"cli_pid": child.pid, "fds": fds})
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(t.connect())
+            self.assertEqual(sh.cli_pipe_fds(t), fds, "the adopted CLI's three descriptors, as the handoff named them")
+            loop.run_until_complete(t.end_input())
+            loop.run_until_complete(asyncio.sleep(0.05))             # the pipe transport closes its file on the next pass
+            self.assertIsNone(sh.cli_pipe_fds(t), "a closed stdin: no descriptors to hand over")
+            for pt in t._pipe_transports.values():
+                pt.close()
+            loop.run_until_complete(asyncio.sleep(0.05))
+        finally:
+            if t._stderr_task is not None:
+                t._stderr_task.cancel()
+                try:
+                    loop.run_until_complete(t._stderr_task)
+                except BaseException:
+                    pass
+            loop.close()
+
+
 class _Writer:
     """The kernel connection's writer as _on_client uses it: frames written, a drain, a close."""
     def __init__(self):
@@ -879,6 +911,43 @@ class HostProcess(unittest.TestCase):
         self.assertEqual(self._lease().get("version"), "abc12345", "the old host, the old version, still serving")
         self.assertEqual([r["kind"] for r in self._hostlog() if r["kind"].startswith("reexec")], ["reexec-refused"])
         k.close()
+
+    def test_a_host_re_execs_twice(self):
+        """An adopted CLI's descriptors are found for the next re-exec (2026-11-25): AdoptedCliTransport kept no subprocess
+        transport, so cli_pipe_fds found nothing and every host that had re-executed once refused every later re-exec with
+        "the CLI's descriptors could not be confirmed". The transport now keeps its three pipe transports: a second re-exec
+        runs on the same host pid and the same CLI, and a turn round-trips after each."""
+        host, sock, spec = self._start()
+        spec_path = Path(self.state) / "hosts" / SID / "spawn.json"
+        cli_pid = self._lease()["pid"]
+
+        def bump(version):                                              # what the kernel rewrites before it asks
+            spec_path.write_text(json.dumps(dict(json.loads(spec_path.read_text()), version=version)))
+        k, _ = self._attach(sock)
+        bump("def67890")
+        ans1 = self._reexec(k, version="def67890")
+        self.assertEqual((ans1.get("ok"), ans1.get("when")), (True, "now"), "the first re-exec: %r" % ans1)
+        k.close()
+        self._lease_version_becomes("def67890")
+        k2, hello2 = self._attach(sock, pid=4343)
+        self.assertEqual(hello2["host"]["version"], "def67890")
+        k2.send({"t": "in", "data": self._user("after one sleep=0")})
+        k2.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        bump("0123abcd")
+        ans2 = self._reexec(k2, version="0123abcd")
+        self.assertEqual((ans2.get("ok"), ans2.get("when")), (True, "now"),
+                         "the adopted host re-execs again (it refused with the descriptors reason before the fix): %r" % ans2)
+        k2.close()
+        lease = self._lease_version_becomes("0123abcd")
+        self.assertEqual((lease["pid"], lease["holder"]["pid"]), (cli_pid, host.pid), "the same CLI, the same host pid, twice over")
+        k3, hello3 = self._attach(sock, pid=4444)
+        self.assertEqual((hello3["host"]["version"], hello3["cli"]["pid"]), ("0123abcd", cli_pid))
+        k3.send({"t": "in", "data": self._user("after two sleep=0")})
+        res = k3.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        self.assertEqual(res["data"]["type"], "result")
+        self.assertEqual([r["kind"] for r in self._hostlog() if r["kind"] in ("reexec", "reexeced", "reexec-refused")],
+                         ["reexec", "reexeced", "reexec", "reexeced"])
+        k3.close()
     def test_a_turn_that_folded_a_queued_message_leaves_no_open_turn_for_the_next_attach(self):
         """The stuck-Working shape (2026-09-18): the host counted every user line fed and took one off per result, so a
         turn that folded a second message (the real CLI answers messages typed while it works with the running turn's
