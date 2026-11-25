@@ -11613,6 +11613,29 @@ class SdkSession:
                     self._rewind_failed(e)
                     continue
                 host = self._host
+                if (not connected and host is not None and getattr(self, "_host_is_attach", False)
+                        and getattr(host, "exit_info", None) is None
+                        and (isinstance(e, _ht().HostInputClosed) or getattr(host, "input_closed", False))):
+                    # the attach reached a host whose CLI can take no input (2026-11-25): an earlier `end`, typically a
+                    # previous kernel's reconnect teardown, closed its stdin, and the CLI lives on only until it exits (a
+                    # background task kept one alive for the whole 1200 s switch grace). Its hello said `ending`, or the
+                    # initialize met the closed stdin. Retrying the attach failed the same way after a 60 s timeout each,
+                    # and the old end's deadline then killed the CLI mid-connect, filed as a crash. Instead, finish that
+                    # end now (SIGTERM, the kill bound) and take the relaunch it began: a fresh CLI resuming the
+                    # conversation. Never the crash heal or a launch error: nothing failed to start. Every other failed
+                    # attach keeps the detach and the bounded retry below
+                    if self.ended:
+                        self.detached = True       # the session was ended meanwhile: its own kill road ends the host
+                        break
+                    if await self._finish_ending_host(host):
+                        self.inflight = 0
+                        self._reconnect = True
+                        self._reattach_keeps_cli = False   # a fresh CLI: the ended one's work is gone (the loop top retires it)
+                        continue
+                    self._host_stand_down(e, said="session %s: its session host's CLI can take no input (an earlier end closed "
+                                                  "its stdin) and did not confirm the end this kernel asked for; the next "
+                                                  "message tries again" % self.name)
+                    break
                 if (not connected and host is not None and getattr(host, "hello", None) is not None
                         and getattr(host, "_init_pending", False) and getattr(host, "exit_info", None) is None):
                     # the attach reached the host (hello) but the connect did not complete (the initialize timed
@@ -11671,6 +11694,70 @@ class SdkSession:
                 self._host_is_attach = False
             if self.ended or not self._reconnect:
                 break        # drain ended on its own (process exit) or we're shutting down → done
+
+    async def _finish_ending_host(self, failed) -> bool:
+        """Finish the end an earlier `end` began on this session's host (2026-11-25; the connect loop's HostInputClosed road).
+        The CLI's stdin is closed, so it can take no input, and it would otherwise live until that end's own deadline (the
+        1200 s switch grace, with a background task keeping it past the EOF). A connection of its own (the failed attach
+        detached; a `busy` answer naming this kernel is that detach not yet read, retried briefly), `signal TERM`, `end`
+        with the kill bound (END_GRACE_KILL_S: the host pulls the old deadline in to it, and kills at it), and the bounded
+        wait for the exit frame. Then: the host.log rows not yet filed are filed (the failed transport's hello names the
+        host), the host is recorded as one this kernel ended, so the next connect waits for its lease to go instead of
+        reading a death, and the SIGTERM is recorded for the loop top (the CLI proven gone). The host's directory is left
+        in place: the next connect replays the journal past the last acknowledged offset (what the CLI wrote after the
+        earlier kernel stopped reading) before it spawns the fresh host. True when the CLI is gone (the exit frame, or a
+        host no longer there), False when the end could not be confirmed (another kernel holds the host, or a host that
+        still lives did not answer): the caller stands down."""
+        ht = _ht()
+        be = self.backend
+        # problem=False on the planned lines: this runs inside the connect loop's `except`, where an unflagged line counts
+        # as that exception's report in the error center, and this road is the kernel's, not a failure the user must see
+        be._log("host (%s): the session host's CLI can take no input: an earlier end (a previous kernel's reconnect) "
+                "already closed its stdin; ending it now and relaunching the session on a fresh CLI" % self.name, problem=False)
+        sock = ht.host_sock(be.state_dir, self.sid)
+        retry_until = time.time() + 3.0
+        while True:                            # loop-ok: bounded, a `busy` answer naming this kernel retried until retry_until
+            # the failed attach's offset: the host replays only what lies past it (the records are not read here; the
+            # journal keeps them for the replay after the exit)
+            t = ht.HostTransport(str(sock), kernel=be._kernel_identity(), ack=getattr(failed, "ack_offset", -1),
+                                 end_grace=ht.sh.END_GRACE_KILL_S, ending_ok=True)
+            try:
+                await asyncio.wait_for(t.connect(), timeout=5.0)
+                break
+            except Exception as e:
+                t._drop_before_hello()
+                busy = getattr(t, "busy_with", None)
+                if isinstance(busy, dict) and be._is_own_kernel(busy) and time.time() < retry_until:
+                    await asyncio.sleep(0.1)
+                    continue
+                gone = be._host_lease(self.sid, if_unreadable="attach")[1] != "attach"
+                be._log("host (%s): the connection to end the CLI failed (%s: %s); %s"
+                        % (self.name, type(e).__name__, _mask_ids(e),
+                           "the host is gone, so is its CLI" if gone else "the host still holds the CLI"), problem=not gone)
+                return gone
+        try:
+            await t.signal("TERM")
+        except Exception as e:
+            be._log("host (%s): could not ask the session host for SIGTERM (%s); its end bound ends the CLI"
+                    % (self.name, type(e).__name__), problem=False)
+        await t.end_and_close()
+        if t.exit_info is None:
+            gone = be._host_lease(self.sid, if_unreadable="attach")[1] != "attach"
+            be._log("host (%s): no exit frame after the end; %s" % (
+                self.name, "the host is gone, so is its CLI" if gone else "the host still holds the CLI"), problem=not gone)
+            if not gone:
+                return False
+        else:
+            be._log("host (%s): the CLI exited (%s, code %s); relaunching the session"
+                    % (self.name, t.exit_info.get("cause"), t.exit_info.get("code")), problem=False)
+        h = ((getattr(t, "hello", None) or getattr(failed, "hello", None) or {}).get("host") or {})
+        be._host_recently_ended[self.sid] = "%s:%s" % (h.get("pid"), h.get("start"))
+        self._relaunch_termed = ("host", t)
+        try:
+            be._file_host_log_rows(self)
+        except Exception as e:
+            be._log("host (%s): filing the host's log rows failed: %s" % (self.name, e), problem=True)
+        return True
 
     def _host_stand_down(self, exc, said=None) -> None:
         """Four attaches reached a live host and none completed (the initialize timed out each time: a wedged
@@ -16278,6 +16365,11 @@ class SdkBackend:
             # re-executed host that is not coming, with a second row (2026-09-22)
             sess._host_reexec_closed = False
             return
+        if f.get("kind") == "input-closed":
+            # a line refused because the CLI is being ended (2026-11-25): an `end` this kernel sent, or, at a connect, an
+            # earlier kernel's, which the connect finishes (HostInputClosed). A road the kernel takes, not a problem
+            self._log("host (%s): fault %s: %s" % (sess.name, f.get("kind"), f.get("text")), problem=False)
+            return
         self._log("host (%s): fault %s: %s" % (sess.name, f.get("kind"), f.get("text")), problem=True)
 
     async def _host_reexec_on_skew(self, sess, lease):
@@ -16315,6 +16407,13 @@ class SdkBackend:
                 return None
             launcher = str(Path(__file__).resolve().parent.parent / "bin" / "romp-session-host")
             ans = await ht.request_reexec(ht.host_sock(self.state_dir, sess.sid), sys.executable, launcher, self.code_version)
+            if not ans.get("ok") and ans.get("reason") == ht.sh.REEXEC_REFUSED_ENDING:
+                # the host is ending its CLI (an earlier `end`, a previous kernel's reconnect, closed its stdin): nothing to
+                # hand over, and nothing wrong with the host, so no host.reexec-refused row (2026-11-25). The attach that
+                # follows reads the hello's `ending` and the connect finishes that end, then relaunches on a fresh CLI
+                self._log("host (%s): the session host is ending its CLI, so it is not re-executed into %s; the connect "
+                          "finishes that end and relaunches the session" % (sess.name, self.code_version), problem=False)
+                return None
             if not ans.get("ok"):
                 problem_row(self.state_dir, "the session host for %s runs code version %s and refused to re-exec into %s (%s); attached as is"
                             % (sess.name, was or "unknown", self.code_version, ans.get("reason") or "no reason"), "host.reexec-refused",
@@ -21359,7 +21458,9 @@ class SdkBackend:
         holder = (lease or {}).get("holder") or {}
         holder_key = (holder.get("pid"), holder.get("start"))   # WHICH host this end is for (a later holder is a new host)
         async def go():
-            t = ht.HostTransport(str(sock), kernel=ident, ack=-1, end_grace=ht.sh.END_GRACE_KILL_S)
+            # ending_ok: a host already ending its CLI (an earlier `end`) is ended all the same, its deadline pulled in to the
+            # kill bound; it is not a connect for a Query (2026-11-25: its hello's `ending` makes a plain transport refuse)
+            t = ht.HostTransport(str(sock), kernel=ident, ack=-1, end_grace=ht.sh.END_GRACE_KILL_S, ending_ok=True)
             try:
                 # a bounded hello: a host whose loop is stalled accepts the connection from the backlog and never
                 # writes hello (the lease TTL is 12 s; a live host answers in milliseconds)
@@ -21391,7 +21492,7 @@ class SdkBackend:
                     if self._host_lease(sid, if_unreadable="unreadable")[1] != "attach":
                         self._log("host (%s): this kernel's own end of the session carried it" % sid[:8])
                         return
-                    t = ht.HostTransport(str(sock), kernel=ident, ack=-1, end_grace=ht.sh.END_GRACE_KILL_S)
+                    t = ht.HostTransport(str(sock), kernel=ident, ack=-1, end_grace=ht.sh.END_GRACE_KILL_S, ending_ok=True)
                     try:
                         await asyncio.wait_for(t.connect(), timeout=5.0)
                     except Exception as e2:
