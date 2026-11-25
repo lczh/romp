@@ -1,0 +1,11 @@
+[package]
+name = "romp-views"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+romp-json.workspace = true
+romp-transcript.workspace = true

@@ -1,0 +1,63 @@
+# The Rust spike: status and step plan
+
+This is the first step of `plans/rust-migration.md`: its one-week benchmark spike, done at a slow pace while the
+work is affordable. It ports the transcript store and `build_feed`'s per-card build to a standalone Rust program
+with no server. Both implementations run on one synthetic state, and the feed JSON is compared byte for byte.
+
+**Status (keep this current: a session that stops mid-step resumes from here):**
+
+- Step: S0 done (the workspace builds and tests offline, with no external crates). S1 (romp-json, std only) is next.
+- Next action: write romp-json's writer and its golden tests from Python's `json.dumps`.
+- Blocked on lczh: external crates. Parsing JSON (S2 onward) wants `serde` and `serde_json`, the libraries a real
+  port would use, so their speed is what the measurement should see. On 2026-11-25 the permission check refused
+  a `cargo generate-lockfile` that would have fetched the newest versions unvetted. Each crate is added only with
+  lczh's approval, at an exact version published at least a week earlier.
+- Toolchain: Rust 1.100.0 (2026-11-09, aarch64-apple-darwin) via rustup in `~/.cargo`. Profiles are not
+  modified, so call it as `~/.cargo/bin/cargo`. `rust-toolchain.toml` pins the version. Build with `--offline`
+  until crates are approved.
+
+## The question the spike answers
+
+Is a compiled port worth a month? The gate comes from the plan. The feed build must be at least **5x cheaper in
+CPU** over typed structs, and the transcript store must need at most **a third of Python's resident memory** for the
+same files. Passing argues for the month. Missing means the staged fallback: the store goes first behind the Python
+kernel, where the memory gain does not depend on interpreter speed.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `rust/Cargo.toml` | the workspace |
+| `rust/crates/romp-json` | JSON written exactly as Python's default `json.dumps` writes it (separators, `\uXXXX` escapes, float repr, insertion order) |
+| `rust/crates/romp-transcript` | the transcript store: raw bytes plus a per-line index, the Python cache's identity contract (inode, size, mtime, CRC), positioned reads |
+| `rust/crates/romp-views` | the feed's per-card build only (the spike's slice of the views crate) |
+| `rust/crates/romp-spike` | the standalone binary: load a snapshot and transcripts, build the feed, print canonical JSON and timings |
+| `tools/rust-spike/` | the Python side: the world and oracle dumper, the comparison, the measurement |
+
+## Steps
+
+Each step lands as its own commit(s) with tests green. The status above is updated at every commit.
+
+- **S0 scaffold.** Workspace, four crates, `rust-toolchain.toml`, pinned `Cargo.lock`, `.gitignore` for
+  `target/`. Done when `cargo build` and `cargo test` pass and every locked crate is at least a week old.
+- **S1 romp-json.** A Python-compatible writer, with golden tests produced by Python's `json.dumps` over a corpus
+  of edge cases: non-ASCII, control characters, floats, large ints, nesting, key order.
+- **S2 oracle.** `tools/rust-spike/dump_world.py` builds the synthetic world (`tests/bench_connect_push.write_world`
+  plus `tests/bench_chatbuild` transcripts, small and large). It dumps the non-transcript inputs `build_feed` reads
+  (goal store, judge runs in flight, judge-auth latch, states logs, live-session map) as one JSON snapshot, and
+  Python's feed JSON in canonical key order as the oracle. It also records which per-card code paths the world
+  exercises, which scopes S4.
+- **S3 romp-transcript.** Incremental reads, the identity contract, and tests against Python's
+  `_read_jsonl_incremental` on the same files, including shrink, rewrite and append.
+- **S4 romp-views, typed.** Port the per-card derivation that S2 shows the world exercises. Iterate until the
+  byte comparison shows zero differences.
+- **S5 the serde_json::Value variant.** The same build over Rust's generic JSON tree, which measures the cost of
+  porting dict-shaped code as dict-shaped data.
+- **S6 measurement.** CPU per build (warm and cold), cold load, and the store's resident size. Python's side uses
+  tracemalloc over the record cache plus its RSS difference. Alternate the two several times on the same load.
+- **S7 report.** Numbers against the gate, what replicated, what did not, and the recommendation.
+
+## Log
+
+- 2026-11-25: spike started (lczh: "when we are on the A Fellows org, start working on the rust migration, pace
+  yourself"). Toolchain installed and pinned.
