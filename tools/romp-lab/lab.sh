@@ -29,9 +29,12 @@ if [ -z "${ROMP_LAB_REEXEC:-}" ]; then
 fi
 # Read back, every entry: bash does not import a name it cannot hold as a variable (or an exported function's), yet
 # hands it to its children, so only a full read proves the allowlist. A caller that set the marker itself skipped
-# the re-exec and is refused here, as is an environment that cannot be read.
+# the re-exec and is refused here, as is an environment that cannot be read. Besides bash's own names (PWD, OLDPWD,
+# SHLVL, _), the read-back allows the one macOS writes into the python3 reading it: CoreFoundation sets
+# __CF_USER_TEXT_ENCODING (the uid and the text encoding, nothing of the caller's) in the process's own environment at
+# startup, even under `env -i`, so on a Mac the lab refused every start, naming that alone (2026-11-24).
 if ! extra="$(python3 -c 'import os, sys
-keep = set(sys.argv[1].split()) | {"PWD", "OLDPWD", "SHLVL", "_", "ROMP_LAB_REEXEC"}
+keep = set(sys.argv[1].split()) | {"PWD", "OLDPWD", "SHLVL", "_", "ROMP_LAB_REEXEC", "__CF_USER_TEXT_ENCODING"}
 print(" ".join(sorted(n for n in os.environ if n not in keep and not n.startswith("LC_"))))' "$LAB_ENV_KEEP")" || [ -n "$extra" ]; then
   echo "romp-lab: refusing to start: the environment carries names outside the lab's allowlist (${extra:-unreadable})" >&2
   exit 2

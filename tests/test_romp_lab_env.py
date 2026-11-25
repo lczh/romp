@@ -210,6 +210,27 @@ exit 0
 """
 
 
+@unittest.skipUnless(shutil.which("bash") and shutil.which("python3"), "the lab entry is a bash script")
+class TheReadBackAllowsWhatMacOSWritesItself(unittest.TestCase):
+    """lab.sh's read-back runs in python3, and on macOS CoreFoundation writes __CF_USER_TEXT_ENCODING into that
+    process's own environment at startup, even under `env -i`. The read-back counted it as the caller's, so on a Mac the
+    lab refused every start (2026-11-24). Driven straight at the read-back on every platform: the caller sets the
+    re-exec marker itself (skipping the `env -i` that would drop the name on Linux), carries the macOS name and one
+    stray name, and the refusal names the stray name alone. It stops at the read-back: no lab, no kernel."""
+
+    def test_the_refusal_names_the_stray_name_and_not_the_macos_one(self):
+        scratch = Path(tempfile.mkdtemp(prefix="romp-lab-readback-"))
+        self.addCleanup(shutil.rmtree, scratch, True)
+        env = {"PATH": os.environ["PATH"], "HOME": str(scratch), "TMPDIR": str(scratch), "LANG": "C.UTF-8",
+               "ROMP_LAB_REEXEC": "1", "__CF_USER_TEXT_ENCODING": "0x0:0x0:0x0", "LAB_STRAY_" + CANARY: "1"}
+        run = subprocess.run(["bash", str(LAB_SH), "--env-only"], env=env, cwd=str(ROOT), capture_output=True,
+                             text=True, timeout=60)
+        self.assertEqual(run.returncode, 2, "the stray name is refused at the read-back\n%s" % run.stderr[-2000:])
+        self.assertIn("outside the lab's allowlist (LAB_STRAY_%s)" % CANARY, run.stderr,
+                      "the refusal names the stray name alone, not __CF_USER_TEXT_ENCODING")
+        self.assertEqual(list(scratch.iterdir()), [], "refused before the lab made anything")
+
+
 @unittest.skipUnless(Path("/proc/self/environ").exists() and shutil.which("pgrep"), "reads the kernel's environment through /proc")
 class EveryModeRunsWithoutTheUpdateCheck(unittest.TestCase):
     """The lab kernel's update check offers a one-click update; a click fast-forwards the checkout lab.sh lives in, and
