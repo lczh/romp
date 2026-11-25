@@ -3682,6 +3682,7 @@ def _model_catalog_boot(_async=True):
     kernel life). One stderr line says so, naming the cache's fetch time; /version's modelCatalog reads
     "cache" until an event refreshes it. Returns whether a fetch started."""
     n = _load_model_catalog_cache()
+    _fold_cli_models()                           # what this machine's CLI offered, whether or not a fetch can run
     if n:
         fetched = _catalog_status.get("fetchedAt")
         try:                                           # a corrupt fetchedAt (out of range, NaN, a string) must not
@@ -3713,6 +3714,31 @@ def _note_unknown_model(mid):
     if started:
         _catalog_asked.add(mid)
     return started
+
+
+def _fold_cli_models():
+    """Fold the model versions the CLI has offered on this machine (model_fast.read_cli_models: every connect's
+    initialize answer, recorded by the SDK backend) into the catalog, ADD-ONLY, the way the Models API rows merge. The
+    credential-free source: a machine signed in to Claude Code by login alone cannot run the Models API fetch, and its
+    pickers stopped at the seed while its own CLI served newer models (the user 2026-11-24). Read on every picker read
+    (_learned_versions) and at boot: a stat when nothing changed, and a fold only when an offered id is missing from the
+    catalog, which also restores any an API refresh's seed-based merge left out. Returns the ids it added."""
+    try:
+        ids = jd._mf.read_cli_models(jd.STATE)
+    except Exception:
+        return []
+    with _catalog_lock:
+        missing = [i for i in ids if _catalog_family(i) and i not in _VERSION_FAMILY]
+        cur = {fam: [dict(v) for v in vs] for fam, vs in MODEL_VERSIONS.items()}
+        source = _catalog_status["source"]
+    if not missing:
+        return []
+    added = _apply_model_catalog(merge_model_catalog(cur, [{"id": i} for i in missing]),
+                                 "cli" if source == "seed" else source)
+    if added:
+        sys.stderr.write("model catalog (cli): Claude Code offers %d version id(s) the list lacked, now in the "
+                         "pickers: %s\n" % (len(added), ", ".join(added)))
+    return added
 
 
 # ── extra model families from the operator's API gateway: an OPT-IN switch ────────────────────────────
@@ -4379,6 +4405,7 @@ def _learned_versions():
     derivation against the catalog runs every call, so a catalog that catches up drops the mark at
     once. A first sighting is announced once on stderr — and the pickers mark the row — so an
     unlisted model is LOUD, never a silent gap behind a stale menu (the fail-loudly rule)."""
+    _fold_cli_models()                           # the CLI's offered versions join the catalog first (no credential)
     out = {}
     fams = {c["value"] for c in MODEL_CHOICES}
     with _catalog_lock:                          # the catalog is rebuilt in place on its own thread

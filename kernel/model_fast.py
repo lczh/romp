@@ -199,3 +199,98 @@ def note(state_dir, support: dict, cli: str = "") -> bool:
         tmp.write_text(json.dumps(d, sort_keys=True))
         os.replace(tmp, p)
     return changed
+
+
+# ── Which model VERSIONS the CLI offers (2026-11-24) ─────────────────────────────────────────────────────────────────
+# The pickers' version list is the kernel's catalog: a shipped seed that grows from the Models API, which needs a
+# credential the kernel may run (an apiKeyHelper, a bearer). A machine signed in to Claude Code by login alone has
+# neither, so its pickers stayed at the seed while the CLI on that very machine already served newer models (the user
+# 2026-11-24, whose laptop listed Opus 5 as the newest while the same Claude Code resolved `opus` to Opus 5.5, and a
+# second machine with a key listed it). The same initialize answer the fast table reads names, per option, the version
+# the CLI resolves it to (resolvedModel): that is the CLI's own word on what it serves, and it needs no credential. So
+# every connect records those ids here, ADD-ONLY (an id once offered stays, as the catalog's own merge keeps every id
+# it ever learned), and the kernel folds them into the catalog (kernel._fold_cli_models). STATE/cli-models.json:
+# {"ids": {id: {"t": epoch, "cli": version}}}.
+CLI_MODELS_FILE = "cli-models.json"
+_CLI_ID_RE = re.compile(r"^claude-[a-z]+-\d+(?:-\d+)?$")    # a dateless first-party version id, the pickers' shape
+
+
+def cli_model_ids(d) -> list:
+    """The version ids a CLI payload's `models` options resolve to, in the payload's order, deduped: each option's
+    resolvedModel (or its value, when that is itself a version id), lower-cased, with a [1m]-style context tag and a
+    dated snapshot's -YYYYMMDD dropped. Aliases ("opus", "default") and anything not a dateless first-party version
+    id contribute nothing. [] for a payload without the list (a CLI that predates it)."""
+    models = d.get("models") if isinstance(d, dict) else None
+    if not isinstance(models, list):
+        return []
+    out = []
+    for o in models:
+        if not isinstance(o, dict):
+            continue
+        for k in (o.get("resolvedModel"), o.get("value")):
+            s = re.sub(r"[\[@].*$", "", str(k or "").strip().lower())
+            s = re.sub(r"-\d{8}$", "", s)
+            if _CLI_ID_RE.match(s):
+                if s not in out:
+                    out.append(s)
+                break
+    return out
+
+
+def _cli_path(state_dir):
+    return Path(state_dir) / CLI_MODELS_FILE
+
+
+def read_cli_models(state_dir) -> list:
+    """[id, …] every CLI has offered on this machine, sorted; [] when the file is absent or unreadable. Cached on the
+    file's stat, like read_table: the kernel reads it on every picker read."""
+    if not state_dir:
+        return []
+    p = _cli_path(state_dir)
+    try:
+        st = os.stat(p)
+    except OSError:
+        return []
+    key = (st.st_mtime_ns, st.st_size)
+    c = _CACHE.get(str(p))
+    if c and c[0] == key:
+        return c[1]
+    try:
+        d = json.loads(p.read_text())
+        ids = d.get("ids") if isinstance(d, dict) else None
+        out = sorted(str(k) for k in ids if _CLI_ID_RE.match(str(k))) if isinstance(ids, dict) else []
+    except (OSError, ValueError):
+        out = []
+    _CACHE[str(p)] = (key, out)
+    return out
+
+
+def note_cli_models(state_dir, d, cli: str = "") -> bool:
+    """Record the version ids a CLI payload offers (cli_model_ids), add-only. Returns whether an id was NEW to the
+    file, so the caller can tell the pickers; a known id is left as it is (no rewrite, no clock churn). Atomic under
+    the module's lock, as note() is: sessions connect on threads of their own."""
+    if not state_dir:
+        return False
+    ids = cli_model_ids(d)
+    if not ids:
+        return False
+    p = _cli_path(state_dir)
+    with _LOCK:
+        try:
+            cur = json.loads(p.read_text())
+            cur = cur if isinstance(cur, dict) else {}
+        except (OSError, ValueError):
+            cur = {}
+        known = cur.get("ids") if isinstance(cur.get("ids"), dict) else {}
+        new = [i for i in ids if i not in known]
+        if not new:
+            return False
+        now = int(time.time())
+        for i in new:
+            known[i] = {"t": now, "cli": str(cli or "")}
+        cur["ids"] = known
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = Path("%s.%d.%x.tmp" % (p, os.getpid(), threading.get_ident()))
+        tmp.write_text(json.dumps(cur, sort_keys=True))
+        os.replace(tmp, p)
+    return True
