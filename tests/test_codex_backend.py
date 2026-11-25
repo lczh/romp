@@ -1355,6 +1355,9 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(resume_params["permissions"], "romp_workspace")
         self.assertEqual(resume_params["runtimeWorkspaceRoots"], ["/TESTDIR"])
         self.assertNotIn("sandbox", resume_params)
+        # the reply is discarded, so the resume asks for the thread's metadata only, never its history
+        # (2026-11-25)
+        self.assertIs(resume_params.get("excludeTurns"), True)
         self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)))
 
     def test_turn_start_failure_keeps_the_unacknowledged_batch_for_retry(self):
@@ -1690,6 +1693,49 @@ class Lifecycle(unittest.TestCase):
         joined = "\n".join(lines)
         self.assertNotIn("SYNTHETIC-ITEM-INPUT-NEVER-LOGGED", joined)
         self.assertNotIn("3 validation errors for ThreadResumeResponse", joined)
+
+    def test_resume_asks_for_no_history_so_the_reply_parses(self):
+        # The case above is the safety net; this is the reason it should not fire. The backend never reads
+        # the resume reply, yet thread/resume answered with the thread's whole history by default (megabytes
+        # on a long thread), which the pinned SDK validated on every kernel restart and, when an item kind
+        # its models predate was in there, logged as an unreadable reply. The runtime takes a stable
+        # excludeTurns flag that leaves the turns out (2026-11-25). The fake plays a server that sends the
+        # history only when not told otherwise: without the flag its reply fails the SDK's models as
+        # the client would, with the flag it parses.
+        class ValidationError(ValueError):
+            """The SDK's reply validation failure, by shape (the case above has the full annotation)."""
+            def __init__(self):
+                super().__init__("1 validation error for ThreadResumeResponse")
+
+            def errors(self):
+                return [{"type": "enum", "input": "completed",
+                         "loc": ("thread", "turns", 0, "items", 0, "SubAgentActivityThreadItem", "kind"),
+                         "msg": "Input should be 'started', 'interacted' or 'interrupted'"}]
+
+            def error_count(self):
+                return 1
+
+        class HistoryOnRequestClient(FakeClient):
+            def thread_resume(self, tid, params=None):
+                reply = super().thread_resume(tid, params)   # recorded: the server was reached
+                if (params or {}).get("excludeTurns") is not True:
+                    raise ValidationError()                  # the history came back and failed the models
+                return reply
+
+        fake = HistoryOnRequestClient()
+        lines = []
+        be, _, _ = build(factory=lambda: fake, log=lines.append)
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.resume("web", sid))       # loaded is off again: the next turn resumes first
+        self.assertTrue(be.send(sid, "hello after the restart"))
+        self.assertTrue(until(lambda: len(fake.called("turn_start")) == 1))
+        self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)))
+        self.assertEqual(len(fake.called("turn_start")), 1)
+        self.assertIsNone(be.launch_error(sid))
+        self.assertEqual([l for l in lines if "thread/resume" in l], [], lines)
+        self.assertEqual(len(fake.called("thread_resume")), 1)
+        self.assertIs(fake.called("thread_resume")[0][2]["excludeTurns"], True)
+        be.kill(sid)
 
     def test_a_resume_failure_under_another_name_still_fails_the_turn(self):
         # The tolerance is for the SDK's reply validation class alone. A failure that merely carries an
