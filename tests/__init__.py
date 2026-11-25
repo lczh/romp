@@ -90,8 +90,23 @@ def remove_made_dirs():
 # long TMPDIR — four socket tests failed at bind under -n 2). A test that must leave the root (an
 # AF_UNIX socket path that would not fit sun_path under a nested root) falls back to it, and only
 # to it — a literal system path in a `dir=` would bypass the redirect (one did).
-os.environ.setdefault("ROMP_TESTS_SYSTEM_TMPDIR", tempfile.gettempdir())
-TMP_ROOT = _REAL_MKDTEMP(prefix="romp-tests-")
+# macOS (2026-11-25): the temp dir it hands each user is /var/folders/<2>/<28>/T, about 49 bytes, and a root
+# there plus a test's own directories overflowed sun_path's 104 bytes, so the socket tests failed at bind
+# on every Mac. When the process temp dir is that one, the run's root and the record go to /tmp instead,
+# which the kernel's dead-root sweep also reads on macOS (sdk_backend.test_root_parents agrees). An xdist
+# worker's temp dir is the controller's root, not /var/folders, so it still nests there.
+def _root_parent():
+    """'/tmp' when this process's temp dir is macOS's per-user /var/folders one (too long for a socket path under a
+    root), else None: the process temp dir."""
+    if sys.platform == "darwin" and os.path.realpath(tempfile.gettempdir()).startswith("/private/var/folders/") \
+            and os.access("/tmp", os.W_OK):
+        return "/tmp"
+    return None
+
+
+_ROOT_PARENT = _root_parent()
+os.environ.setdefault("ROMP_TESTS_SYSTEM_TMPDIR", _ROOT_PARENT or tempfile.gettempdir())
+TMP_ROOT = _REAL_MKDTEMP(prefix="romp-tests-", dir=_ROOT_PARENT)
 tempfile.tempdir = TMP_ROOT
 os.environ["TMPDIR"] = TMP_ROOT
 

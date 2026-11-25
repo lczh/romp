@@ -81574,6 +81574,62 @@ def _read_size(path):
         return 0
 
 
+class _DarwinThreadCpu:
+    """A thread's CPU seconds on macOS, where Python has no time.pthread_getcpuclockid (2026-11-24: the writer watch below
+    could never judge a write on a Mac, so a stuck save was silent there). The thread's 64-bit id is taken on the thread
+    itself (pthread_threadid_np), and any thread reads its user plus system time through proc_pidinfo's
+    PROC_PIDTHREADID64INFO, which answers short (read as None) for an id that is no thread of this process. A thread that
+    has just ended can still answer its final total for a moment; the watch never reads one (end() closes the write on
+    the writer's own thread first). None everywhere when libc or the calls are missing."""
+
+    PROC_PIDTHREADID64INFO = 15
+    _libc = None
+    _info = None
+
+    @classmethod
+    def _load(cls):
+        if cls._libc is None:
+            import ctypes
+            import ctypes.util
+
+            class _ThreadInfo(ctypes.Structure):          # struct proc_threadinfo, <sys/proc_info.h>; times in ns
+                _fields_ = [("user", ctypes.c_uint64), ("system", ctypes.c_uint64)] + \
+                           [(n, ctypes.c_int32) for n in ("cpu", "policy", "run", "flags", "sleep", "curpri", "pri",
+                                                          "maxpri")] + [("name", ctypes.c_char * 64)]
+            libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.dylib")
+            libc.pthread_self.restype = ctypes.c_void_p
+            cls._info, cls._libc = _ThreadInfo, libc
+        return cls._libc
+
+    @classmethod
+    def own_id(cls):
+        """This thread's 64-bit id, or None."""
+        if sys.platform != "darwin":
+            return None
+        try:
+            import ctypes
+            libc = cls._load()
+            tid = ctypes.c_uint64()
+            if libc.pthread_threadid_np(ctypes.c_void_p(libc.pthread_self()), ctypes.byref(tid)) != 0:
+                return None
+            return int(tid.value)
+        except Exception:
+            return None
+
+    @classmethod
+    def seconds(cls, tid):
+        """The CPU seconds (user plus system) thread `tid` of this process has spent, or None."""
+        try:
+            import ctypes
+            libc = cls._load()
+            info = cls._info()
+            n = libc.proc_pidinfo(os.getpid(), cls.PROC_PIDTHREADID64INFO, ctypes.c_uint64(tid), ctypes.byref(info),
+                                  ctypes.sizeof(info))
+            return (info.user + info.system) / 1e9 if n == ctypes.sizeof(info) else None
+        except Exception:
+            return None
+
+
 class _DocWriterProgress:
     """The document writer's progress events and the bound its own history gives the write in flight (the review of PR 158: a
     stuck writer was silent; hand-offs piled up, no document was written, and only /perf writer going stale said so). Every
@@ -81589,8 +81645,9 @@ class _DocWriterProgress:
     The clock is the jobs pass's cadence: watch() runs at each pass's end, and a write is judged only from the second
     watch that finds it in flight, so the CPU test always spans a whole pass. A kind with no completed write in this kernel
     has no expectation and is not judged, nor is any write where the thread CPU clock is unavailable (no
-    pthread_getcpuclockid, macOS); its age, expectation and the writer's backlog are in /perf writer from the first second
-    either way (report). Said once per write: the episode ends when that write ends, said on stderr as it does."""
+    pthread_getcpuclockid, and on macOS, where Python lacks it, no _DarwinThreadCpu reading either); its age, expectation
+    and the writer's backlog are in /perf writer from the first second either way (report). Said once per write: the
+    episode ends when that write ends, said on stderr as it does."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -81607,11 +81664,13 @@ class _DocWriterProgress:
     @staticmethod
     def _own_cpu_clock():
         """This thread's CPU clock id, taken on the thread itself (another thread passing an ident that may have exited to
-        pthread_getcpuclockid is undefined behaviour; reading a dead thread's clock id later is an OSError), or None."""
+        pthread_getcpuclockid is undefined behaviour; reading a dead thread's clock id later is an OSError), or None. On
+        macOS, where Python has no pthread_getcpuclockid, ("darwin", this thread's 64-bit id) for _DarwinThreadCpu."""
         try:
             return time.pthread_getcpuclockid(threading.get_ident())
         except (AttributeError, OSError):
-            return None
+            tid = _DarwinThreadCpu.own_id()
+            return ("darwin", tid) if tid is not None else None
 
     def begin(self, kind, path, nbytes, at=None):
         if not self._mine():
@@ -81655,10 +81714,13 @@ class _DocWriterProgress:
 
     @staticmethod
     def _cpu(item):
-        if item.get("clk") is None:
+        clk = item.get("clk")
+        if clk is None:
             return None
+        if isinstance(clk, tuple):                        # ("darwin", thread id): macOS (_own_cpu_clock)
+            return _DarwinThreadCpu.seconds(clk[1])
         try:
-            return time.clock_gettime(item["clk"])
+            return time.clock_gettime(clk)
         except OSError:
             return None
 

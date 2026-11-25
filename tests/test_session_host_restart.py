@@ -43,7 +43,23 @@ SDKVENV = os.path.expanduser("~/.local/state/romp/sdkvenv")
 # the kernel must run on the python the SDK venv was built for (its lib/python3.X names it), not on whatever
 # `python3` the test runner's environment puts first
 _tags = sorted(p.name for p in Path(SDKVENV, "lib").glob("python3.*")) if os.path.isdir(os.path.join(SDKVENV, "lib")) else []
-KERNEL_PYTHON = next((shutil.which(t) for t in _tags if shutil.which(t)), None)
+
+
+def _venv_recorded_python(venv):
+    """The interpreter the venv records in pyvenv.cfg (`executable`), as bin/romp-serve's pick_python runs the live
+    kernel on, when it can run. The first python3.X on PATH can be another build of the same version: an x86_64
+    Homebrew 3.13 beside the arm64 3.13 the venv was rebuilt with on Apple silicon (2026-11-25), which cannot load
+    the venv's compiled packages, so the lab kernel died at import with the SDK reported missing."""
+    try:
+        with open(os.path.join(venv, "pyvenv.cfg"), encoding="utf-8") as fh:
+            cfg = dict((k.strip(), v.strip()) for k, _, v in (ln.partition("=") for ln in fh) if v)
+    except OSError:
+        return None
+    exe = cfg.get("executable")
+    return exe if exe and os.access(exe, os.X_OK) else None
+
+
+KERNEL_PYTHON = _venv_recorded_python(SDKVENV) or next((shutil.which(t) for t in _tags if shutil.which(t)), None)
 HAVE_SDK = KERNEL_PYTHON is not None
 
 
@@ -91,6 +107,8 @@ class ServedRestart(unittest.TestCase):
                     os.killpg(k.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                except PermissionError:      # macOS answered EPERM for this group (2026-11-25): end the kernel itself
+                    k.kill()
                 k.wait(timeout=10)
         # whatever the hosts left: every process whose environment carries this lab's state root
         for p in Path("/proc").glob("[0-9]*"):

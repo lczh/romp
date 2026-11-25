@@ -2940,6 +2940,17 @@ def sweep_dead_writer_temps(state_dir, log=None) -> int:
 
 TEST_ROOT_PREFIX = "romp-tests-"
 TEST_ROOT_OWNER_MARKER = "romp-tests-owner.json"    # tests/__init__.py writes it at mint time (conftest.py did until 2026-09-14)
+
+
+def test_root_parents(platform=None) -> list:
+    """The directories the test suite mints its `romp-tests-*` roots in, for the dead-root sweep: the system temp dir,
+    and on macOS /tmp as well, where tests/__init__.py (_root_parent) puts a run's root when the per-user temp dir under
+    /var/folders is too long for a socket path under it (2026-11-25). `platform` is the test seam (sys.platform)."""
+    tmp = tempfile.gettempdir()
+    out = [tmp]
+    if (platform or sys.platform) == "darwin" and os.path.realpath(tmp) != os.path.realpath("/tmp"):
+        out.append("/tmp")
+    return out
 TEST_ROOT_TOMBSTONE = ".sweeping"                   # a root renamed to <name>.sweeping is ours to finish deleting
 TEST_ROOT_SWEEP_BUDGET_S = 30.0                     # per boot; the rest waits for the next boot's sweep
 
@@ -17913,12 +17924,13 @@ class SdkBackend:
 
     def _start_test_root_sweep(self) -> None:
         def run():
-            try:
-                n = sweep_dead_test_roots(tempfile.gettempdir(), self._log)
-                if n:
-                    self._log("boot reconcile: swept %d dead test root(s) from %s" % (n, tempfile.gettempdir()))
-            except Exception:
-                self._log("boot reconcile: test-root sweep failed: %s" % traceback.format_exc())
+            for tmp in test_root_parents():          # the system temp dir; on macOS /tmp too
+                try:
+                    n = sweep_dead_test_roots(tmp, self._log)
+                    if n:
+                        self._log("boot reconcile: swept %d dead test root(s) from %s" % (n, tmp))
+                except Exception:
+                    self._log("boot reconcile: test-root sweep failed: %s" % traceback.format_exc())
         threading.Thread(target=run, name="test-root-sweep", daemon=True).start()
 
     def drive_idle_queue(self, cands, wait: bool = False) -> None:

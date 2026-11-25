@@ -262,7 +262,9 @@ class TheRule(unittest.TestCase):
         def stat(p, *args, **kw):
             return shared if isinstance(p, str) and p in both else real_stat(p, *args, **kw)
         with unittest.mock.patch.object(sb.os, "stat", stat):
-            self.assertEqual(sb.os.stat(b).st_ino, real_stat(a).st_ino, "the premise: the stub answers for both paths")
+            # the stub keys on resolved paths, as the code under test stats them (macOS: /var is /private/var)
+            self.assertEqual(sb.os.stat(os.path.realpath(b)).st_ino, real_stat(a).st_ino,
+                             "the premise: the stub answers for both paths")
             self.assertEqual(sb.claude_cli_version(a)[0], (2, 1, 266))
             self.assertEqual(sb.claude_cli_version(b)[0], (2, 1, 282))
 
