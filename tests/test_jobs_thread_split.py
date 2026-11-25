@@ -610,6 +610,8 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
             km._ckpt_settle_hand(self.SID_A, leaf, True)
             stuck = writer.submit(km._ckpt_settle_writes_pay)
             self.assertTrue(entered.wait(30), "the second heal began")
+            self.assertTrue(km._PERF_STATS.snapshot()["writer"]["inFlight"][0]["cpuClock"],
+                            "the writer's thread has a CPU clock to judge by (on macOS, _DarwinThreadCpu)")
             rows, deadline = [], time.monotonic() + 20
             while not rows and time.monotonic() < deadline:
                 km._doc_writer_wake(NOW, {})                       # a jobs pass ends: the writer's watch
@@ -893,6 +895,62 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         self.assertEqual(ran, ["liftSpentAwaiting", "autoNudge", "interruptBlock", "heldWorking", "persistCheckpoints"],
                          "the jobs after it ran, the settle write last")
         self.assertEqual(closed, [False], "and the files-stat close")
+
+
+@unittest.skipUnless(sys.platform == "darwin", "macOS's thread CPU reader (Python there has no pthread_getcpuclockid)")
+class TheWriterWatchHasAThreadClockOnMacOS(unittest.TestCase):
+    """On macOS, Python has no time.pthread_getcpuclockid, so the writer watch never had a thread CPU clock and a stuck
+    save was never said (2026-11-24). _DarwinThreadCpu reads a thread's CPU time through proc_pidinfo: a blocked thread's
+    stays put, a spinning thread's moves, and an id that is no thread of this process reads as None. (A thread that has
+    just ended can still answer its final total for a moment; the watch never reads one, since end() closes the write on
+    the writer's own thread before it can exit.)"""
+
+    def setUp(self):
+        self.km = kernel_module()
+
+    def test_a_blocked_thread_spends_nothing_a_spinning_one_spends_and_no_thread_reads_none(self):
+        cpu = self.km._DarwinThreadCpu
+        ids, gate, stop = {}, threading.Event(), threading.Event()
+
+        def blocked():
+            ids["blocked"] = cpu.own_id()
+            gate.wait(30)
+
+        def spinning():
+            ids["spinning"] = cpu.own_id()
+            while not stop.is_set():
+                sum(range(1000))
+        threads = [threading.Thread(target=blocked), threading.Thread(target=spinning)]
+        for t in threads:
+            t.start()
+        try:
+            deadline = time.monotonic() + 10
+            while len(ids) < 2 and time.monotonic() < deadline:
+                threading.Event().wait(0.01)
+            self.assertIsNotNone(ids.get("blocked")); self.assertIsNotNone(ids.get("spinning"))
+            b0, s0 = cpu.seconds(ids["blocked"]), cpu.seconds(ids["spinning"])
+            threading.Event().wait(0.3)
+            b1, s1 = cpu.seconds(ids["blocked"]), cpu.seconds(ids["spinning"])
+            self.assertIsNotNone(b0); self.assertIsNotNone(s0)
+            self.assertEqual(b1, b0, "a thread waiting on an event spends no CPU")
+            self.assertGreater(s1, s0, "a spinning thread does")
+        finally:
+            gate.set(); stop.set()
+            for t in threads:
+                t.join(10)
+        self.assertIsNone(cpu.seconds(1), "an id that is no thread of this process reads as None")
+
+    def test_the_writer_records_a_clock_it_can_read(self):
+        out = {}
+
+        def on_thread():
+            clk = self.km._DocWriterProgress._own_cpu_clock()
+            out["clk"], out["cpu"] = clk, self.km._DocWriterProgress._cpu({"clk": clk})
+        t = threading.Thread(target=on_thread)
+        t.start(); t.join(10)
+        self.assertIsNotNone(out["clk"], "a clock on macOS too")
+        self.assertIsInstance(out["cpu"], float)
+
 
 class TheBootRowCarriesBothFirsts(_LabCycles):
     def test_with_the_jobs_thread_started_the_row_waits_for_the_later_first(self):
