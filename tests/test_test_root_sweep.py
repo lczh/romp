@@ -283,13 +283,24 @@ class BootReconcileCallsIt(unittest.TestCase):
     def test_boot_reconcile_starts_the_sweep_last_and_off_thread(self):
         # Order pinned in the source: the sweep starts AFTER the resume loop (the reap and the cut
         # sessions' queue re-delivery must never wait behind minutes of rmtree), and on a daemon
-        # thread of its own, over the system temp dir, with the per-boot budget default.
+        # thread of its own, over the directories test roots are minted in (test_root_parents: the system temp
+        # dir, and /tmp on macOS), with the per-boot budget default.
         src = inspect.getsource(sb.SdkBackend._boot_reconcile)
         self.assertIn("self._start_test_root_sweep()", src)
         self.assertGreater(src.index("self._start_test_root_sweep()"), src.index("for sid in to_start"))
         starter = inspect.getsource(sb.SdkBackend._start_test_root_sweep)
-        self.assertIn("sweep_dead_test_roots(tempfile.gettempdir()", starter)
+        self.assertIn("for tmp in test_root_parents():", starter)
+        self.assertIn("sweep_dead_test_roots(tmp, self._log)", starter)
         self.assertIn("daemon=True", starter)
+
+    def test_the_roots_are_looked_for_where_the_tests_package_mints_them(self):
+        # tests/__init__.py roots a run under /tmp on macOS when the per-user temp dir under /var/folders is too long
+        # for a socket path (2026-11-25); the sweep reads /tmp there too, and only the system temp dir elsewhere.
+        with mock.patch.object(sb.tempfile, "gettempdir", return_value="/var/folders/ab/cdef/T"):
+            self.assertEqual(sb.test_root_parents("darwin"), ["/var/folders/ab/cdef/T", "/tmp"])
+            self.assertEqual(sb.test_root_parents("linux"), ["/var/folders/ab/cdef/T"])
+        with mock.patch.object(sb.tempfile, "gettempdir", return_value="/tmp"):
+            self.assertEqual(sb.test_root_parents("darwin"), ["/tmp"], "/tmp once")
 
     def test_the_starter_runs_the_sweep_on_a_thread_and_logs_the_count(self):
         arena = tempfile.mkdtemp(prefix="sweep-arena-")
@@ -297,7 +308,8 @@ class BootReconcileCallsIt(unittest.TestCase):
         logs = []
         be = mock.Mock(spec=[])
         be._log = logs.append
-        with mock.patch.object(sb.tempfile, "gettempdir", return_value=arena):
+        # the arena alone: never the real /tmp a macOS run would add (test_root_parents)
+        with mock.patch.object(sb, "test_root_parents", return_value=[arena]):
             sb.SdkBackend._start_test_root_sweep(be)
             deadline = time.monotonic() + 5
             while os.path.exists(os.path.join(arena, "romp-tests-t")) and time.monotonic() < deadline:  # loop-ok: bounded test wait

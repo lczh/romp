@@ -91,6 +91,8 @@ class ServedRestart(unittest.TestCase):
                     os.killpg(k.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                except PermissionError:      # macOS answered EPERM for this group (2026-11-25): end the kernel itself
+                    k.kill()
                 k.wait(timeout=10)
         # whatever the hosts left: every process whose environment carries this lab's state root
         for p in Path("/proc").glob("[0-9]*"):

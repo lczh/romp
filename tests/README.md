@@ -130,7 +130,10 @@ bypasses the redirect, and the hygiene test reads every test file for those
 shapes. The tests that must leave the root — `tests/test_host_transport.py`'s
 AF_UNIX socket paths, which would not fit `sun_path` under a nested root — fall
 back to `ROMP_TESTS_SYSTEM_TMPDIR`, the system temp dir the package recorded
-once per run before redirecting (an xdist worker inherits the controller's
+once per run before redirecting (on macOS, when that is the per-user
+`/var/folders/…/T`, too long for a socket path under a root, the run's root and
+this record are `/tmp` instead, which the kernel's dead-root sweep also reads
+there; an xdist worker inherits the controller's
 record), and remove what they made with an `addCleanup` (a directory outside
 the root is outside the exit sweep's scope, so nothing else removes it; nine
 per run leaked before). A root that cannot be removed at run end (a child
