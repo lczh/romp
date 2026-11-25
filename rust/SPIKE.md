@@ -16,7 +16,8 @@ with no server. Both implementations run on one synthetic state, and the feed JS
   the dumped `transcripts/`. S4: the typed loader for `snapshot.json` and `trees/`, then the port in the order of
   `s2-design.md` section 2, scoped by `coverage/port.json`. Regenerate a dump with
   `python3 tools/rust-spike/dump_world.py --world small` (or `large`); never commit one.
-- Paused 2026-11-25 for the session-crash fixes (Mac bugs come first). Resume here afterwards.
+- Priority: Mac bug fixes come first. When one is open, finish it before taking the next spike step. S2 was finished
+  while the session-crash fix PR waited on its full test run.
 - External crates: lczh approved `serde` and `serde_json` with their dependencies on 2026-11-25. They are pinned
   exactly: serde 1.0.229 and serde_json 1.0.154 in `Cargo.toml`, the rest by `Cargo.lock`, with hashbrown held at
   0.17.1 because 0.17.2 was 3 days old. All 15 are at least 7 days old (`tools/rust-spike/check_crate_ages.py`).
@@ -123,20 +124,30 @@ Where it departs from `s2-design.md`:
 - The world lives under `DIR/work` and is removed after the dump, so everything the tool writes stays in DIR.
 - The replay replaces `_feed_session_key` with the ctx facts it hands the body: the tree, the store,
   `_session_working` over the tree, and the recorded `_interrupting` and `_closer_pending` answers under the key's
-  gate. This is the design's strongest form, and it compares the whole feed, with the frame spliced in from the
-  snapshot, not only the per-card slice.
+  gate. This is the design's strongest form. It compares the whole feed, but the frame keys are spliced in from
+  the snapshot, so the per-card slice is what is really rebuilt, and `sliceEqual` is the check that counts.
 - The coverage list is section 2's list plus the fold's three helpers (`_feed_fold_session`, `_feed_fold_tints`,
   `_feed_fold_bell`). Calls to unlisted functions are counted by whether they ran inside the per-card code.
 - `--cold` (optional in the design) is not built.
 - Not exercised by either world, so not proven by the replay: the cleared set, the wait graph, stalls, session
   flags, captions with rows, bells, downtime, debug rows and the judge-auth latch. The dump refuses a non-empty
   latch, because its loginLabel resolution is not replayed.
+- Two more producers add cards to `asks` outside the per-card build. After the per-session loop, `build_feed`
+  appends parked-handoff cards (`_parked_handoffs`, reading `timeline/messages.jsonl`) and notice cards
+  (`_notice_cards`, reading the notices dir), at kernel.py about lines 57405-57428. Both are empty in both
+  worlds, and neither is in the snapshot or replayed. A world with either would fail loudly, through the
+  `allCardsFromTheFold` check and the replay comparison. S4 must still know `asks` has these sources.
+- The dumped tree is the session after `_merge_live_atoms`. The body's own `_parse` (in `_provisional_card`) and
+  `_parse_cached` (in `_dictated_prompt_uuid`) see the unmerged parse live, while the replay serves the merged
+  tree to both. They agree here because neither world has live atoms.
 
 What S4 learns from `coverage/port.json` (the same on both worlds):
 - `em.split_segment` is listed but never runs here.
 - Five unlisted functions run inside the per-card code and need porting: `em.turn_scalar`,
-  `em._is_segment_input`, `kernel._atom_prose_chars`, `kernel._seg_key` and `colormap.stops_for`. The other 18 are
-  snapshot lookups (`_names_parts`, `_session_flag`, `_session_flag_raw`) or memo and held-aggregate plumbing.
+  `em._is_segment_input`, `kernel._atom_prose_chars`, `kernel._seg_key` and `colormap.stops_for`. Most of the
+  other 18 are snapshot lookups (`_names_parts`, `_session_flag`, `_session_flag_raw`) or memo and held-aggregate
+  plumbing. One is not: `em.hydrate` fills lazy atoms from disk. It is a no-op here only because the dumper refuses
+  lazy atoms, and long production sessions can have them, which matters for S4 and S6.
 - The recorded `peerAnswered` is a tuple and the alive rows' `mtime` a float (`1781099940.0`), so the loader needs
   the int/float tag.
 
@@ -150,7 +161,8 @@ What S4 learns from `coverage/port.json` (the same on both worlds):
   the exact formatter at that length.
 - 2026-11-25: S2 oracle (`tools/rust-spike/dump_world.py`).
   - Small: 4 sessions, 7 cards, a 17,878-byte canonical oracle, a 0.6 MB dump, 1.6 s.
-  - Large: 38 sessions (s001 24,001 records, the others 3,000), 41 cards, a 114,338-byte oracle, a 163 MB dump
+  - Large: 38 sessions (s001 24,001 records, the others 3,000, and s003 and s004 3,002 each with their appended
+    open turn), 41 cards, a 114,338-byte oracle, a 163 MB dump
     (trees 79.6 MB, transcripts 82.7 MB), 27 s.
   - The fresh-process replay from the dump alone matched canonical, wire and entry bytes on both worlds. All 6 of 6
     planted input changes moved the cards.

@@ -50,6 +50,8 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from unittest import mock
 
+sys.dont_write_bytecode = True   # the kernel modules it imports would otherwise leave .pyc files in the repo
+
 HERE = os.path.dirname(os.path.realpath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 NOW = 1781100000                 # the build clock (an int: a float prints 1781100000.0, the fold types its stamp)
@@ -721,11 +723,13 @@ class Recorder:
         real_entry = km._feed_session_entry
 
         def entry(s, ctx):
+            # copied at entry, not referenced: a body that changed its inputs would otherwise have the changed objects
+            # dumped as if they were what it was handed (the S2 verifier's nit, 2026-11-25)
             if self.board is None:
-                self.board = {k: ctx.get(k) for k in ("cleared", "dbg_rows", "wmap", "stalls", "jauth_map", "jactive",
-                                                      "nudge_records", "nudge_times")}
-            self.ctx[s["sid"]] = {k: ctx.get(k) for k in ("ps", "who_working", "interrupting", "store", "closer",
-                                                          "hide", "leaf_ok")}
+                self.board = copy.deepcopy({k: ctx.get(k) for k in ("cleared", "dbg_rows", "wmap", "stalls", "jauth_map",
+                                                                    "jactive", "nudge_records", "nudge_times")})
+            self.ctx[s["sid"]] = copy.deepcopy({k: ctx.get(k) for k in ("ps", "who_working", "interrupting", "store",
+                                                                        "closer", "hide", "leaf_ok")})
             self.in_body += 1
             try:
                 return real_entry(s, ctx)
