@@ -233,7 +233,24 @@ class TheAskWaitsForAQuietSession(unittest.TestCase):
         asyncio.run(s._subagent_stop_hook({"agent_id": "a1"}, None, None))
         self.assertEqual(len(s._asks), 1, "the last subagent's end is the event that carries the ask")
 
-    def test_a_background_task_holds_the_ask_and_its_end_carries_it(self):
+    @staticmethod
+    def _cli_opens_turn(s):
+        """The CLI opens a turn of its own (a notification's): its init counts it, as _on_message does at inflight 0."""
+        s.inflight = 1
+        s._turn_open_mono = time.monotonic()
+
+    @staticmethod
+    def _turn_result(s):
+        """That turn's result, as the settle runs it: inflight to 0, the notification marks the turn answered lowered,
+        then the standing ask tried (the ResultMessage handler's switch arm)."""
+        s.inflight = 0
+        s._lower_notice_marks()
+        return s._try_switch_reconnect()
+
+    def test_a_background_task_holds_the_ask_and_its_notification_turns_result_carries_it(self):
+        # 2026-11-25: carried at the task's END, the ask's teardown raced the turn the CLI opens for the task's notification
+        # in that same instant; the `end` closed the CLI's stdin, the turn started a new watcher, and the CLI lived until the
+        # host's SIGKILL at the 1200 s switch grace. The end raises a "notification turn owed" mark; that turn's result carries
         be, s = self._armed()
         s._asks.clear(); s._switch_wanted = "always fast"
         with s._sub_lock:
@@ -241,7 +258,135 @@ class TheAskWaitsForAQuietSession(unittest.TestCase):
         self.assertFalse(s._try_switch_reconnect())
         self.assertIn("1 background task running", [m for m in be._logs if "waiting" in m][-1])
         s._on_task_event("task_notification", {"task_id": "t1", "status": "completed"})
-        self.assertEqual(len(s._asks), 1, "the task's end is the event that carries the ask")
+        self.assertEqual(s._asks, [], "the task's end does not carry the ask: the CLI owes its notification a turn")
+        self.assertFalse(s.quiet(), "…and nothing reads quiet in the instant before that turn shows")
+        s._switch_wait_said = ""
+        self.assertFalse(s._try_switch_reconnect())
+        said = [m for m in be._logs if "waiting" in m][-1]
+        self.assertIn("before the reconnect — a turn owed for 1 finished background task; nothing is cut", said,
+                      "said as owed, not as running (review 2026-11-25)")
+        self.assertEqual(s.relaunch_waits(), "the turn for 1 finished background task", "the pick's words say what holds it")
+        self._cli_opens_turn(s)
+        s._on_task_event("task_started", {"task_id": "t2", "task_type": "local_bash"})   # the turn starts a new watcher
+        s._cli_working = False
+        self.assertFalse(self._turn_result(s), "the notification turn's result: its new task holds the ask, as designed")
+        self.assertEqual(s._asks, [])
+        s._switch_wait_said = ""; s._try_switch_reconnect()
+        self.assertIn("1 background task running", [m for m in be._logs if "waiting" in m][-1])
+        s._on_task_event("task_notification", {"task_id": "t2", "status": "completed"})
+        self.assertEqual(s._asks, [], "t2's end: its notification turn is owed in turn")
+        self._cli_opens_turn(s)
+        self.assertTrue(self._turn_result(s), "that turn's result, nothing left running: carried")
+        self.assertEqual(len(s._asks), 1)
+        self.assertEqual(s._notice_marks, {}, "every mark lowered")
+
+    def test_a_task_that_ends_mid_turn_is_not_answered_by_that_turns_result(self):
+        # the running turn's result is not the notification turn: the notification is queued for the turn the CLI opens next
+        be, s = self._armed()
+        s._asks.clear(); s._switch_wanted = "always fast"
+        with s._sub_lock:
+            s._bg_tasks["t1"] = {"desc": "x", "type": "local_bash", "since": 1, "toolUseId": "", "lastTool": ""}
+        self._cli_opens_turn(s)                         # a turn is running when the task ends
+        s._on_task_event("task_notification", {"task_id": "t1", "status": "completed"})
+        self.assertFalse(self._turn_result(s), "the turn that was running when the task ended does not lower its mark")
+        self.assertEqual(s._asks, [])
+        self.assertEqual(list(s._notice_marks), ["t1"])
+        self._cli_opens_turn(s)                         # the notification's own turn
+        self.assertTrue(self._turn_result(s))
+        self.assertEqual(len(s._asks), 1)
+
+    def test_a_subagents_own_task_raises_no_mark_and_its_end_still_carries_the_ask(self):
+        # owned_by_subagent: the notification goes to that subagent, so the main thread opens no turn for it
+        be, s = self._armed()
+        s._asks.clear(); s._switch_wanted = "always fast"
+        s._on_task_event("task_started", {"task_id": "t-sub", "task_type": "local_bash", "is_backgrounded": False,
+                                          "owned_by_subagent": True})
+        self.assertFalse(s._try_switch_reconnect())
+        s._on_task_event("task_notification", {"task_id": "t-sub", "status": "completed"})   # no flag on this frame: the start's
+        self.assertEqual(s._notice_marks, {}, "no mark for a subagent's own task")
+        self.assertEqual(len(s._asks), 1, "its end is what the ask waited for: carried at once")
+
+    def test_a_synchronous_agents_end_raises_no_mark_but_a_backgrounded_one_does(self):
+        # review 2026-11-25: a local_agent registered in the foreground and never backgrounded hands its result to the call
+        # that blocked on it, so no turn follows its end; its mark only held the relaunch NOTICE_TURN_WAIT_S past the turn
+        be, s = self._armed()
+        s._asks.clear(); s._switch_wanted = "always fast"
+        self._cli_opens_turn(s)                         # the turn whose Task call blocks on the agent
+        s._on_task_event("task_started", {"task_id": "a-sync", "task_type": "local_agent", "is_backgrounded": False})
+        s._on_task_event("task_notification", {"task_id": "a-sync", "status": "completed"})
+        self.assertEqual(s._notice_marks, {}, "no turn is owed for a synchronous agent")
+        self.assertTrue(self._turn_result(s), "the turn's result carries the ask at once")
+        self.assertEqual(len(s._asks), 1)
+        s._asks.clear(); s._switch_wanted = "always fast"
+        self._cli_opens_turn(s)
+        s._on_task_event("task_started", {"task_id": "a-bg", "task_type": "local_agent", "is_backgrounded": False})
+        s._on_task_event("task_updated", {"task_id": "a-bg", "patch": {"is_backgrounded": True}})   # backgrounded by the user
+        self.assertFalse(self._turn_result(s), "the backgrounded agent runs on")
+        s._on_task_event("task_notification", {"task_id": "a-bg", "status": "completed"})
+        self.assertEqual(list(s._notice_marks), ["a-bg"], "a backgrounded agent's end owes a turn, as any background task's")
+        s._on_task_event("task_started", {"task_id": "b-fg", "task_type": "local_bash", "is_backgrounded": False})
+        s._on_task_event("task_notification", {"task_id": "b-fg", "status": "completed"})
+        self.assertIn("b-fg", s._notice_marks, "a foreground task of another type keeps its mark")
+        self.assertEqual(s._asks, [])
+
+    def test_the_fallback_lowers_a_mark_no_turn_answered_and_the_tick_carries_the_ask(self):
+        # a notification the CLI folded into a running turn, or answered with no turn: NOTICE_TURN_WAIT_S of nothing (no turn
+        # open, no result, no work atom) lowers the mark, read by quiet() on the kernel's 30 s tick
+        be, s = self._armed()
+        s._asks.clear(); s._switch_wanted = "always fast"
+        with s._sub_lock:
+            s._bg_tasks["t1"] = {"desc": "x", "type": "local_bash", "since": 1, "toolUseId": "", "lastTool": ""}
+        s._on_task_event("task_notification", {"task_id": "t1", "status": "completed"})
+        be.retry_model_upgrades(time.time())
+        self.assertEqual(s._asks, [], "the tick inside the bound: the mark still stands")
+        with s._sub_lock:                               # NOTICE_TURN_WAIT_S pass with nothing from the CLI
+            s._notice_marks["t1"] -= sb.NOTICE_TURN_WAIT_S + 1
+        s._notice_activity = time.monotonic() - sb.NOTICE_TURN_WAIT_S / 2
+        be.retry_model_upgrades(time.time())
+        self.assertEqual(s._asks, [], "a work atom inside the bound restarts the count")
+        s._notice_activity = time.monotonic() - sb.NOTICE_TURN_WAIT_S - 1
+        be.retry_model_upgrades(time.time())
+        self.assertEqual(len(s._asks), 1, "the tick past the bound: the mark is lowered and the ask carried")
+        self.assertEqual(s._notice_marks, {})
+        said = [m for m in be._logs if "no turn came for" in m]
+        self.assertEqual(said, ["background tasks (web): no turn came for 1 finished background task within %.0f s; a "
+                                "relaunch no longer waits for one" % sb.NOTICE_TURN_WAIT_S], be._logs)
+
+    def test_an_ask_on_a_truly_quiet_session_is_carried_at_once(self):
+        # the road every quiet session takes (no task ended, or its notification turn long answered): unchanged
+        be, s = self._armed()
+        self.assertEqual(len(s._asks), 1, "the arming learn found the session quiet: carried at once")
+        s._asks.clear(); s._switch_wanted = "always fast"
+        with s._sub_lock:
+            s._bg_tasks["t1"] = {"desc": "x", "type": "local_bash", "since": 1, "toolUseId": "", "lastTool": ""}
+        s._on_task_event("task_notification", {"task_id": "t1", "status": "completed"})
+        self._cli_opens_turn(s)
+        self.assertTrue(self._turn_result(s))
+        s._asks.clear(); s._switch_wanted = "always fast"
+        self.assertTrue(s._try_switch_reconnect(), "a later ask: no mark lingers, quiet at once")
+        self.assertEqual(len(s._asks), 1)
+
+    def test_the_wakers_last_look_stands_down_while_a_notification_turn_is_owed(self):
+        # a task's end landing between a carried ask and its teardown: the last look reads the mark and stands down
+        import types
+        be, s = self._armed()
+        s._host = types.SimpleNamespace(end_grace=120.0)
+        s._reconnect = True; s._reconnect_switch_why = "always fast"; s._switch_wanted = ""
+        s._on_task_event("task_notification", {"task_id": "t-unseen", "status": "completed"})   # a task this kernel never saw start
+        self.assertTrue(s._switch_teardown_check(), "vetoed: the CLI is opening the notification's turn")
+        self.assertEqual((s._reconnect, s._switch_wanted, s._host.end_grace), (False, "always fast", 120.0))
+        self.assertIn("the CLI started work between the ask and the reconnect — a turn owed for 1 finished background task; "
+                      "the reconnect stands down", be._logs[-1])
+
+    def test_a_teardown_drops_the_marks_with_the_cli_that_owed_them(self):
+        be, s = self._armed()
+        with s._sub_lock:
+            s._bg_tasks["t1"] = {"desc": "x", "type": "local_bash", "since": 1, "toolUseId": "", "lastTool": ""}
+        s._on_task_event("task_notification", {"task_id": "t1", "status": "completed"})
+        self.assertTrue(s._notice_marks)
+        s._drop_live_work("reconnect")
+        self.assertEqual(s._notice_marks, {}, "a fresh CLI owes no notification turn")
+        self.assertTrue(s.quiet())
 
     def test_a_queued_turn_holds_it_and_a_reconnect_already_on_its_way_stands_it_down(self):
         be, s = self._armed(_pending=["hi"])
@@ -314,10 +459,25 @@ class TheAskWaitsForAQuietSession(unittest.TestCase):
         self.assertFalse(s._switch_teardown_check())
         self.assertEqual(s._host.end_grace, sb.SWITCH_END_GRACE_S)
         self.assertTrue(s._reconnect)
+        # …and bounded (2026-11-25): a CLI still alive a few seconds after a turn's result past the `end` is held by background
+        # work, and the host transport ends it with SIGTERM then, not at the 1200 s grace (HostTransport.term_after_result)
+        self.assertEqual(s._host.term_after_result, sb.SWITCH_POST_RESULT_TERM_S)
+        self.assertLess(sb.SWITCH_POST_RESULT_TERM_S, 30, "a few seconds, not a grace")
+        s._host.on_post_end_term(None)
+        self.assertEqual([m for m in be._logs if "SIGTERM" in m][-1],
+                         "retry upgrade (web): the CLI ran a turn after its input was closed and was still running 5 s after "
+                         "that turn's result (background work it started holds it); asked the session host to end it with "
+                         "SIGTERM instead of waiting out the 1200 s end grace")
+        s._host.on_post_end_term(OSError("socket closed"))
+        self.assertEqual([m for m in be._logs if "SIGTERM" in m][-1],
+                         "retry upgrade (web): could not ask the session host to end the CLI with SIGTERM after its post-close "
+                         "turn (OSError: socket closed); the end grace ends it")
         # a user's own reconnect (no switch why) is never vetoed nor re-graced
-        s._host.end_grace = 120.0; s._reconnect_switch_why = ""; s._cli_working = True
+        s._host = types.SimpleNamespace(end_grace=120.0)
+        s._reconnect_switch_why = ""; s._cli_working = True
         self.assertFalse(s._switch_teardown_check())
         self.assertEqual((s._reconnect, s._host.end_grace), (True, 120.0))
+        self.assertFalse(hasattr(s._host, "term_after_result"), "…nor bounded: that road accepts what it cuts, as before")
 
 
 class TheCliSaysWhichConnectionsHaveNoFlag(unittest.TestCase):

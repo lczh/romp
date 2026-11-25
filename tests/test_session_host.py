@@ -1557,6 +1557,37 @@ class HostProcess(unittest.TestCase):
         self.assertEqual(again["data"]["request_id"], req["data"]["request_id"], "re-sent from the table although its journal write failed")
         k2.close()
 
+    def test_a_switch_teardown_ends_a_cli_its_end_left_running_with_sigterm_through_the_real_host(self):
+        # 2026-11-25, the kernel's half (HostTransport.term_after_result) against this host, not the protocol stand-in: a
+        # switch's teardown sends `end` with the 1200 s grace; the CLI runs one more turn, starts background work and does
+        # not exit. The host must forward the kernel's `signal TERM` while ending, and the `end` with the kill bound that
+        # follows must pull its deadline in; the CLI's own SIGTERM shutdown (143) then ends the wait, not the grace's SIGKILL
+        host, sock, spec = self._start(env_extra={"FAKE_CLI_EOF_TURN": "1"})
+        ht = sb._ht()
+
+        async def go():
+            t = ht.HostTransport(sock, kernel={"pid": 4242, "start": "1", "version": "abc12345"}, ack=-1, end_grace=1200.0)
+            t.term_after_result = 0.5
+            said = []
+            t.on_post_end_term = said.append
+            await t.connect()
+            first = asyncio.ensure_future(t.read_messages().__anext__())
+            await t.write(json.dumps({"type": "control_request", "request_id": "req_1_x", "request": {"subtype": "initialize"}}))
+            await asyncio.wait_for(first, 10)           # the initialize answered: close() takes the `end` road
+            t0 = time.time()
+            await asyncio.wait_for(t.close(), 30)
+            return time.time() - t0, t.exit_info, said
+
+        took, exit_info, said = asyncio.run(go())
+        self.assertLess(took, 15.0, "ended within the bound, never the 1200 s grace")
+        self.assertEqual(((exit_info or {}).get("code"), (exit_info or {}).get("cause")), (143, "end"),
+                         "the CLI's own SIGTERM shutdown, not the forced end's SIGKILL")
+        self.assertEqual(said, [None])
+        rows = [(r["kind"], r.get("graceS"), r.get("sig")) for r in self._hostlog()
+                if r["kind"] in ("end-requested", "signalled", "end-grace-shortened", "end-forced")]
+        self.assertEqual(rows, [("end-requested", 1200.0, None), ("signalled", None, "TERM"),
+                                ("end-grace-shortened", sh.END_GRACE_KILL_S, None)], rows)
+
     @unittest.skipUnless(SDK_SITE, "the SDK venv is not on this machine; the pipe transport covered the host")
     def test_the_sdk_transport_drives_the_fake_cli_the_same_way(self):
         host, sock, spec = self._start(sdk=True)
