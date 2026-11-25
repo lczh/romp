@@ -964,6 +964,10 @@ class BackendHostRules(unittest.TestCase):
             with mock.patch.object(ht, "request_reexec", mock.AsyncMock(return_value={"ok": False, "reason": reason})):
                 return await be._host_reexec_on_skew(s, lease)
         self.assertIsNone(asyncio.run(ask("the CLI is ending")), "the plain attach follows")
+        self.assertEqual(getattr(s, "_host_reexec_wait", ""), "ran",
+                         "the connect reads the lease again first: an ending host that exits before the attach takes the "
+                         "orphan road, not an attach into nobody filed as a launch error")
+        s._host_reexec_wait = ""
         self.assertNotIn("host.reexec-refused", self._kinds(d))
         self.assertIn("host (web): the session host is ending its CLI, so it is not re-executed into def67890; the connect "
                       "finishes that end and relaunches the session", be._test_logs)
@@ -973,6 +977,7 @@ class BackendHostRules(unittest.TestCase):
                          "neither is a problem for the error center")
         self.assertIsNone(asyncio.run(ask("no such launcher")))
         self.assertEqual(self._kinds(d), ["host.reexec-refused"], "any other refusal files its row, as before")
+        self.assertEqual(getattr(s, "_host_reexec_wait", ""), "", "and waits for nothing, as before")
 
     def test_the_reexec_wait_needs_a_listener_not_a_socket_path(self):
         """Round two of the re-exec review: the kernel's wait for the re-executed host passed on the lease's version, the holder
@@ -1273,6 +1278,61 @@ class BackendHostRules(unittest.TestCase):
         rows = [json.loads(l) for l in (Path(d) / "states" / (SID + ".jsonl")).read_text().splitlines()]
         self.assertEqual(rows[-1]["state"], "waiting", "waiting on its host; the next send tries the attach again")
         self.assertEqual((sb.read_reg(Path(d), SID) or {}).get("queue"), ["kept"], "no crash-resume nudge")
+
+    # _finish_ending_host, the connect loop's road for a host whose CLI an earlier `end` cut off from its stdin
+    # (2026-11-25): CPU-only, so CI runs it (its SDK-gated end-to-end tests skip where no claude_agent_sdk is installed)
+    def _ending_session(self, be, marked):
+        return types.SimpleNamespace(sid=SID, name="web", backend=be, _mark_cut_spend=lambda: marked.append(1))
+
+    def test_finishing_an_ending_host_marks_the_cut_signals_term_ends_and_records_the_end(self):
+        d, be = self._be(short=True)
+        host, stop = self._serve_fake_host(d)
+        self.addCleanup(stop)
+        host.ending = True
+        marked = []
+        s = self._ending_session(be, marked)
+        failed = types.SimpleNamespace(ack_offset=-1, hello={"host": {"pid": 10, "start": "h"}})
+        with mock.patch.object(be, "_file_host_log_rows") as rows:
+            self.assertTrue(asyncio.run(sb.SdkSession._finish_ending_host(s, failed)), "the CLI is gone: relaunch")
+        self.assertEqual(host.signals, ["TERM"], "the CLI is ended with SIGTERM")
+        self.assertIn("end", [f["t"] for f in host.got], "then `end`, with the kill bound")
+        self.assertEqual(marked, [1], "the SIGTERM's cut is marked for the spend record, as _term_for_relaunch marks it")
+        self.assertEqual(be._host_recently_ended.get(SID), "10:h", "the host is one this kernel ended, not a death")
+        self.assertEqual(s._relaunch_termed[0], "host")
+        rows.assert_called_once()
+
+    def test_finishing_an_ending_host_retries_a_busy_answer_that_names_this_kernel(self):
+        # the failed attach's own connection, not yet read as gone by the host: a `busy` naming this kernel, retried
+        d, be = self._be(short=True)
+        host, stop = self._serve_fake_host(d)
+        self.addCleanup(stop)
+        host.ending, host.busy = True, True
+        def own(kernel):
+            host.busy = False                     # the host has now read the detach
+            return True
+        marked = []
+        with mock.patch.object(be, "_is_own_kernel", side_effect=own), mock.patch.object(be, "_file_host_log_rows"):
+            ok = asyncio.run(sb.SdkSession._finish_ending_host(self._ending_session(be, marked),
+                                                               types.SimpleNamespace(ack_offset=-1, hello=None)))
+        self.assertTrue(ok)
+        self.assertEqual(host.signals, ["TERM"])
+
+    def test_finishing_an_ending_host_held_by_another_kernel_stands_down(self):
+        # a `busy` naming another kernel while the lease still reads live: the end cannot be confirmed, so False (the
+        # caller stands down), and nothing is signalled through a connection this kernel does not have
+        d, be = self._be(short=True)
+        host, stop = self._serve_fake_host(d)
+        self.addCleanup(stop)
+        host.ending, host.busy = True, True
+        marked = []
+        with mock.patch.object(be, "_is_own_kernel", return_value=False), \
+             mock.patch.object(be, "_host_lease", return_value=({}, "attach")), mock.patch.object(be, "_file_host_log_rows"):
+            ok = asyncio.run(sb.SdkSession._finish_ending_host(self._ending_session(be, marked),
+                                                               types.SimpleNamespace(ack_offset=-1, hello=None)))
+        self.assertFalse(ok, "another kernel holds the host: stand down")
+        self.assertEqual(host.signals, [], "no SIGTERM")
+        self.assertEqual(marked, [], "no cut marked")
+        self.assertNotIn(SID, be._host_recently_ended)
 
     def _marked(self, d, holder="999999996:2", **reg):
         base = {"sid": SID, "name": "web", "alive": True, "lastSid": SID, "hostAttachFailed": {"host": holder, "t": 1.0, "tries": 4}}

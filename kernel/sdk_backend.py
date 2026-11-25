@@ -11868,6 +11868,7 @@ class SdkSession:
                         % (self.name, type(e).__name__, _mask_ids(e),
                            "the host is gone, so is its CLI" if gone else "the host still holds the CLI"), problem=not gone)
                 return gone
+        self._mark_cut_spend()             # the SIGTERM cuts work since the CLI's last result, as _term_for_relaunch records it
         try:
             await t.signal("TERM")
         except Exception as e:
@@ -16580,6 +16581,9 @@ class SdkBackend:
                 # follows reads the hello's `ending` and the connect finishes that end, then relaunches on a fresh CLI
                 self._log("host (%s): the session host is ending its CLI, so it is not re-executed into %s; the connect "
                           "finishes that end and relaunches the session" % (sess.name, self.code_version), problem=False)
+                # an ending host is about to exit: the connect reads the lease again first, so a host that exits between
+                # this answer and the attach takes the orphan road, not an attach into nobody filed as a launch error
+                sess._host_reexec_wait = "ran"
                 return None
             if not ans.get("ok"):
                 problem_row(self.state_dir, "the session host for %s runs code version %s and refused to re-exec into %s (%s); attached as is"
