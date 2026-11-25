@@ -6,10 +6,10 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
-- Step: S3 done (branch `romp_fix-s3`). romp-transcript reads both dumps' transcripts with every summary line
-  identical to Python's reader, records compared in full, and matches Python's cache read for read on 42 lockstep
-  steps of the identity contract (`tools/rust-spike/check_store.py`). What it holds and which Python behaviors it
-  keeps on purpose: "S3 as built" below. S2 done before it: `tools/rust-spike/dump_world.py` dumps the small and the
+- Step: S3 done (branch `romp_fix-s3`), with the review's fixes. romp-transcript reads both dumps' transcripts with
+  every summary line identical to Python's reader, records compared in full, and matches Python's cache read for read
+  on 46 lockstep steps of the identity contract and on 1,200 random ones (`tools/rust-spike/check_store.py --fuzz 6`).
+  What it holds and which Python behaviors it keeps on purpose: "S3 as built" below. S2 done before it: `tools/rust-spike/dump_world.py` dumps the small and the
   large world, every self-check passes on both, and `--check` gives byte-identical dumps across two hash seeds and
   two roots ("S2 as built"). S1 before that (romp-json matches `json.dumps` on 3,264 golden cases and 499,869
   random floats).
@@ -18,8 +18,9 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 - Next action: S4, the typed loader for `snapshot.json` and `trees/`, then the port in the order of
   `s2-design.md` section 2, scoped by `coverage/port.json`. Regenerate a dump with
   `python3 tools/rust-spike/dump_world.py --world small` (or `large`); never commit one. Re-run S3's comparison
-  with `python3 tools/rust-spike/check_store.py --dump DIR` (repeatable) after any change to romp-transcript or to
-  Python's reader. S6 should read "What the store holds" under "S3 as built" before measuring.
+  with `python3 tools/rust-spike/check_store.py --dump DIR --fuzz 6` (`--dump` repeatable) after any change to
+  romp-transcript or to Python's reader. S6 should read "What the store holds" under "S3 as built" before measuring:
+  its memory must be measured after appends too, not only on a cold read.
 - Priority: Mac bug fixes come first. When one is open, finish it before taking the next spike step. S2 was finished
   while the session-crash fix PR waited on its full test run.
 - External crates: lczh approved `serde` and `serde_json` with their dependencies on 2026-11-25. They are pinned
@@ -173,9 +174,11 @@ What S4 learns from `coverage/port.json` (the same on both worlds):
 
 `romp-spike store DUMP` prints the canonical summary of a dump's `transcripts/`. `romp-spike store-serve` keeps one
 store across stdin requests for the lockstep cases. `tools/rust-spike/check_store.py` builds the same summary
-through Python's reader and compares it line for line. It covers both dumps, an edge corpus of 62 lines plus an
-unreadable file, and 8 identity cases of 42 steps, each step stating the read kind it is built to produce. It plants
-one defect per comparison (`--plant`) and shows each one caught.
+through Python's reader and compares it line for line. It covers both dumps, an edge corpus of 69 lines plus an
+unreadable file, and 9 identity cases of 46 steps, each step stating the read kind it is built to produce. `--fuzz N`
+adds two seeded randomized checks: mutated lines through the same comparison, and random file changes in lockstep.
+They found the two defects the review reported, which the fixed corpus and cases had missed. It plants one defect per
+comparison (`--plant`) and shows each one caught; a plant that moves nothing prints `NOT CAUGHT` and fails the run.
 
 Python behaviors kept on purpose (parity first: the plan defers anything that changes what the user sees). Each one
 serves stale data in a case Python serves stale data, and each is pinned by a Rust test and a lockstep step:
@@ -185,18 +188,25 @@ serves stale data in a case Python serves stale data, and each is pinned by a Ru
   0.12 microseconds near 1.78e9 s) count as one mtime.
 - On growth, only the 64 bytes before the held offset are checked, and the inode is not. A change earlier in the
   file, or a longer file renamed over the path with the same guard bytes, is read as an append over the old prefix.
+  The window's edge is pinned: a same-size change at offset - 64 is a guard failure, at offset - 65 a rewrite.
 - The held-byte CRC covers `[0, offset)` only. So a same-size change confined to an unconsumed partial line passes as
   a touch, and the partial is rescanned anyway.
 - A file that shrank only by its torn tail (not below the held offset) is read from zero under Python's name
-  "rewrite". A `chmod` moves only the ctime, so an unreadable file whose mtime and size stand is still served from its
+  "rewrite". That includes a partial cut short that still runs past the held offset, since growth is judged against
+  the size the entry saw, not its offset. A `chmod` moves only the ctime, so an unreadable file whose mtime and size stand is still served from its
   entry.
 
 Where it departs from Python:
-- The decoder refuses two kinds of record, by design and loudly: one holding a lone surrogate, which a Rust `String`
-  cannot carry, and one nested past 512 levels, since the decoder is recursive. The index still keeps both records,
-  and their summary fields print exactly, because strings are carried as UTF-16 units. The comparison names these
-  lines as expected and checks that Python's record really has the property: 1 lone surrogate and 2 deep lines in
-  the corpus, none in either world.
+- The decoder refuses two kinds of record, by design and loudly. One is a record whose final value holds a lone
+  surrogate, in a string or a key, which a Rust `String` cannot carry. The other is one whose final value nests past
+  512 levels, since the decoder is recursive. The final value is the record Python builds. A value under a repeated
+  key that a later value replaces is not part of it, so it never makes a record undecodable. The decoder marks such a
+  value, skips a deep one with an iterative pass that still checks its syntax, and refuses only when a mark survives to
+  the root. The index still keeps both kinds of record, and their summary fields print exactly, because strings are
+  carried as UTF-16 units. The comparison names these lines as expected and checks that Python's record really has the
+  property: 3 lone-surrogate and 3 deep lines in the corpus, none in either world. Four more corpus lines put the
+  offending value under a replaced key, and they decode in full. Until the review's fix the decoder refused at the
+  first offending value, even when a later repeat replaced it. Real transcripts never repeat keys.
 - The tail guard is compared with the bytes the store holds. Python compares with a 64-byte copy that it re-reads
   from the file after each scan. The two are identical unless the file changes mid-read.
 - Python's nesting limit moves with the C stack depth at the call. It measured 9,997 at top level and through the
@@ -216,6 +226,12 @@ What the store holds, for S6 (counted, not measured):
 - Projected against Python's published figures for its record cache, that is about 0.41 of the decoded heap (2.86
   bytes per file byte, `_scan_jsonl_stream`'s lab measurement) and about 0.37 of the lab's resident growth (3.1
   bytes per file byte, streamed, tracemalloc off). Both are above the gate's one third.
+- That projection is for a cold read only. Appends grow it. After one line was appended to each file of the large
+  world, allocation went from 96.0 MB (1.16 bytes per held byte) to 178.7 MB (2.16). `Entry::extend` appends with
+  `extend_from_slice`, which doubles the buffer the first read had shrunk to fit. This was reproduced with a scratch
+  example program, not committed. Resident memory may grow less, since capacity never written may never become
+  resident. Still, S6 must measure after appends, not only a cold index. A chunked buffer (fixed-size blocks, no copy
+  on growth) or an exact reserve (a copy on every append) would bound it; S6's numbers decide which.
 - So the plan's raw-bytes design may miss the memory gate as built. The cheap moves are `shrink_to_fit` on the index
   and, much larger, holding only the index (0.11 bytes per file byte here) and fetching a record's bytes by a
   positioned read after an identity check. S6 measures it; this projection is not a result.
@@ -258,3 +274,20 @@ What the store holds, for S6 (counted, not measured):
     `romp-json`.
   - Held for the large world: 82.7 MB of bytes plus a 9.45 MB index, 96.0 MB allocated. Projected at 0.37 to 0.41 of
     Python's per-byte cache figures, above the one-third gate (S6 measures).
+- 2026-11-25: S3 review fixes (`check_store.py --dump small --dump large --fuzz 6`: OK in 20.5 s of wall time).
+  - Decoder: a value under a repeated key that a later value replaced could still refuse the record. The reviewer's
+    differential fuzz found 154 of about 103,000 records. Now only a lone surrogate or deep nesting that survives to
+    Python's record refuses one.
+  - Edge corpus: 69 lines (7 added: 4 now decode in full, 3 are named refusals), mismatches 0, expected 3 lone
+    surrogate and 3 deep. Identity cases: 9 cases, 46 steps, mismatches 0. The added steps are a partial cut short
+    past the held offset (rewrite) and same-size edits at offset - 64 (guard) and offset - 65 (rewrite).
+  - `--fuzz 6`: 180,000 mutated lines (73,296 records kept by Python), mismatches 0, with 15,205 lone-surrogate and
+    5,894 deep records named. 1,200 random lockstep steps, mismatches 0.
+  - Each new check fails on its target. The committed decoder fails 4 corpus lines and 8,272 fuzzed records, every
+    one a wrong refusal. Mutant m1 (growth judged against the held offset) fails the new shrink step and 805 fuzz
+    steps. Mutant m3 (a 32-byte guard) fails the offset - 64 step and 101 fuzz steps. The vt-strip and skip-held-crc
+    plants fail 12,154 fuzz lines and 141 fuzz steps.
+  - Rust tests: 32 (16 unit, 16 identity cases). Both dumps still match line for line, mismatches 0 (small: 325
+    records in full; large: 135,005 records by CRC).
+  - Memory: after one appended line per file of the large world, 178.7 MB allocated (2.16 bytes per held byte), up
+    from 96.0 MB cold. S6 must measure after appends.

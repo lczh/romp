@@ -218,6 +218,47 @@ fn a_shrink_is_reindexed_and_dropping_only_the_partial_is_a_rewrite() {
 }
 
 #[test]
+fn a_partial_cut_short_is_a_rewrite_not_a_growth() {
+    // Growth is judged against the size the entry saw, not its held offset: a 10-byte partial cut to 5 bytes leaves
+    // the file past the offset but smaller than before, and Python reads it from zero.
+    let t = Tmp::new();
+    let p = t.path("a.jsonl");
+    let body = recs(0..3);
+    write(&p, format!("{body}{{\"torn\": 1").as_bytes(), T0);
+    let mut s = Store::new();
+    s.read(&p);
+    let (generation, off) = (s.get(&p).unwrap().generation(), s.get(&p).unwrap().offset());
+    assert_eq!(s.get(&p).unwrap().size(), off + 10);
+    write(&p, format!("{body}{{\"tor").as_bytes(), T0 + 1);
+    assert_eq!(s.read(&p), ReadKind::Rewrite);
+    let e = s.get(&p).unwrap();
+    assert_ne!(e.generation(), generation);
+    assert_eq!((e.records(), e.offset(), e.size()), (3, off, off + 5));
+}
+
+#[test]
+fn the_tail_guard_is_exactly_the_64_bytes_before_the_held_offset() {
+    let t = Tmp::new();
+    let p = t.path("a.jsonl");
+    let body = recs(0..4).into_bytes();
+    let n = body.len();
+    let flip = |b: &[u8], at: usize| {
+        assert!(b[at].is_ascii_alphanumeric(), "the premise: a byte inside a string or key");
+        let mut b = b.to_vec();
+        b[at] = if b[at] == b'X' { b'Y' } else { b'X' };
+        b
+    };
+    write(&p, &body, T0);
+    let mut s = Store::new();
+    s.read(&p);
+    let at64 = flip(&body, n - 64); // the first byte the guard holds
+    write(&p, &at64, T0 + 1);
+    assert_eq!(s.read(&p), ReadKind::Guard);
+    write(&p, &flip(&at64, n - 65), T0 + 2); // the last byte before it: only the held CRC sees it
+    assert_eq!(s.read(&p), ReadKind::Rewrite);
+}
+
+#[test]
 fn a_relocated_file_is_judged_by_size_mtime_and_inode() {
     let t = Tmp::new();
     let p = t.path("a.jsonl");

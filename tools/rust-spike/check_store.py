@@ -11,20 +11,28 @@ Three comparisons, each with a planted defect it must catch (the Rust store buil
   --dump DIR   every file of a dump_world.py dump's transcripts/ (repeatable). Plant: no-tool-result.
   edge corpus  one file of lines chosen at the edges of Python's acceptance (bytes.strip, bytes.splitlines, json.loads
                in strict mode: NaN, lone surrogates, the 4,300-digit integer limit, the 9,997 nesting limit, a BOM,
-               invalid UTF-8, duplicate keys, escaped keys). Plant: vt-strip.
+               invalid UTF-8, duplicate keys, escaped keys, repeated keys over values the decoder refuses).
+               Plant: vt-strip.
   cases        the identity contract in lockstep on temp files: append, a torn last line, touch, same-size rewrites
-               inside and outside the tail guard, a same-size rewrite that keeps its mtime, two mtimes one float
-               apart, shrink, relocation by rename, deletion, a directory. Each step changes the file once, then
+               inside and outside the tail guard and at its edge (offset - 64 and offset - 65), a same-size rewrite
+               that keeps its mtime, two mtimes one float apart, shrink (a partial cut short but still past the held
+               offset among them), relocation by rename, deletion, a directory. Each step changes the file once, then
                Python and a long-lived `romp-spike store-serve` read it; compared: how the read was served (Python's
                ROMP_READER_TRACE kind, or hit, absent, failed), the generation (renumbered per side), and the whole
                summary with every record in full. Every step also states the kind it is built to produce, so a case
                that stopped exercising its road fails. Plant: skip-held-crc.
+  --fuzz N     two randomized checks, seeds 1..N (seconds per seed): --fuzz-lines mutated lines (corpus lines and
+               records with bytes changed, tokens inserted, spans cut, lines spliced, repeated keys put first or last)
+               through the store comparison, and --fuzz-steps random file changes over two files in lockstep (appends,
+               partials, cuts, truncations, one-byte edits near the end and anywhere, touches one second, a
+               microsecond, 50 ns or nothing apart, renames over, removals). Plants: vt-strip and skip-held-crc.
 
-Two differences are expected and named, never counted as passes silently: the Rust decoder refuses a record holding a
-lone surrogate (a Rust String cannot carry one) and one nested past 512 levels, so its `rec` reads "undecodable: ..."
-on those lines while every other field must still match.
+Two differences are expected and named, never counted as passes silently: the Rust decoder refuses a record whose
+final value (what Python keeps after a repeated key replaces an earlier value) holds a lone surrogate, in a string or a
+key (a Rust String cannot carry one), or nests past 512 levels. Its `rec` reads "undecodable: ..." on those lines while
+every other field must still match, and Python's record must really have the property named.
 
-    python3 tools/rust-spike/check_store.py --dump <tmp>/romp-spike/small --dump <tmp>/romp-spike/large
+    python3 tools/rust-spike/check_store.py --dump <tmp>/romp-spike/small --dump <tmp>/romp-spike/large [--fuzz 6]
 
 Python's module is imported with its state root, home and Claude root pointed into a temp directory, which is removed
 afterwards; every case file lives there too. Nothing is installed: stdlib only.
@@ -34,6 +42,7 @@ import importlib.util
 import io
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -294,6 +303,14 @@ def edge_lines():
         ("NaN inside a record", '{"type": "nan", "v": [NaN, -Infinity, 1e400, -0.0, 1E2]}'),
         ("a UTF-8 BOM before a record", chr(0xFEFF) + "{}"),
         ("a lone surrogate in uuid and type", '{"uuid": "%s", "type": "%sx"}' % (esc("d800"), esc("dc00"))),
+        ("a lone surrogate under a repeated key the last value replaces (decodes)", '{"type": "%s", "type": "ok"}' % esc("d800")),
+        ("nesting 600 under a repeated key the last value replaces (decodes)", '{"a": %s, "a": 1}' % deep(600)),
+        ("a lone surrogate role in a message a later message replaces (decodes)",
+         '{"message": {"role": "%s"}, "message": {"role": "user"}}' % esc("dc00")),
+        ("a lone surrogate key under a replaced value (decodes)", '{"m": {"%s": 1}, "m": 2}' % esc("dc00")),
+        ("a lone surrogate the last value keeps (Rust's decoder refuses)", '{"type": "ok", "type": "%s"}' % esc("d800")),
+        ("nesting 600 the last value keeps (Rust's decoder refuses)", '{"a": 1, "a": %s}' % deep(600)),
+        ("a lone surrogate key (Rust's decoder refuses)", '{"%s": 1}' % esc("d800")),
         ("a surrogate pair and every escape in type", '{"type": "a%sb"}' % "".join((
             BS + '"', BS + BS, BS + "/", BS + "b", BS + "f", BS + "n", BS + "r", BS + "t", esc("0001"), esc("007f"),
             esc("00e9"), esc("d83d") + esc("de00")))),
@@ -405,6 +422,13 @@ def change(data, old, new, where):
     return data[:at] + new + data[at + len(old):], at
 
 
+def flip(data, at):
+    """`data` with the alphanumeric byte at `at` replaced by another one (the same size, still the same JSON shape)."""
+    c = data[at:at + 1]
+    assert c.isalnum(), (at, c)
+    return data[:at] + (b"Y" if c == b"X" else b"X") + data[at + 1:]
+
+
 def cases(root):
     """[(case, path, [(step, action, expected kind)])]: each action changes the file once (None: no change). The
     premises a step relies on (a byte inside or outside the 64-byte guard, two mtimes one float apart) are asserted
@@ -454,11 +478,22 @@ def cases(root):
 
     d = P("shrink")
     out.append(("shrink", d, [
-        ("first read, a partial at the end", lambda: put(d, recs(0, 4) + b'{"torn": 1', ns(1)), "zero"),
-        ("the partial dropped (smaller, not below the held offset)", lambda: put(d, recs(0, 4), ns(2)), "rewrite"),
-        ("two records dropped", lambda: put(d, recs(0, 2), ns(3)), "shrunk"),
-        ("truncated to nothing", lambda: put(d, b"", ns(4)), "shrunk"),
-        ("one record appended", lambda: add(d, rec(0), ns(5)), "grown"),
+        ("first read, a 10-byte partial at the end", lambda: put(d, recs(0, 4) + b'{"torn": 1', ns(1)), "zero"),
+        ("the partial cut to 5 bytes (smaller, still past the held offset)", lambda: put(d, recs(0, 4) + b'{"tor', ns(2)),
+         "rewrite"),
+        ("the partial dropped (smaller, not below the held offset)", lambda: put(d, recs(0, 4), ns(3)), "rewrite"),
+        ("two records dropped", lambda: put(d, recs(0, 2), ns(4)), "shrunk"),
+        ("truncated to nothing", lambda: put(d, b"", ns(5)), "shrunk"),
+        ("one record appended", lambda: add(d, rec(0), ns(6)), "grown"),
+    ]))
+
+    w = P("window")
+    wb = recs(0, 6)
+    w64, w65 = flip(wb, len(wb) - 64), flip(flip(wb, len(wb) - 64), len(wb) - 65)
+    out.append(("the tail guard's edge: the 64 bytes before the held offset", w, [
+        ("first read", lambda: put(w, wb, ns(1)), "zero"),
+        ("a byte at exactly offset - 64 changed, same size, new mtime", lambda: put(w, w64, ns(2)), "guard"),
+        ("a byte at offset - 65 changed, same size, new mtime", lambda: put(w, w65, ns(3)), "rewrite"),
     ]))
 
     e = P("relocate")
@@ -531,35 +566,50 @@ class RustServe:
 GEN_RE = re.compile(r'^\{"kind": "([a-z]+)", "generation": (\d+|null), ')
 
 
-def run_cases(em, binary, root, plant=None):
-    rs = RustServe(binary, plant)
-    gens = ({}, {})
-    res = {"plant": plant, "cases": 0, "steps": 0, "mismatches": 0, "kindMisses": 0, "first": [], "kinds": {}}
+class Lockstep:
+    """Python's reader and a long-lived `romp-spike store-serve`, read in turn: one `read(path)` gives both answers as
+    comparable lines (how the read was served, the generation renumbered per side and path, the whole summary with
+    every record in full)."""
 
-    def renumber(side, path, raw):
+    def __init__(self, em, binary, plant=None):
+        self.em, self.rs, self.gens = em, RustServe(binary, plant), ({}, {})
+
+    def renumber(self, side, path, raw):
         if raw is None:
             return "null"
-        ranks = gens[side].setdefault(path, {})
+        ranks = self.gens[side].setdefault(path, {})
         return str(ranks.setdefault(raw, len(ranks) + 1))
+
+    def read(self, path):
+        """(Python's kind, Rust's kind, Python's line, Rust's line)."""
+        kind, ent = py_read(self.em, path)
+        if ent is None:
+            body = '"file": null, "lines": []'
+        else:
+            body = '"file": %s, "lines": [%s]' % (header(path, ent), ", ".join(py_summary_from_entry(path, ent)))
+        py = '{"kind": "%s", "generation": %s, %s}' % (kind, self.renumber(0, path, ent[6] if ent else None), body)
+        r = self.rs.read(path)
+        m = GEN_RE.match(r)
+        if not m:
+            raise CheckError("unexpected store-serve line: %r" % r[:120])
+        raw = None if m.group(2) == "null" else int(m.group(2))
+        r = '{"kind": "%s", "generation": %s, ' % (m.group(1), self.renumber(1, path, raw)) + r[m.end():]
+        return kind, m.group(1), py, r
+
+    def close(self):
+        self.rs.close()
+
+
+def run_cases(em, binary, root, plant=None):
+    ls = Lockstep(em, binary, plant)
+    res = {"plant": plant, "cases": 0, "steps": 0, "mismatches": 0, "kindMisses": 0, "first": [], "kinds": {}}
     try:
         for case, path, steps in cases(root):
             res["cases"] += 1
             for label, act, want in steps:
                 if act:
                     act()
-                kind, ent = py_read(em, path)
-                if ent is None:
-                    body = '"file": null, "lines": []'
-                else:
-                    lines = py_summary_from_entry(path, ent)
-                    body = '"file": %s, "lines": [%s]' % (header(path, ent), ", ".join(lines))
-                py = '{"kind": "%s", "generation": %s, %s}' % (kind, renumber(0, path, ent[6] if ent else None), body)
-                r = rs.read(path)
-                m = GEN_RE.match(r)
-                if not m:
-                    raise CheckError("unexpected store-serve line: %r" % r[:120])
-                raw = None if m.group(2) == "null" else int(m.group(2))
-                r = '{"kind": "%s", "generation": %s, ' % (m.group(1), renumber(1, path, raw)) + r[m.end():]
+                kind, rkind, py, r = ls.read(path)
                 res["steps"] += 1
                 res["kinds"][kind] = res["kinds"].get(kind, 0) + 1
                 if kind != want:
@@ -568,15 +618,167 @@ def run_cases(em, binary, root, plant=None):
                 if py != r:
                     res["mismatches"] += 1
                     if len(res["first"]) < 6:
-                        res["first"].append("%s / %s: Python %s, Rust %s" % (case, label, kind, m.group(1)))
+                        res["first"].append("%s / %s: Python %s, Rust %s" % (case, label, kind, rkind))
     finally:
-        rs.close()
+        ls.close()
     return res
 
 
 def py_summary_from_entry(path, ent):
     offs = ent[7]
     return ["".join(record_line(i, offs[2 * i], offs[2 * i + 1], r, True)) for i, r in enumerate(ent[4])]
+
+
+# ───────────────────────────── the randomized checks (--fuzz) ─────────────────────────────
+# Seeded, so a failure replays: `--fuzz N` runs seeds 1..N of both. The fixed corpus and cases above missed a decoder
+# refusal under a repeated key and a growth judged against the held offset; these two checks found both.
+FUZZ_BYTES = b'"' + bytes([92]) + b"{}[],:0123456789-+eE.ntrufalsNIy \t\r\x0b\x0c\x1c\x00\x7f\xff\xed\xa0"
+FUZZ_KEYS = ["type", "uuid", "parentUuid", "timestamp", "message", "role", "content", "id", "tool_use_id", "a"]
+FUZZ_WRAPS = [b"", b"", b" ", b"\t", b"\x0b", b"\x0c", b"\x1c", b"\r", b"\x0b\x0c "]
+
+
+def fuzz_pieces():
+    """(values a repeated key may carry, tokens to insert): what the Rust decoder refuses, and ordinary JSON."""
+    e = lambda h: BS + "u" + h                                        # noqa: E731
+    deep = "[" * 600 + "]" * 600
+    values = ['"%s"' % e("d800"), '"x%s"' % e("dc00"), deep, "[%s]" % deep, '{"role": "%s"}' % e("dc00"),
+              '{"%s": 1}' % e("d800"), '"ok"', "5", "null", "[1, 2]", '"%s"' % (e("d83d") + e("de00")),
+              '{"role": "r", "content": [{"type": "tool_use", "id": "X"}]}', '{"type": "tool_result", "tool_use_id": "W"}']
+    tokens = ['"', BS, BS + "u", e("d800"), e("dc00"), e("d83d") + e("de00"), "NaN", "-Infinity", "1e400", "-0", "[", "]",
+              "{", "}", ",", ":", " ", '"type": ', '"message": ', "[" * 600, "]" * 600]
+    return ([v.encode() for v in values],
+            [t.encode() for t in tokens] + [b"\r", b"\x0b", b"\x0c", b"\x1c", b"\x00", b"\x7f", b"\xff", b"\xed\xa0\x80",
+                                            "﻿".encode()])
+
+
+def fuzz_lines(rng, n):
+    """`n` lines, each a corpus line or a transcript-shaped record changed one to three times at random."""
+    pool = [b for _, b in edge_lines() if len(b) <= 4096] + [rec(i).rstrip(b"\n") for i in range(12)]
+    values, tokens = fuzz_pieces()
+    plain = [v for v in values if BS.encode() not in v and len(v) < 600] * 2     # a kept value is mostly an ordinary one
+    out = []
+    for _ in range(n):
+        b = bytearray(rng.choice(pool))
+        for _ in range(rng.choice((1, 1, 1, 1, 2, 3))):
+            op, at = rng.choice((0, 1, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6)), rng.randrange(len(b) + 1)
+            if op == 0 and b:                                        # one byte changed
+                b[min(at, len(b) - 1)] = rng.choice(FUZZ_BYTES)
+            elif op == 1:                                            # a token inserted
+                b[at:at] = rng.choice(tokens)
+            elif op == 2:                                            # a span deleted
+                del b[at:at + rng.randint(1, 8)]
+            elif op == 3 and b.find(b"{") >= 0:                      # a member put first: a later repeat replaces it
+                i = b.find(b"{") + 1
+                b[i:i] = b'"%s": %s, ' % (rng.choice(FUZZ_KEYS).encode(), rng.choice(values))
+            elif op == 4 and b.rfind(b"}") >= 0:                     # a member put last: it replaces an earlier one
+                i = b.rfind(b"}")
+                b[i:i] = b', "%s": %s' % (rng.choice(FUZZ_KEYS).encode(), rng.choice(values + plain))
+            elif op == 5:                                            # bytes.strip's edges
+                b = bytearray(rng.choice(FUZZ_WRAPS) + bytes(b) + rng.choice(FUZZ_WRAPS))
+            else:                                                    # two lines spliced
+                other = rng.choice(pool)
+                b = b[:at] + other[rng.randrange(len(other) + 1):]
+        out.append(bytes(b).replace(b"\n", b" "))
+    return out
+
+
+def run_line_fuzz(em, binary, root, seed, n, plant=None):
+    """The store comparison over one file of `fuzz_lines` (seed `seed`), with the edge corpus's expected deviations."""
+    d = os.path.join(root, "fuzz-lines-%d-%s" % (seed, plant or "clean"))
+    os.makedirs(os.path.join(d, "transcripts"))
+    p = os.path.join(d, "transcripts", "fuzz.jsonl")
+    with open(p, "wb") as f:
+        for b in fuzz_lines(random.Random(seed), n):
+            f.write(b + b"\n")
+    os.utime(p, ns=(T0_NS, T0_NS))
+    try:
+        return compare_store_dir(em, binary, d, True, plant)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def fuzz_op(rng, path, clock):
+    """One random change to `path`, or none; its label. `clock` is a one-item list, the last mtime in ns: a step moves
+    it by a second, a microsecond, 50 ns (the same float) or not at all."""
+    def stamp():
+        clock[0] += rng.choice((10 ** 9, 10 ** 9, 10 ** 9, 1000, 50, 0))
+        return clock[0]
+    data = open(path, "rb").read() if os.path.isfile(path) else None
+    j = rng.randrange(100)
+    op = rng.choice(("append", "append", "partial", "rest", "truncate", "cut", "edit-tail", "edit", "touch", "swap",
+                     "remove", "nothing")) if data is not None else rng.choice(("write", "write", "nothing"))
+    if op == "write" or (op != "nothing" and data is not None and not data and op.startswith("edit")):
+        put(path, recs(j, j + rng.randint(0, 4)), stamp())
+    elif op == "append":
+        add(path, recs(j, j + rng.randint(1, 3)), stamp())
+    elif op == "partial":
+        add(path, rec(j)[:rng.randrange(1, len(rec(j)))], stamp())
+    elif op == "rest":
+        add(path, rec(j)[rng.randrange(len(rec(j))):], stamp())
+    elif op == "truncate":
+        put(path, data[:rng.randrange(len(data) + 1)], stamp())
+    elif op == "cut":                                                # a few bytes off the end: often a partial cut short
+        put(path, data[:max(0, len(data) - rng.randint(1, 12))], stamp())
+    elif op in ("edit-tail", "edit"):                                # one byte, the same size
+        at = max(0, len(data) - rng.randint(1, 130)) if op == "edit-tail" else rng.randrange(len(data))
+        put(path, data[:at] + bytes([rng.choice(b"XY0 {}")]) + data[at + 1:], stamp())
+    elif op == "touch":
+        touch(path, stamp())
+    elif op == "swap":                                               # renamed over: the same bytes, or more after them
+        swap(path, data + (recs(j, j + 1) if rng.random() < 0.5 else b""), stamp())
+    elif op == "remove":
+        os.remove(path)
+    return op
+
+
+def run_lockstep_fuzz(em, binary, root, seed, n, plant=None):
+    """`n` random steps over two files, both sides reading after each; every line must match."""
+    rng = random.Random(seed)
+    d = os.path.join(root, "fuzz-steps-%d-%s" % (seed, plant or "clean"))
+    os.makedirs(d)
+    paths = [os.path.join(d, "f%d.jsonl" % k) for k in range(2)]
+    ls, clock = Lockstep(em, binary, plant), [T0_NS]
+    res = {"plant": plant, "steps": 0, "mismatches": 0, "first": [], "kinds": {}}
+    try:
+        for step in range(n):
+            path = rng.choice(paths)
+            op = fuzz_op(rng, path, clock)
+            kind, rkind, py, r = ls.read(path)
+            res["steps"] += 1
+            res["kinds"][kind] = res["kinds"].get(kind, 0) + 1
+            if py != r:
+                res["mismatches"] += 1
+                if len(res["first"]) < 4:
+                    res["first"].append("seed %d step %d (%s on %s): Python %s, Rust %s" % (
+                        seed, step, op, os.path.basename(path), kind, rkind))
+    finally:
+        ls.close()
+        shutil.rmtree(d, ignore_errors=True)
+    return res
+
+
+def run_fuzz(em, binary, root, seeds, nlines, nsteps, plants):
+    """Both randomized checks over seeds 1..seeds, then (with `plants`) each once more under a planted defect."""
+    lines = {"seeds": seeds, "linesPerSeed": nlines, "records": 0, "mismatches": 0, "expected": {}, "first": []}
+    steps = {"seeds": seeds, "stepsPerSeed": nsteps, "steps": 0, "mismatches": 0, "kinds": {}, "first": []}
+    for seed in range(1, seeds + 1):
+        r = run_line_fuzz(em, binary, root, seed, nlines)
+        lines["records"] += r["records"]
+        lines["mismatches"] += r["mismatches"]
+        for k, v in r["expected"].items():
+            lines["expected"][k] = lines["expected"].get(k, 0) + v
+        lines["first"].extend(("seed %d %s" % (seed, f)) for f in r["first"][:4 - len(lines["first"])])
+        r = run_lockstep_fuzz(em, binary, root, seed, nsteps)
+        steps["steps"] += r["steps"]
+        steps["mismatches"] += r["mismatches"]
+        for k, v in r["kinds"].items():
+            steps["kinds"][k] = steps["kinds"].get(k, 0) + v
+        steps["first"].extend(r["first"][:4 - len(steps["first"])])
+    planted = {}
+    if plants:
+        planted["fuzz lines"] = run_line_fuzz(em, binary, root, 1, nlines, PLANTS["edge"])
+        planted["fuzz steps"] = run_lockstep_fuzz(em, binary, root, 1, nsteps, PLANTS["cases"])
+    return lines, steps, planted
 
 
 # ───────────────────────────── main ─────────────────────────────
@@ -590,17 +792,27 @@ def say_store(res, what):
         print("    " + f)
 
 
+def say_plant(plant, where, n, unit, first):
+    print("planted defect %s (%s): %s, %d mismatching %s; first: %s" % (
+        plant, where, "caught" if n > 0 else "NOT CAUGHT", n, unit, (first or ["none"])[0][:200]))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dump", action="append", default=[], help="a dump_world.py output directory (repeatable)")
     ap.add_argument("--full", action="store_true", help="compare the dumps' records in full, not by CRC-32")
     ap.add_argument("--bin", help="a built romp-spike (default: cargo build --release)")
     ap.add_argument("--no-plants", action="store_true", help="skip the planted-defect self-checks")
+    ap.add_argument("--fuzz", type=int, default=0, metavar="SEEDS",
+                    help="also run the two randomized checks over seeds 1..SEEDS (each seed: --fuzz-lines mutated lines "
+                         "through the store comparison, --fuzz-steps random file changes in lockstep)")
+    ap.add_argument("--fuzz-lines", type=int, default=30000, metavar="N", help="mutated lines per seed (default 30000)")
+    ap.add_argument("--fuzz-steps", type=int, default=200, metavar="N", help="lockstep steps per seed (default 200)")
     ap.add_argument("--json", help="write the results here")
     args = ap.parse_args(argv)
     binary = rust_binary(args.bin)
     root = tempfile.mkdtemp(prefix="romp-s3-check-")
-    results, ok = {"dumps": [], "edge": None, "cases": None, "plants": {}}, True
+    results, ok = {"dumps": [], "edge": None, "cases": None, "plants": {}, "fuzz": None}, True
     try:
         em = load_event_model(os.path.join(root, "py"))
         for d in args.dump:
@@ -626,6 +838,24 @@ def main(argv=None):
         for f in res["first"]:
             print("    " + f)
         ok &= res["mismatches"] == 0 and res["kindMisses"] == 0
+        fuzz_planted = {}
+        if args.fuzz > 0:
+            froot = os.path.join(root, "files", "fuzz")
+            os.makedirs(froot)
+            t = time.monotonic()
+            lines, steps, fuzz_planted = run_fuzz(em, binary, froot, args.fuzz, args.fuzz_lines, args.fuzz_steps,
+                                                  not args.no_plants)
+            results["fuzz"] = {"lines": lines, "steps": steps, "wallS": round(time.monotonic() - t, 1)}
+            exp = ", ".join("%d %s" % (n, k) for k, n in sorted(lines["expected"].items())) or "none"
+            print("fuzz lines: %d seeds x %d lines, %d records kept by Python, mismatches %d, expected deviations: %s" % (
+                args.fuzz, args.fuzz_lines, lines["records"], lines["mismatches"], exp))
+            for f in lines["first"]:
+                print("    " + f)
+            print("fuzz lockstep: %d seeds x %d steps, mismatches %d; kinds %s" % (
+                args.fuzz, args.fuzz_steps, steps["mismatches"], ", ".join("%s %d" % kv for kv in sorted(steps["kinds"].items()))))
+            for f in steps["first"]:
+                print("    " + f)
+            ok &= lines["mismatches"] == 0 and steps["mismatches"] == 0
         if not args.no_plants:
             planted = {}
             if args.dump:
@@ -634,11 +864,11 @@ def main(argv=None):
             proot = os.path.join(root, "files", "cases-planted")
             os.makedirs(proot)
             planted["cases"] = run_cases(em, binary, proot, PLANTS["cases"])
-            results["plants"] = {k: {"plant": PLANTS[k], "mismatches": v["mismatches"], "first": v["first"][:2]}
+            planted.update(fuzz_planted)
+            results["plants"] = {k: {"plant": v["plant"], "mismatches": v["mismatches"], "first": v["first"][:2]}
                                  for k, v in planted.items()}
             for k, v in planted.items():
-                print("planted defect %s (%s): caught, %d mismatching %s; first: %s" % (
-                    PLANTS[k], k, v["mismatches"], "steps" if k == "cases" else "lines", (v["first"] or ["none"])[0][:200]))
+                say_plant(v["plant"], k, v["mismatches"], "steps" if k in ("cases", "fuzz steps") else "lines", v["first"])
             ok &= all(v["mismatches"] > 0 for v in planted.values())
         leftovers = [os.path.join(dp, n) for dp, _, fs in os.walk(os.path.join(root, "py")) for n in fs]
         if leftovers:
