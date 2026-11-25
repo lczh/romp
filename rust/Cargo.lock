@@ -78,6 +78,9 @@ dependencies = [
 [[package]]
 name = "romp-transcript"
 version = "0.0.0"
+dependencies = [
+ "romp-json",
+]
 
 [[package]]
 name = "romp-views"
