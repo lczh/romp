@@ -1975,12 +1975,13 @@ Claude Code opens to report it has ended, since that turn can start new work; if
 no such turn starts within 20 seconds, the kernel's periodic check lets the
 relaunch go. During the relaunch, an old CLI still running a few seconds after
 its last turn ended (background work keeps it alive) is ended the way a Restart
-ends it, not left for the twenty-minute grace. Meanwhile four of these settings show that they are
-waiting: the Billing sub-line says what the relaunch waits for; the effort badge
-shows switching-dots and the chat line says what it waits for; for bypass mode,
-the mode badge shows switching-dots and the dropdown's Bypass row and the tab's
-hover say what it waits for; and the fast badge shows switching-dots for the
-opt-in. The per-session environment and the two corrections show no mark.
+ends it, not left for the twenty-minute grace. Meanwhile four of these settings
+show that they are waiting: the Billing sub-line says what the relaunch waits
+for; the effort badge shows switching-dots and the chat line says what it waits
+for; for bypass mode, the mode badge shows switching-dots and the dropdown's
+Bypass row and the tab's hover say what it waits for; and the fast badge shows
+switching-dots for the opt-in. The per-session environment and the two
+corrections show no mark.
 A relaunch is a CLI launch, so it waits as well for one of the machine-wide
 launch slots a boot's resumes and the other spawns share (three unless
 `ROMP_BOOT_RESUME_CONCURRENCY` says otherwise): a change of the machine default
