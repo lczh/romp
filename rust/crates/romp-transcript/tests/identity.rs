@@ -1,7 +1,7 @@
 //! The identity contract on real files: append, a torn last line, touch, same-size rewrites, shrink, relocation,
 //! deletion. Each case states Python's answer (`_read_jsonl_entry_unlocked`); tools/rust-spike/check_store.py runs the
 //! same cases in lockstep against Python itself.
-use romp_transcript::{Field, FieldRef, ReadKind, Store, crc32, py_mtime};
+use romp_transcript::{Field, FieldRef, Growth, ReadKind, Store, crc32, py_mtime};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -366,4 +366,58 @@ fn the_planted_defect_changes_the_answer() {
     write(&p, body.replacen("u-001", "u-00X", 1).as_bytes(), T0 + 1);
     assert_eq!(s.read(&p), ReadKind::Touched, "without the CRC the rewrite passes as a touch");
     assert_eq!(uuids(&s, &p)[1], "u-001");
+}
+
+#[test]
+fn the_block_growth_holds_each_read_as_its_own_block_and_guards_across_them() {
+    // S6's growth policy (the default): an append read's bytes become one exact block, so nothing held is copied, every
+    // line is served from its block, and the 64-byte tail guard is gathered across blocks shorter than itself
+    let t = Tmp::new();
+    let p = t.path("a.jsonl");
+    write(&p, recs(0..3).as_bytes(), T0);
+    let mut s = Store::new();
+    assert_eq!(s.growth(), Growth::Blocks);
+    s.read(&p);
+    let mut body = recs(0..3);
+    let r3 = rec(3);
+    for (k, line) in [r3.as_str(), "{\"a\": 1}\n", "{}\n", "\n", "{\"b\": 22}\n"].iter().enumerate() {
+        append(&p, line.as_bytes(), T0 + 1 + k as u64);
+        body.push_str(line);
+        assert_eq!(s.read(&p), ReadKind::Grown, "append {k}");
+    }
+    let e = s.get(&p).unwrap();
+    assert_eq!((e.blocks(), e.bytes_held(), e.records()), (6, body.len(), 7));
+    let raw: Vec<u8> = e.lines().flat_map(|l| l.raw().to_vec()).collect();
+    let want: Vec<u8> = body.lines().filter(|l| !l.is_empty()).flat_map(|l| format!("{l}\n").into_bytes()).collect();
+    assert_eq!(raw, want, "every line read back from its block");
+    assert_eq!(uuids(&s, &p)[3], "u-003");
+    // a change inside the guard window, which spans the last five blocks (24 bytes of short lines, then rec(3)'s): a
+    // guard failure, read from zero
+    assert!(e.lines().last().unwrap().len() < 64);
+    let mut bad = body.clone().into_bytes();
+    let at = bad.len() - 40;
+    bad[at] = b'Z';
+    bad.extend_from_slice(rec(4).as_bytes());
+    write(&p, &bad, T0 + 10);
+    assert_eq!(s.read(&p), ReadKind::Guard);
+    assert_eq!(s.get(&p).unwrap().blocks(), 1);
+}
+
+#[test]
+fn the_doubling_growth_keeps_one_buffer_and_its_slack() {
+    let t = Tmp::new();
+    let p = t.path("a.jsonl");
+    write(&p, recs(0..8).as_bytes(), T0);
+    let (mut b, mut d) = (Store::new(), Store::with_growth(Growth::Double));
+    b.read(&p);
+    d.read(&p);
+    append(&p, rec(8).as_bytes(), T0 + 1);
+    assert_eq!((b.read(&p), d.read(&p)), (ReadKind::Grown, ReadKind::Grown));
+    let (eb, ed) = (b.get(&p).unwrap(), d.get(&p).unwrap());
+    assert_eq!((eb.blocks(), ed.blocks()), (2, 1));
+    assert_eq!(eb.bytes_held(), ed.bytes_held());
+    assert_eq!(uuids(&b, &p), uuids(&d, &p));
+    // the doubled buffer carries slack the blocks do not: at least the held bytes again, less the append
+    assert!(ed.allocated_bytes() > eb.allocated_bytes() + ed.bytes_held() / 2,
+            "double {} against blocks {}", ed.allocated_bytes(), eb.allocated_bytes());
 }

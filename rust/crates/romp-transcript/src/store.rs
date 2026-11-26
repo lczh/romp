@@ -24,10 +24,15 @@
 //! Reads are positioned (`FileExt::read_at`, Unix `pread`), never a memory map: the CLI can truncate a transcript in
 //! place, and touching a mapped page past the new end kills the process with SIGBUS.
 //!
-//! What an entry holds per kept record: its raw bytes inside the entry's buffer (which also keeps the bytes of
-//! blank and refused lines, everything in `[0, offset)`), one 64-byte `LineIndex` and 8 bytes per tool id. Decoded
-//! records are never held (`Line::decode` builds one for the caller). Python's entry holds every decoded record
-//! (measured at 2.86 heap bytes per file byte) plus 16 bytes of offsets per record and a 64-byte tail copy.
+//! What an entry holds per kept record: its raw bytes inside the entry's blocks (which also keep the bytes of blank
+//! and refused lines, everything in `[0, offset)`), one 64-byte `LineIndex` and 8 bytes per tool id. Decoded records
+//! are never held (`Line::decode` builds one for the caller). Python's entry holds every decoded record (measured at
+//! 2.86 heap bytes per file byte) plus 16 bytes of offsets per record and a 64-byte tail copy.
+//!
+//! How the held bytes grow (`Growth`, decided in S6, rust/SPIKE.md "S6 method"): by default each read's consumed
+//! bytes, whole lines only, become one block of exactly their size, so an append copies and frees nothing it held, a
+//! record never spans two blocks, and the index vectors are shrunk to fit after every read. `Growth::Double` keeps S3's
+//! store as built: one buffer extended in place, which doubles its capacity on the first append after a cold read.
 
 use crate::Plant;
 use crate::crc32;
@@ -39,6 +44,34 @@ use std::fs::{self, File, Metadata};
 use std::io;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
+
+/// How an entry's held bytes grow on an append read (the module docs; S6's decision).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Growth {
+    /// Each read's consumed bytes (whole lines) become one block of exactly their size; nothing held is copied or freed
+    /// on growth, and the index vectors are shrunk to fit after each read.
+    #[default]
+    Blocks,
+    /// One buffer extended in place (`Vec::extend_from_slice`, doubling its capacity): S3's store as built.
+    Double,
+}
+
+impl Growth {
+    pub fn parse(s: &str) -> Option<Growth> {
+        match s {
+            "blocks" => Some(Growth::Blocks),
+            "double" => Some(Growth::Double),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Growth::Blocks => "blocks",
+            Growth::Double => "double",
+        }
+    }
+}
 
 /// Bytes before the held offset re-read and compared before an append is trusted (`_JSONL_TAIL_GUARD`).
 pub const TAIL_GUARD: u64 = 64;
@@ -110,7 +143,11 @@ pub struct Entry {
     inode: u64,
     crc: u32,
     generation: u64,
-    bytes: Vec<u8>,
+    /// The held bytes `[0, offset)`, in blocks of whole lines, each starting at the matching `starts` offset (one
+    /// block under `Growth::Double`).
+    blocks: Vec<Vec<u8>>,
+    starts: Vec<u64>,
+    held: usize,
     lines: Vec<LineIndex>,
     tools: Vec<Span>,
 }
@@ -121,6 +158,7 @@ pub struct Store {
     next_gen: u64,
     scratch: Scratch,
     plant: Option<Plant>,
+    growth: Growth,
     pub stats: Stats,
 }
 
@@ -156,7 +194,23 @@ fn read_full_at(file: &File, buf: &mut [u8], off: u64) -> io::Result<usize> {
 
 impl Store {
     pub fn new() -> Self {
-        Store { entries: HashMap::new(), next_gen: 0, scratch: Scratch::default(), plant: None, stats: Stats::default() }
+        Store {
+            entries: HashMap::new(),
+            next_gen: 0,
+            scratch: Scratch::default(),
+            plant: None,
+            growth: Growth::default(),
+            stats: Stats::default(),
+        }
+    }
+
+    /// A store whose entries grow by `growth` (S6 measures both policies).
+    pub fn with_growth(growth: Growth) -> Self {
+        Store { growth, ..Store::new() }
+    }
+
+    pub fn growth(&self) -> Growth {
+        self.growth
     }
 
     /// A store with one deliberate defect, for the comparison's self-check (it must catch it).
@@ -221,7 +275,7 @@ impl Store {
             let touched = size == e.size && mtime != e.mtime && e.inode == inode;
             if grown || touched {
                 let tail_len = e.offset.min(TAIL_GUARD) as usize;
-                let tail = &e.bytes[e.bytes.len() - tail_len..];
+                let tail = e.tail(tail_len);
                 let mut guard = vec![0u8; tail_len];
                 let n = read_full_at(&file, &mut guard, e.offset - tail_len as u64)?;
                 self.stats.bytes_read += n as u64;
@@ -250,7 +304,9 @@ impl Store {
             inode,
             crc: 0,
             generation: self.next_gen,
-            bytes: Vec::new(),
+            blocks: Vec::new(),
+            starts: Vec::new(),
+            held: 0,
             lines: Vec::new(),
             tools: Vec::new(),
         };
@@ -286,13 +342,26 @@ impl Store {
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("{err:?}")))?;
         buf.truncate(consumed);
         e.crc = crc32::update(e.crc, &buf);
+        let at = e.offset;
         e.offset += consumed as u64;
-        if e.bytes.is_empty() {
-            buf.shrink_to_fit();
-            e.bytes = buf;
-        } else {
-            e.bytes.extend_from_slice(&buf);
+        match self.growth {
+            Growth::Double if e.held > 0 => e.blocks[0].extend_from_slice(&buf),
+            Growth::Double => {
+                buf.shrink_to_fit();
+                e.blocks = vec![buf];
+                e.starts = vec![at];
+            }
+            Growth::Blocks => {
+                if consumed > 0 {
+                    buf.shrink_to_fit();
+                    e.blocks.push(buf);
+                    e.starts.push(at);
+                }
+                e.lines.shrink_to_fit();
+                e.tools.shrink_to_fit();
+            }
         }
+        e.held += consumed;
         Ok(())
     }
 }
@@ -422,7 +491,11 @@ impl<'a> Line<'a> {
 
     /// The line as the file has it, terminator included.
     pub fn raw(&self) -> &'a [u8] {
-        &self.e.bytes[self.ix.off as usize..self.ix.off as usize + self.ix.len as usize]
+        let e = self.e;
+        // the block holding the line: lines never span blocks, since each block is whole lines one read consumed
+        let b = if e.blocks.len() == 1 { 0 } else { e.starts.partition_point(|&s| s <= self.ix.off) - 1 };
+        let at = (self.ix.off - e.starts[b]) as usize;
+        &e.blocks[b][at..at + self.ix.len as usize]
     }
 
     /// The JSON text: the line stripped as `bytes.strip()` strips it.
@@ -513,7 +586,31 @@ impl Entry {
 
     /// Bytes held: the file's `[0, offset)`.
     pub fn bytes_held(&self) -> usize {
-        self.bytes.len()
+        self.held
+    }
+
+    /// How many blocks hold them (one under `Growth::Double`).
+    pub fn blocks(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// The last `n` held bytes (n at most what is held), gathered across blocks: the tail guard's comparison.
+    fn tail(&self, n: usize) -> Vec<u8> {
+        let mut parts: Vec<&[u8]> = Vec::new();
+        let mut need = n;
+        for b in self.blocks.iter().rev() {
+            if need == 0 {
+                break;
+            }
+            let take = need.min(b.len());
+            parts.push(&b[b.len() - take..]);
+            need -= take;
+        }
+        let mut out = Vec::with_capacity(n);
+        for p in parts.iter().rev() {
+            out.extend_from_slice(p);
+        }
+        out
     }
 
     /// The index's size: one `LineIndex` per record plus one span per tool id.
@@ -521,9 +618,11 @@ impl Entry {
         self.lines.len() * std::mem::size_of::<LineIndex>() + self.tools.len() * std::mem::size_of::<Span>()
     }
 
-    /// What the entry's three vectors have allocated (held bytes, index and tool table, slack included).
+    /// What the entry's vectors have allocated (held blocks and their table, index and tool table, slack included).
     pub fn allocated_bytes(&self) -> usize {
-        self.bytes.capacity()
+        self.blocks.iter().map(Vec::capacity).sum::<usize>()
+            + self.blocks.capacity() * std::mem::size_of::<Vec<u8>>()
+            + self.starts.capacity() * std::mem::size_of::<u64>()
             + self.lines.capacity() * std::mem::size_of::<LineIndex>()
             + self.tools.capacity() * std::mem::size_of::<Span>()
     }

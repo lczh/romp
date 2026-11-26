@@ -1,9 +1,11 @@
 //! Layer 3 of rust/notes/s2-design.md section 2, "Tree facts and the anchor walk", over the typed tree and store:
 //! kernel._session_working with _suspended_after, _open_turn_progress and _last_plain_user_turn_t; _seg_anchors,
 //! _seg_jump (unlisted: the fold calls it when a segment has no reply), jd._prompt_anchor_uuid and _seg_last_text; and
-//! _feed_seg_fold, _feed_seg_walk, _feed_seg_plain_t and _FeedSegTurns.get without the held aggregate (_FEED_SEG_HELD,
-//! _turn_hold_key, _seams_fp, _feed_seg_copy), so the walk folds every turn. Each function follows its Python line for
-//! line. What a naive port would get wrong, each pinned by the edge cases (tools/rust-spike/dump_layer3.py
+//! _feed_seg_fold, _feed_seg_walk, _feed_seg_plain_t and _FeedSegTurns.get, by default without the held aggregate, so
+//! the walk folds every turn. S6 added the held aggregate (`SegHeld`: _FEED_SEG_HELD with _turn_hold_key, _seams_fp,
+//! the prefix compare, _feed_seg_copy, the store under the byte bound and _feed_seg_forget), used only when a build is
+//! given a table (`layer6::Build::with_held`), and the cheap bound's `ClosedPart`. Each function follows its Python line
+//! for line. What a naive port would get wrong, each pinned by the edge cases (tools/rust-spike/dump_layer3.py
 //! --edge-cases) and the randomized check (--fuzz):
 //! - The fold's maps are Python dicts: a later segment with the same key (jd._seg_key, `rompuuid:hash`, so two prompts
 //!   with the same text in two turns share one) overwrites the earlier one's value but keeps its place. The four maps
@@ -491,6 +493,49 @@ pub struct FeedSegWalk<'a> {
     pub turns: &'a [Turn],
     pub n_closed: usize,
     pub seg_turn: FeedSegTurns<'a>,
+    /// `w.start`: the first turn the walk folded (0 unless it began from a closed part, `ClosedPart`).
+    pub start: usize,
+    /// `w.base_plain`: the closed part's plain-prompt time (0 with none), which _feed_seg_plain_t starts from.
+    pub base_plain: Num,
+    /// What a walk over a held table carries to its finish (`SegHeld::finish`): None for a walk with no table.
+    pub hold: Option<Box<Hold<'a>>>,
+}
+
+/// A held walk's state between `SegHeld::walk` and `SegHeld::finish` (the _FeedSegWalk fields Python's store reads).
+#[derive(Debug)]
+pub struct Hold<'a> {
+    fsid: String,
+    head: Option<&'a str>,
+    fp: Vec<SeamFp<'a>>,
+    keys: Vec<HoldKey<'a>>,
+    /// `w.closed`: the maps over the closed turns, when the walk folded closed turns and has keys to hold them under.
+    closed: Option<SegMaps<'a>>,
+}
+
+/// The closed turns' part of a walk (S6, rust/SPIKE.md "S6 method"): the maps over `turns[..n_closed]` and their
+/// plain-prompt time, as kernel._FEED_SEG_HELD keeps them (its entry's maps and plain_t). S6's cheap bound folds it
+/// ahead of the timed build (`closed_part`, outside the clock) and hands it to `feed_seg_walk_from`, which then folds
+/// only the open turn: the held path with none of its own costs (the hold keys, the seams' fingerprint, the prefix
+/// compare, the map copy, the store), so it flatters the port. Not the held aggregate itself.
+#[derive(Debug, Clone)]
+pub struct ClosedPart<'a> {
+    pub maps: SegMaps<'a>,
+    pub plain_t: Num,
+}
+
+/// The closed part of `turns` (every turn but the last) for `feed_seg_walk_from`, or None when there is no closed turn
+/// (kernel._feed_seg_walk holds nothing then) or its fold raises (Python's walk then stores nothing). The plain-prompt
+/// time is `max(0, _last_plain_user_turn_t(closed))`, what _feed_seg_plain_t stores as the aggregate's plain_t.
+pub fn closed_part<'a>(turns: Option<&'a [Turn]>, store: Option<&'a Store>) -> Option<ClosedPart<'a>> {
+    let turns = turns.unwrap_or_default();
+    let n_closed = turns.len().saturating_sub(1);
+    if n_closed == 0 {
+        return None;
+    }
+    let mut maps = SegMaps::default();
+    fold_with(&mut maps, turns, 0, n_closed, store, None).ok()?;
+    let plain_t = py_max(Num::Int(0), last_plain_with(&turns[..n_closed], None));
+    Some(ClosedPart { maps, plain_t })
 }
 
 impl<'a> FeedSegWalk<'a> {
@@ -513,31 +558,361 @@ pub fn feed_seg_walk<'a>(turns: Option<&'a [Turn]>, store: Option<&'a Store>) ->
 }
 
 fn walk_with<'a>(turns: Option<&'a [Turn]>, store: Option<&'a Store>, plant: Option<Plant>) -> FeedSegWalk<'a> {
+    walk_from(turns, store, None, plant)
+}
+
+/// The walk begun from `closed` (S6's cheap bound, `ClosedPart`): its maps and plain-prompt time stand for every closed
+/// turn, so only the open turn is folded, as kernel._feed_seg_walk folds a session whose held entry covers every closed
+/// turn (`start == n_closed`). With None, or no closed turn, it is `feed_seg_walk`. The maps and the plain-prompt time
+/// come out as the walk over every turn gives them, since the fold is sequential and the closed part is that fold's
+/// prefix.
+pub fn feed_seg_walk_from<'a>(
+    turns: Option<&'a [Turn]>,
+    store: Option<&'a Store>,
+    closed: Option<ClosedPart<'a>>,
+) -> FeedSegWalk<'a> {
+    walk_from(turns, store, closed, None)
+}
+
+fn walk_from<'a>(
+    turns: Option<&'a [Turn]>,
+    store: Option<&'a Store>,
+    closed: Option<ClosedPart<'a>>,
+    plant: Option<Plant>,
+) -> FeedSegWalk<'a> {
     let turns = turns.unwrap_or_default();
     let n = turns.len();
     let n_closed = n.saturating_sub(1);
-    let mut maps = SegMaps::default();
-    let done = fold_with(&mut maps, turns, 0, n_closed, store, plant)
+    let (mut maps, start, base_plain) = match closed {
+        Some(c) if n_closed > 0 => (c.maps, n_closed, c.plain_t),
+        _ => (SegMaps::default(), 0, Num::Int(0)),
+    };
+    let done = fold_with(&mut maps, turns, start, n_closed, store, plant)
         .and_then(|()| fold_with(&mut maps, turns, n_closed, n, store, plant));
     let (ok, raised) = match done {
         Ok(()) => (true, None),
         Err(r) => (false, Some(r)),
     };
-    FeedSegWalk { maps, ok, raised, turns, n_closed, seg_turn: FeedSegTurns::new(turns, store) }
+    FeedSegWalk { maps, ok, raised, turns, n_closed, seg_turn: FeedSegTurns::new(turns, store), start, base_plain, hold: None }
 }
 
-/// kernel._feed_seg_plain_t(w): `max(max(0, plain(closed turns)), plain(the open turn))`, the larger of the closed
-/// turns' plain-prompt time and the open turn's, the first of equal values kept.
+// ───────────────────────────── the held aggregate (S6) ─────────────────────────────
+
+/// kernel._turn_hold_key(turn): (id, ended, atom count, end, the trigger's uuid, the newest atom uuid that is truthy).
+/// A restored pre-cut turn answers from its stored uuids in Python; the loader refuses such a turn (`pre`).
+#[derive(Debug, Clone, Copy)]
+pub struct HoldKey<'a> {
+    id: Option<&'a str>,
+    ended: bool,
+    atoms: usize,
+    end: Option<Num>,
+    trig: Option<&'a str>,
+    last: Option<&'a str>,
+}
+
+fn num_eq(a: Option<Num>, b: Option<Num>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.py_cmp(b) == Ordering::Equal,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+impl PartialEq for HoldKey<'_> {
+    /// Python's tuple `==`: numbers by value across int and float.
+    fn eq(&self, o: &Self) -> bool {
+        self.id == o.id
+            && self.ended == o.ended
+            && self.atoms == o.atoms
+            && num_eq(self.end, o.end)
+            && self.trig == o.trig
+            && self.last == o.last
+    }
+}
+
+pub fn turn_hold_key(turn: &Turn) -> HoldKey<'_> {
+    let atoms = turn.atoms.as_deref().unwrap_or_default();
+    let trig = match &turn.trigger {
+        Some(Some(tr)) => tr.uuid.as_ref().and_then(|u| u.as_deref()),
+        _ => None,
+    };
+    let last = atoms.iter().rev().find_map(|a| a.uuid().filter(|u| !u.is_empty()));
+    HoldKey { id: turn.id.as_deref(), ended: turn.ended.unwrap_or(false), atoms: atoms.len(), end: turn.end, trig, last }
+}
+
+/// One seam as kernel._seams_fp keeps it: (segs, `t` or 0, top, `text` or ""), compared by value.
+#[derive(Debug, Clone, Copy)]
+pub struct SeamFp<'a> {
+    segs: &'a [String],
+    t: Num,
+    top: Option<&'a str>,
+    text: Option<&'a str>,
+}
+
+impl PartialEq for SeamFp<'_> {
+    fn eq(&self, o: &Self) -> bool {
+        self.segs == o.segs && self.t.py_cmp(o.t) == Ordering::Equal && self.top == o.top && self.text == o.text
+    }
+}
+
+/// kernel._seams_fp(store): every seam with truthy `segs`, in store order. The loader types seams as dicts with a
+/// string list for `segs`, so the fingerprint cannot raise here (Python's walk then holds nothing).
+pub fn seams_fp(store: Option<&Store>) -> Vec<SeamFp<'_>> {
+    let seams = store.and_then(|st| st.seams.as_ref()).and_then(|s| s.as_deref()).unwrap_or_default();
+    seams
+        .iter()
+        .filter_map(|s| {
+            let segs = s.segs.as_ref().and_then(|v| v.as_deref()).filter(|v| !v.is_empty())?;
+            Some(SeamFp {
+                segs,
+                t: s.t.unwrap_or(Num::Int(0)),
+                top: s.top.as_ref().and_then(|t| t.as_deref()),
+                text: match &s.text {
+                    None => Some(""),
+                    Some(t) => t.as_deref(),
+                },
+            })
+        })
+        .collect()
+}
+
+/// kernel._FEED_SEG_STATS: the held walk's counters (the names GET /perf reports in builds.feed.memo).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SegStats {
+    pub seg_walks: u64,
+    pub seg_held: u64,
+    pub seg_walk_turns: u64,
+    pub seg_partial: u64,
+    pub seg_reset: u64,
+    pub seg_raised: u64,
+    pub seg_evict: u64,
+    pub seg_over_bound: u64,
+}
+
+impl SegStats {
+    /// (name, value) in kernel._FEED_SEG_STATS's order.
+    pub fn named(&self) -> [(&'static str, u64); 8] {
+        [
+            ("segWalks", self.seg_walks),
+            ("segHeld", self.seg_held),
+            ("segWalkTurns", self.seg_walk_turns),
+            ("segPartial", self.seg_partial),
+            ("segReset", self.seg_reset),
+            ("segRaised", self.seg_raised),
+            ("segEvict", self.seg_evict),
+            ("segOverBound", self.seg_over_bound),
+        ]
+    }
+}
+
+/// One held entry: (head, seams, keys, maps, plain_t, bytes, build) as kernel._FEED_SEG_HELD keeps it, with `tick` for
+/// the OrderedDict's least-recently-used order (bumped where Python moves the entry to the newest end).
+#[derive(Debug)]
+struct HeldEntry<'a> {
+    head: &'a str,
+    fp: Vec<SeamFp<'a>>,
+    keys: Vec<HoldKey<'a>>,
+    maps: SegMaps<'a>,
+    plain_t: Num,
+    bytes: u64,
+    build: u64,
+    tick: u64,
+}
+
+/// kernel._feed_seg_entry_bytes's estimate: 64 + 480 per turn key + 700 per segment key + 120 per citable uuid.
+fn entry_bytes(keys: usize, maps: &SegMaps<'_>) -> u64 {
+    64 + 480 * keys as u64 + 700 * maps.segs.len() as u64 + 120 * maps.cite.len() as u64
+}
+
+/// kernel._FEED_SEG_HELD and its counters across builds: a session's closed turns' maps, held under the turns' keys,
+/// its leaf and its seams, so the next walk folds only the turns since (the comment above _FEED_SEG_HELD).
+#[derive(Debug)]
+pub struct SegHeld<'a> {
+    entries: HashMap<String, HeldEntry<'a>>,
+    build: u64,
+    tick: u64,
+    bound: u64,
+    pub stats: SegStats,
+}
+
+impl<'a> SegHeld<'a> {
+    /// An empty table under the byte bound (kernel.FEED_SEG_HELD_BYTES).
+    pub fn new(bound: u64) -> Self {
+        SegHeld { entries: HashMap::new(), build: 0, tick: 0, bound, stats: SegStats::default() }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The held entries' estimated bytes (segBytes).
+    pub fn bytes(&self) -> u64 {
+        self.entries.values().map(|e| e.bytes).sum()
+    }
+
+    /// kernel._feed_seg_build_begin: a board build begins.
+    pub fn build_begin(&mut self) {
+        self.build += 1;
+    }
+
+    /// kernel._feed_seg_forget(alive_sids): drop the entries of sessions outside the build's alive set.
+    pub fn forget(&mut self, alive: &HashSet<&str>) {
+        let before = self.entries.len();
+        self.entries.retain(|k, _| alive.contains(k.as_str()));
+        self.stats.seg_evict += (before - self.entries.len()) as u64;
+    }
+
+    fn touch(&mut self) -> u64 {
+        self.tick += 1;
+        self.tick
+    }
+
+    /// kernel._feed_seg_walk(fsid, head, turns, store): the maps, the closed turns' part served from the held entry
+    /// where it stands (the same leaf, the same seams, its keys a prefix of the closed turns' keys), copied for this
+    /// derivation; an entry that cannot serve is deleted (segReset: no closed turn or keys, another leaf, other seams;
+    /// segPartial: the keys diverged inside it).
+    pub fn walk(
+        &mut self,
+        fsid: &str,
+        head: Option<&'a str>,
+        turns: Option<&'a [Turn]>,
+        store: Option<&'a Store>,
+    ) -> FeedSegWalk<'a> {
+        let turns = turns.unwrap_or_default();
+        let n = turns.len();
+        let n_closed = n.saturating_sub(1);
+        let fp = if n > 0 { seams_fp(store) } else { Vec::new() };
+        let keys: Vec<HoldKey<'a>> =
+            if head.is_some() && n_closed > 0 { turns[..n_closed].iter().map(turn_hold_key).collect() } else { Vec::new() };
+        let mut served: Option<(SegMaps<'a>, Num)> = None;
+        let mut start = 0;
+        if n > 0 && self.entries.contains_key(fsid) {
+            let e = &self.entries[fsid];
+            let hk = e.keys.len();
+            if keys.is_empty() || Some(e.head) != head || e.fp != fp {
+                self.entries.remove(fsid);
+                self.stats.seg_reset += 1;
+            } else if hk <= n_closed && keys[..hk] == e.keys[..] {
+                start = hk;
+                let (build, tick) = (self.build, self.touch());
+                let e = self.entries.get_mut(fsid).expect("present");
+                e.build = build;
+                e.tick = tick;
+                served = Some((e.maps.clone(), e.plain_t)); // _feed_seg_copy
+            } else {
+                self.entries.remove(fsid);
+                self.stats.seg_partial += 1;
+            }
+        }
+        let (mut maps, base_plain) = served.unwrap_or_else(|| (SegMaps::default(), Num::Int(0)));
+        let mut closed = None;
+        let mut done = fold_with(&mut maps, turns, start, n_closed, store, None);
+        if done.is_ok() {
+            if !keys.is_empty() && start < n_closed {
+                closed = Some(maps.clone()); // `w.closed = maps; maps = _feed_seg_copy(maps)`
+            }
+            done = fold_with(&mut maps, turns, n_closed, n, store, None);
+        }
+        let (ok, raised) = match done {
+            Ok(()) => (true, None),
+            Err(r) => {
+                closed = None;
+                self.stats.seg_raised += 1;
+                (false, Some(r))
+            }
+        };
+        let hold = Hold { fsid: fsid.to_string(), head, fp, keys, closed };
+        FeedSegWalk {
+            maps,
+            ok,
+            raised,
+            turns,
+            n_closed,
+            seg_turn: FeedSegTurns::new(turns, store),
+            start,
+            base_plain,
+            hold: Some(Box::new(hold)),
+        }
+    }
+
+    /// kernel._feed_seg_plain_t(w) over a held walk: the plain-prompt time, then (a walk over turns whose fold finished)
+    /// the counters, and the closed turns' aggregate stored under the byte bound, shedding the least recently used
+    /// entries this build has not used (segEvict), or not held at all (segOverBound, or segEvict when shedding would not
+    /// make room), keeping then the entry the walk was served from.
+    pub fn finish(&mut self, w: &mut FeedSegWalk<'a>) -> Num {
+        let (closed_t, best) = plain_parts(w, None);
+        if w.turns.is_empty() || !w.ok {
+            return best;
+        }
+        self.stats.seg_walks += 1;
+        self.stats.seg_held += w.start as u64;
+        self.stats.seg_walk_turns += (w.turns.len() - w.start) as u64;
+        let Some(h) = w.hold.as_mut() else { return best };
+        let Some(closed) = h.closed.take() else { return best };
+        let size = entry_bytes(h.keys.len(), &closed);
+        let old = self.entries.remove(&h.fsid);
+        let (build, bound) = (self.build, self.bound);
+        let keep = if size > bound {
+            self.stats.seg_over_bound += 1;
+            old
+        } else if size + self.entries.values().filter(|e| e.build == build).map(|e| e.bytes).sum::<u64>() > bound {
+            self.stats.seg_evict += 1;
+            old
+        } else {
+            let mut total = size + self.bytes();
+            if total > bound {
+                let mut lru: Vec<(u64, String)> =
+                    self.entries.iter().filter(|(_, e)| e.build != build).map(|(k, e)| (e.tick, k.clone())).collect();
+                lru.sort_unstable();
+                for (_, k) in lru {
+                    total -= self.entries.remove(&k).expect("listed").bytes;
+                    self.stats.seg_evict += 1;
+                    if total <= bound {
+                        break;
+                    }
+                }
+            }
+            Some(HeldEntry {
+                head: h.head.expect("a walk with keys has a head"),
+                fp: std::mem::take(&mut h.fp),
+                keys: std::mem::take(&mut h.keys),
+                maps: closed,
+                plain_t: closed_t,
+                bytes: size,
+                build,
+                tick: 0,
+            })
+        };
+        if let Some(mut k) = keep {
+            k.tick = self.touch();
+            self.entries.insert(h.fsid.clone(), k);
+        }
+        best
+    }
+}
+
+/// kernel._feed_seg_plain_t(w): `max(max(base, plain(closed turns from start)), plain(the open turn))`, the larger of
+/// the closed turns' plain-prompt time and the open turn's, the first of equal values kept (`base` is 0 and `start` 0
+/// unless the walk began from a closed part).
 pub fn feed_seg_plain_t(w: &FeedSegWalk<'_>) -> Num {
     plain_t_with(w, None)
 }
 
 fn plain_t_with(w: &FeedSegWalk<'_>, plant: Option<Plant>) -> Num {
-    let mut closed_t = Num::Int(0);
-    if w.n_closed > 0 {
-        closed_t = max_with(closed_t, last_plain_with(&w.turns[..w.n_closed], plant), plant);
+    plain_parts(w, plant).1
+}
+
+/// (the closed turns' plain-prompt time, what the aggregate stores; the larger of it and the open turn's).
+fn plain_parts(w: &FeedSegWalk<'_>, plant: Option<Plant>) -> (Num, Num) {
+    let mut closed_t = w.base_plain;
+    if w.start < w.n_closed {
+        closed_t = max_with(closed_t, last_plain_with(&w.turns[w.start..w.n_closed], plant), plant);
     }
-    max_with(closed_t, last_plain_with(&w.turns[w.n_closed..], plant), plant)
+    (closed_t, max_with(closed_t, last_plain_with(&w.turns[w.n_closed..], plant), plant))
 }
 
 // ───────────────────────────── answers as tools/rust-spike/dump_layer3.py writes Python's ─────────────────────────────
@@ -899,5 +1274,82 @@ mod tests {
         let a = atom(&asst("a1", "1", &"\u{e9}".repeat(79)));
         assert_eq!(seg_last_text(&[&a]), (Some("a1"), false));
         assert_eq!(last_text_with(&[&a], Some(Plant::FloorInBytes)), (Some("a1"), true));
+    }
+
+    fn turn_id(id: &str, n: u32, ended: bool) -> Turn {
+        let t = 100 * n;
+        let atoms = [user(&format!("u{n}"), &t.to_string(), &format!("ask number {n}")),
+                     asst(&format!("a{n}"), &(t + 1).to_string(), &format!("the long enough reply to ask {n}, more than eighty code points of prose so that it can be cited"))];
+        turn(&format!(r#"{{"id": "{id}", "atoms": [{}], "t": {t}, "end": {}, "ended": {ended}, "trigger": {{"uuid": "u{n}"}}}}"#,
+                      atoms.join(", "), t + 2))
+    }
+
+    fn entries_of<'a>(m: &SegMaps<'a>) -> (Vec<(String, SegEntry<'a>)>, Vec<&'a str>) {
+        let mut cite: Vec<&str> = m.cite.iter().copied().collect();
+        cite.sort_unstable();
+        (m.segs.iter().map(|(k, e)| (k.to_string(), *e)).collect(), cite)
+    }
+
+    #[test]
+    fn the_held_walk_serves_the_closed_turns_and_gives_the_full_walks_maps() {
+        let turns: Vec<Turn> = (1..=3).map(|n| turn_id(&format!("t{n}"), n, true)).collect();
+        let full = feed_seg_walk(Some(&turns), None);
+        let mut held = SegHeld::new(1 << 30);
+        for (build, (start, held_turns, walked)) in [(0usize, 0u64, 3u64), (2, 2, 4)].into_iter().enumerate() {
+            held.build_begin();
+            let mut w = held.walk("s", Some("p"), Some(&turns), None);
+            assert_eq!(w.start, start, "build {build}");
+            assert_eq!(entries_of(&w.maps), entries_of(&full.maps), "build {build}");
+            assert_eq!(held.finish(&mut w), feed_seg_plain_t(&full));
+            assert_eq!((held.stats.seg_held, held.stats.seg_walk_turns), (held_turns, walked));
+        }
+        assert_eq!((held.len(), held.stats.seg_walks, held.stats.seg_reset, held.stats.seg_partial), (1, 2, 0, 0));
+        // the cheap bound's closed part is the held entry's maps, so its walk agrees too
+        let w = feed_seg_walk_from(Some(&turns), None, closed_part(Some(&turns), None));
+        assert_eq!((w.start, entries_of(&w.maps)), (2, entries_of(&full.maps)));
+    }
+
+    #[test]
+    fn another_leaf_resets_and_a_diverged_or_longer_hold_is_partial() {
+        let turns: Vec<Turn> = (1..=3).map(|n| turn_id(&format!("t{n}"), n, true)).collect();
+        let edited: Vec<Turn> = [turn_id("t1", 1, false), turn_id("t2", 2, true), turn_id("t3", 3, true)].into();
+        fn fill<'a>(held: &mut SegHeld<'a>, turns: &'a [Turn]) {
+            let mut w = held.walk("s", Some("p"), Some(turns), None);
+            held.finish(&mut w);
+        }
+        let mut held = SegHeld::new(1 << 30);
+        fill(&mut held, &turns);
+        let mut w = held.walk("s", Some("q"), Some(&turns), None); // another leaf
+        assert_eq!((w.start, held.stats.seg_reset), (0, 1));
+        held.finish(&mut w); // stores under the new leaf
+        let mut w = held.walk("s", None, Some(&turns), None); // no leaf head: no keys, nothing held
+        assert_eq!((w.start, held.stats.seg_reset, held.len()), (0, 2, 0));
+        held.finish(&mut w);
+        assert_eq!(held.len(), 0, "a walk without keys stores nothing");
+        fill(&mut held, &turns);
+        let w = held.walk("s", Some("p"), Some(&edited), None); // the first closed turn's key moved
+        assert_eq!((w.start, held.stats.seg_partial), (0, 1));
+        fill(&mut held, &turns);
+        let w = held.walk("s", Some("p"), Some(&turns[..2]), None); // a rewind: fewer closed turns than held keys
+        assert_eq!((w.start, held.stats.seg_partial), (0, 2));
+    }
+
+    #[test]
+    fn the_byte_bound_refuses_an_aggregate_over_it_and_forget_drops_the_departed() {
+        let turns: Vec<Turn> = (1..=3).map(|n| turn_id(&format!("t{n}"), n, true)).collect();
+        let mut held = SegHeld::new(100);
+        held.build_begin();
+        let mut w = held.walk("s", Some("p"), Some(&turns), None);
+        held.finish(&mut w);
+        assert_eq!((held.len(), held.stats.seg_over_bound), (0, 1));
+        let mut held = SegHeld::new(1 << 30);
+        for sid in ["a", "b"] {
+            let mut w = held.walk(sid, Some("p"), Some(&turns), None);
+            held.finish(&mut w);
+        }
+        held.forget(&["a"].into_iter().collect());
+        assert_eq!((held.len(), held.stats.seg_evict), (1, 1));
+        assert_eq!(turn_hold_key(&turns[0]), turn_hold_key(&turn_id("t1", 1, true)));
+        assert_ne!(turn_hold_key(&turns[0]), turn_hold_key(&turn_id("t1", 1, false)));
     }
 }

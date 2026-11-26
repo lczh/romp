@@ -27,6 +27,10 @@
 //!     romp-spike store-serve [--plant NAME]
 //!         One store kept across requests, for tools/rust-spike/check_store.py's lockstep cases: each stdin line
 //!         `read<TAB>PATH` answers one JSON line {"kind", "generation", "file", "lines"} (records in full).
+//!     romp-spike measure cpu DUMP [--builds K] | romp-spike measure mem DIR PAYLOAD [--appends K]
+//!         S6's measurement (measure.rs, rust/SPIKE.md "S6 method"): the feed build's process CPU (cold, warm, the
+//!         entries alone) after checking its bytes against the oracle, or the transcript store's resident size cold
+//!         and after appends; one JSON line each, for tools/rust-spike/measure_drive.py.
 //!
 //! `--plant` makes one deliberate mistake, to show the comparison catches it: `float-tag` drops the int/float tag of
 //! the alive rows' mtime (1781099940.0 written as 1781099940) and gives the first tree's first atom a float `t`,
@@ -51,6 +55,8 @@
 //! the store's plants are no-tool-result, vt-strip and skip-held-crc.
 //! Exit status: 0 when everything matched, 1 on any difference, 2 on a usage or load error.
 
+mod measure;
+
 use romp_transcript::canon::{self, RecordMode};
 use romp_transcript::{Plant, ReadKind, Store};
 use std::io::{self, BufRead, BufWriter, Write};
@@ -73,7 +79,7 @@ use romp_views::snapshot::{Snapshot, Store as GoalStore};
 use romp_views::tree::{self, Atom, Content, Tree, Turn};
 
 const USAGE: &str =
-    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]\n       romp-spike layer5 DUMP|EDGE.json [--plant lowercase|em-text|uuid-exclude|outrun-float|prompt-bytes|idle-tail]\n       romp-spike layer6 DUMP|EDGE.json [--plant anchor-store-order|fsubmax-last|mt-or|land-first-equal|peers-unsorted|born-empty-kept]\n       romp-spike feed DUMP|EDGE.json [--plant bell-falsy-skip|serving-first-row|who-owner|parked-unsorted|notice-cap-held|absent-last]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
+    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]\n       romp-spike layer5 DUMP|EDGE.json [--plant lowercase|em-text|uuid-exclude|outrun-float|prompt-bytes|idle-tail]\n       romp-spike layer6 DUMP|EDGE.json [--plant anchor-store-order|fsubmax-last|mt-or|land-first-equal|peers-unsorted|born-empty-kept]\n       romp-spike feed DUMP|EDGE.json [--plant bell-falsy-skip|serving-first-row|who-owner|parked-unsorted|notice-cap-held|absent-last]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]\n       romp-spike measure cpu DUMP [--builds K]\n       romp-spike measure mem DIR PAYLOAD [--appends K]";
 const MAX_SHOWN: usize = 10;
 
 fn store_usage() -> ExitCode {
@@ -217,6 +223,7 @@ fn main() -> ExitCode {
     match cmd {
         "store" => return store_cmd(rest),
         "store-serve" => return serve_cmd(rest),
+        "measure" => return measure::cmd(rest),
         _ => {}
     }
     let (dir, plant) = match rest {
