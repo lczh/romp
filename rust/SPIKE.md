@@ -13,24 +13,29 @@ the small world, a short fuzz seed. Every agent brief for this spike must say so
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
 - Step: S6.1 (the memo port and the tuning lczh approved after S6) built on `romp_fix-memo2` and checked in full on the
-  cluster at d1f5bde6f, not yet merged; see "S6.1 memo port and tuning" and, for the cluster, its last part, "S6.1
-  results (cluster)". The port now has build_feed's per-session memo: kernel._feed_session_key's 31 components over
-  its own inputs (by value where Python computes them, from the snapshot's new recorded `keyFacts` where Python stats a
-  file), the deps re-evaluation, the LRU entry cache and the loop's serve-on-raise and forget, with the anchor table and
-  the held aggregate carried across builds. A new oracle (`tools/rust-spike/dump_memo.py`) runs the REAL key in Python
-  over scripted and random change sequences. Tuning: an in-tree FxHash for every map of the views crate, fat LTO, one
-  codegen unit, panic = abort. On the cluster (x86_64 Linux, CPython 3.12.11), every correctness job found 0
-  differences: 48 output directories, 0 failing (setup with 189 Rust tests; the small, large and large4 worlds, 19 steps
-  each, the large world's feed of 114,338 bytes identical and its memo sequence of 304 decisions equal to Python's; 43
-  fuzz directories; and the measurement), and the mutant sweep caught 47 of 47 (44 at 6e7febc7b; its three survivors,
-  3, 22 and 43, were gaps in the checks, closed in 1ef0933d8). The measurement, run twice on two nodes, both sides
-  memoized, large world at production's 0.46 misses per build: the port's build is 3.09 and 3.38 times cheaper than
-  Python's (a hit 5.13 and 5.35, one miss on the largest session 2.78 and 3.06). That is indicative only (not the
-  gate's platform); a position cost in the port's memo rows makes it understate the port (about 4.1 to 4.6 without it,
-  estimated), putting every miss on the largest session probably does too, and the file stats both sides leave out
-  make it overstate what the port would save in production. Production's memoized Python build averaged 5.0 ms of
-  wall time in S6's window, at most 0.15% of one core (5.6 ms and 0.08% since the kernel booted).
-  The first cluster smoke run (d73c655bd) failed on a null repoHead (no .git on the cluster), fixed in 6d7bbd8ef.
+  cluster at d1f5bde6f (its measurement at c57237149), not yet merged; see "S6.1 memo port and tuning" and, for the
+  cluster, its last part, "S6.1 results (cluster)". The port now has build_feed's per-session memo:
+  kernel._feed_session_key's 31 components over its own inputs (by value where Python computes them, from the snapshot's
+  new recorded `keyFacts` where Python stats a file), the deps re-evaluation, the LRU entry cache and the loop's
+  serve-on-raise and forget, with the anchor table and the held aggregate carried across builds. A new oracle
+  (`tools/rust-spike/dump_memo.py`) runs the REAL key in Python over scripted and random change sequences. Tuning: an
+  in-tree FxHash for every map of the views crate, fat LTO, one codegen unit, panic = abort. On the cluster (x86_64
+  Linux, CPython 3.12.11), every correctness job at d1f5bde6f found 0 differences: 48 output directories, 0 failing
+  (setup with 189 Rust tests; the small, large and large4 worlds, 19 steps each, the large world's feed of 114,338 bytes
+  identical and its memo sequence of 304 decisions equal to Python's; 43 fuzz directories; and the measurement), and the
+  mutant sweep caught 47 of 47 (44 at 6e7febc7b; its three survivors, 3, 22 and 43, were gaps in the checks, closed in
+  1ef0933d8). c57237149 changed only the measurement, and at it the setup (190 Rust tests) and the three worlds passed
+  again. The measurement with each side's memo rows in a phase of their own (c57237149, two runs on two EPYC 9474F
+  nodes), both sides memoized, large world at production's 0.46 misses per build: the port's build is 4.75 times cheaper
+  than Python's (a hit 7.18, one miss on the largest session 4.34) in the run to quote; the other run's 6.08 is inflated
+  by Python's miss row alone (12.53 ms against 8.31 to 8.49 in the three other runs). Short of 5 and indicative only
+  (not the gate's platform), with leans both ways: Python's loose wrapper correction on its memo rows (1.10 to 1.28 on
+  the large world) and the file stats both sides leave out favor the port; a Rust hit's deep copy of its entry and
+  putting every miss on the largest session favor Python. The first layout, which charged the port's memo rows a
+  position cost Python's never met, gave 3.09 and 3.38 (kept as history: "The fair-placement measurement" under "S6.1
+  results (cluster)"). Production's memoized Python build averaged 5.0 ms of wall time in S6's window, at most 0.15% of
+  one core (5.6 ms and 0.08% since the kernel booted). The first cluster smoke run (d73c655bd) failed on a null repoHead
+  (no .git on the cluster), fixed in 6d7bbd8ef.
 - Before it: S6 done and merged into `romp_fix` from `romp_fix-s6`, and independently reproduced (deciding CPU ratio 5.37
   against the reported 5.24; memory ratio 0.249 against 0.248). The full alternated measurement ran on fresh dumps
   (8 runs per configuration, both interpreters, CPU on the small, large and large4 worlds, memory cold and after
@@ -139,25 +144,22 @@ the small world, a short fuzz seed. Every agent brief for this spike must say so
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: S6.1's cluster work is done and written up ("S6.1 results (cluster)"; the runbook is in
-  `tools/rust-spike/orcd/setup.sh`'s header, and the counted runs departed from it in one way: the jobs wrote only to
-  scratch, and each stage was copied to the group pool from the login node and verified again there, after the pool's
-  NFS mount hung on some compute nodes). (1) Ask lczh whether to run the S6.1 measurement once on the Mac, the
-  gate's platform (arm64 CPython 3.13.18 on the M4 Max): one process, about 2.5 GB for about 10 minutes,
-  `measure_drive.py --cpu --memo --instrumented 11` as `measure.sbatch` now runs it. The port's memo rows now have a
-  phase of their own, as Python's have (2026-11-26, light checks only: "The port's memo rows in a phase of their own"
-  under "S6.1 results (cluster)"); that run, or a cluster rerun, shows whether the port's memo rows now move with round
-  parity as Python's do (the summary's `memo.byPositionMs`, both sides side by side). A gap between even and odd
-  rounds is expected on both sides, since in odd rounds both sides' memo rows follow a miss build, so the test is
-  whether the port's pattern matches Python's, not whether its gap is zero. Without the go-ahead, S7 quotes the
-  cluster figures as indicative. (2) Merge `romp_fix-memo2` into `romp_fix`: the correctness checks are complete, and
-  the merge does not wait on the Mac run. (3) S7. The decision S7 takes to lczh: whether a feed port is worth a month
-  when, with the memo on both sides, it is about three times cheaper per build on the cluster, short of five, with
-  leans both ways that the Mac run has not settled (the port's memo rows pay a position cost that understates it,
-  about 4.1 to 4.6 without it, estimated, and every miss on the largest session probably understates it too; the file
-  stats both sides would pay in production overstate what it saves; "What leans which way" under "S6.1 results
-  (cluster)"), the feed build took at most 0.15% of one core in production's window (wall time; 0.08% since the
-  kernel booted), and the memory gate failed on real transcripts (0.476 against one third).
+- Next action: S6.1's cluster work is done and written up ("S6.1 results (cluster)", the figures to quote in its "The
+  fair-placement measurement"; the runbook is in `tools/rust-spike/orcd/setup.sh`'s header, and the counted runs
+  departed from it in one way: the jobs wrote only to scratch, and each stage was copied to the group pool from the
+  login node and verified again there, after the pool's NFS mount hung on some compute nodes). (1) The cluster puts the
+  steady state at production's miss rate at about 4.75 times on the large world, short of 5 before the leans, so the
+  Mac run on the gate's platform (arm64 CPython 3.13.18 on the M4 Max) is the deciding measurement, and it needs lczh's
+  go-ahead: one process, about 2.5 GB for about 10 minutes, `measure_drive.py --cpu --memo --instrumented 11` as
+  `measure.sbatch` runs it. Without the go-ahead, S7 quotes the cluster figures as indicative. (2) Merge
+  `romp_fix-memo2` into `romp_fix`: the correctness checks are complete, and the merge does not wait on the Mac run.
+  (3) S7. The decision S7 takes to lczh: whether a feed port is worth a month when, with the memo on both sides and
+  each side's memo rows timed in a phase of their own, it is about 4.75 times cheaper per build on the cluster's large
+  world (3.46 on large4, 6.79 on small), short of five, with leans both ways that the Mac run has not settled
+  (Python's loose wrapper correction and the file stats both sides leave out favor the port; a Rust hit's deep copy and
+  every miss on the largest session favor Python; "What leans which way, now" under "S6.1 results (cluster)"), the
+  feed build took at most 0.15% of one core in production's window (wall time; 0.08% since the kernel booted), and the
+  memory gate failed on real transcripts (0.476 against one third).
 - Next action before S6.1 (kept as the record): S7, the report (S5, the serde_json::Value variant, stays in the plan and does not block it): the numbers
   against both gates from "S6 results" and `rust/notes/s6-runs.json`, what replicated and what did not, and the
   recommendation. Before S7 can read the memory gate, one item needs lczh: the OK to measure memory on real-shaped
@@ -3151,7 +3153,8 @@ revisions only the memo's checks changed (dump_memo.py's Runner, which now keeps
 the just-full bound, its edge steps and its fuzz generator; the edge fixture and its Rust test, `memo_edge.rs`;
 memo_mutants.py; this file): no Rust source the release binary is built from, no Cargo file, measurement tool or dump
 tool, and not the part of dump_memo.py the measurement imports (its KeyHarness). So the two runs time the same code on
-two machines.
+two machines. Two later runs at c57237149, with the port's memo rows in a phase of their own, give the figures to quote
+("The fair-placement measurement", below).
 
 **Correctness, in one sentence: every comparison at d1f5bde6f found 0 differences, and all 47 deliberate mistakes in the
 memo were caught.** collate.py passed all 48 output directories, 0 failing: setup (189 Rust tests passed, 0 failed);
@@ -3184,7 +3187,8 @@ set is one tuple: on the large world 38 walks, 16,839 turns held, 38 walked; the
 shows only the last build, which matches); and every memo build on both sides was either all hits or all but one (37
 hits and 1 miss on the large world, 3 and 1 on the others), the same two outcomes on both.
 
-**The measurement, in one sentence: with both sides memoized, at production's miss rate the port's build costs about a
+**The measurement in the first layout (biased against the port by the position cost in "What leans which way";
+kept as history), in one sentence: with both sides memoized, at production's miss rate the port's build costs about a
 third of Python's on the large world, not a fifth.** Python's cost over the port's, median of 8 paired runs:
 
 | Python over the port | large, run 1 | large, run 2 | large4, run 1 | large4, run 2 | small, run 1 | small, run 2 |
@@ -3269,10 +3273,11 @@ cluster ran only the tuned build, so these runs cannot say how much the tuning b
   the miss row follows the hit row there, not the derivations. Python's memo rows run in a phase of their own,
   alternating only with each other. The driver averages both positions, so it charges the port a cost Python's rows
   never meet. This is also why the port's whole memo-served build (0.31 and 0.33 ms, both of its positions among the
-  memo rows) reads cheaper than its memo loop alone (0.39). Taking only the port's odd-round medians gives 7.0 to 7.1
-  for the hit (7.09 and 7.00), 3.7 to 4.2 for the miss and 4.1 to 4.6 for the blend (4.59 and 4.12); those are ratios
-  of medians, not paired runs. Giving the port's memo rows a phase of their own would measure it. Which condition
-  production resembles (builds seconds apart, other kernel work between) is open.
+  memo rows) reads cheaper than its memo loop alone (0.39). The port's odd-round medians alone gave an estimate, as
+  ratios of medians: 7.09 and 7.00 for the hit, 3.7 to 4.2 for the miss, 4.59 and 4.12 for the blend. The port's memo
+  rows now have a phase of their own, and "The fair-placement measurement" below measured 7.38 and 7.18, 5.89 and
+  4.34, and 6.08 and 4.75 (4.75 the figure to quote). Which condition production resembles (builds seconds apart,
+  other kernel work between) is open.
 - A limit, not a lean: these CPUs and this interpreter are not the gate's platform (arm64 CPython 3.13.18 on the M4
   Max). On one Mac, S6's deciding ratio moved 1.3 times between interpreters (5.24 against 6.80 under Rosetta's x86_64
   3.12), and here two nodes moved the port's rows by up to 27% and Python's heldWarm region by up to 14.5%. Every ratio
@@ -3336,6 +3341,76 @@ sides by design (in odd rounds both sides' hit and miss rows follow a miss build
 right after the build before it did, its data still in cache), so what that field answers is whether the port's even/odd
 pattern now matches Python's, not whether the port's gap is zero.
 
+*The fair-placement measurement (c57237149, 2026-11-26).* The problem it fixed, in one sentence: in the first layout the
+port's memo rows took turns with its heavy rows, so in half the rounds a hit ran right after a full derivation of every
+session and cost 1.76 and 1.58 times what it cost in the other half (the even and odd medians), a cost Python's memo
+rows, timed in a phase of their own, never met. Two runs of `measure.sbatch` as changed above, 8 paired runs per world
+each, ran back to back on two different nodes with the CPU of the first layout's run 1 (EPYC 9474F). c57237149 changed
+only the measurement since d1f5bde6f (measure.rs, the driver, the job script), so the correctness results above stand;
+at c57237149 the setup (190 Rust tests) and the three worlds (19 steps each, 0 failing) passed again, and collate.py
+verified every output again on the copy in the group pool.
+
+**In one sentence: with each side's memo rows in a phase of their own, the port's build at production's miss rate is
+about 4.75 times cheaper than Python's on the large world, better than the first layout's 3.1 to 3.4 but short of 5,
+before the leans.** Medians of 8 paired runs; each ratio is the median of the runs' paired ratios, so it need not equal
+the quotient of the medians beside it:
+
+| Large world, ms: Python / port (ratio) | First layout, run 1 (9474F) | First layout, run 2 (9384X) | Fair run 1 (9474F) | Fair run 2 (9474F) |
+|---|---|---|---|---|
+| 38 hits | 1.97 / 0.386 (5.13) | 2.10 / 0.391 (5.35) | 2.06 / 0.280 (7.38) | 2.01 / 0.280 (7.18) |
+| One miss on s001 | 8.49 / 3.03 (2.78) | 8.43 / 2.69 (3.06) | 12.53 / 2.01 (5.89) | 8.31 / 1.92 (4.34) |
+| Blend at 0.46 misses per build | 5.00 / 1.61 (3.09) | 5.03 / 1.46 (3.38) | 6.94 / 1.08 (6.08) | 4.94 / 1.04 (4.75) |
+| large4 blend, small blend (ratios) | 2.80, 5.99 | 3.26, 5.87 | 4.47, 6.87 | 3.46, 6.79 |
+
+What moved between the layouts is the port, as intended: its hit fell from 0.386 and 0.391 ms to 0.280 in both fair runs
+(its odd rounds already read 0.278 in the first layout's run 1), its miss from 3.03 and 2.69 to 2.01 and 1.92. Python's
+side, now over 11 instrumented builds instead of 5, did not: its hit region 2.06 and 2.01 against 1.97 and 2.10, its
+miss 8.31 in fair run 2 against 8.49 and 8.43. The odd-round estimate on the same CPU model, 4.59, was within 4% of fair
+run 2's 4.75. The parity test came out as predicted on the large world: the port's hit costs about the same in even and
+odd rounds (`evenOverOdd` 0.98 in both runs), as Python's does (0.99 and 1.00), and its miss is dearer in even rounds
+(1.07 and 1.04), as Python's is (1.13 and 1.07 on its plain rows, placed as the port's; 1.16 and 1.15 on its
+instrumented regions), since in odd rounds the miss re-derives s001 right after the previous miss did. One place it does
+not match: on large4 the port's hit is 11% dearer in even rounds (1.11 in both runs, about 55 against 50 microseconds)
+where Python's is 2 to 3% cheaper; these runs cannot say why, and 5 microseconds a build does not move the blend. Every
+check passed: no failed runs, no full collection in any memo build, no predecessor flag, and the miss's held walk equal
+on both sides on every world (on the large world one walk, 2,999 turns held, one walked). S6's deciding row read 6.54
+and 6.33 (6.39 and 6.08 before).
+
+*What replicated, and what did not.* The port's memo figures replicated within 5% (hit 0.2804 and 0.2805 ms, miss 2.006
+and 1.918, blend 1.079 and 1.041), and so did Python's hit region (2.5%); the small world's memo ratios within 1.6%,
+large4's hit ratio within 1.7%. Python's miss did not: 12.53 ms in fair run 1 against 8.31, 51% higher, which moves the
+large world's miss ratio 36% and its blend 28%, and large4's blend 29% (Python's miss there 7.28 against 5.61 ms). The
+side that moved is Python's, on one row.
+
+*The instructive exception: fair run 1's Python miss.* It is not one slow run: the median of 8 is 12.53 ms while the
+fastest, 8.25, matches the other three runs' medians (8.31 to 8.49), so at least four of the 8 were above 12.5 ms, in
+both parities (13.33 and 12.18). The node ran slower in that run's heavy rows too, on both sides: Python's every-turn
+region 435.9 ms against 396.9 in fair run 2, the port's every-turn build 42.6 against 39.7, and on large4 two spin-rate
+flags on one Python process (10.98 and 10.94 loops per CPU microsecond at its two calibrations, against a median of
+12.39). In the memo phase it shows only in Python's miss, the phase's one Python row that derives a 3,000-turn session;
+the port's miss, the same derivation, moved 4.6%. Why Python's derivation took the hit and the port's barely did, the
+summaries cannot say. Its wrapper check reads 1.28 there, its plain miss build noisy too (13.17 ms, up to 23.08).
+Quoting fair run 2 is not picking the friendlier number: each of its parts agrees with the other runs, and its 4.75 is
+the lower of the two, the one less favorable to the port.
+
+*What leans which way, now.* The position cost is gone; the rest stands.
+- Toward the port: Python's wrapper correction is loose on its memo rows. On the large world its instrumented builds,
+  less the wrappers' estimated cost, run 1.14 and 1.12 times its plain hit build and 1.28 and 1.10 times its plain miss
+  build (0.90 to 1.12 on large4 and small), so some wrapper cost is probably left in Python's timed region. Spread
+  evenly over the build, that would overstate Python by about that factor; where it falls, the summary cannot say. The
+  check is new, so the first layout's memo rows went unchecked.
+- Toward the port in production: both sides leave out the key's file stats, and Python's stand-ins (3.15 ms a build on
+  the large world, more than its whole hit region) are subtracted. As an illustration only, 0.5 ms of stat work a build
+  on each side would take fair run 2's hit ratio from 7.2 to about 3.2 and its blend from 4.75 to about 3.5.
+- Against the port: a Rust hit re-folds a copy of the stored entry, a deep copy Python does not pay; and the blend puts
+  every miss on s001, the largest session, while the small world, with no dominant session, gives 6.8.
+- A limit: EPYC CPUs and CPython 3.12.11 are not the gate's platform (arm64 CPython 3.13.18 on the M4 Max), and on one
+  Mac S6's deciding ratio moved 1.3 times between interpreters.
+
+The blend still follows the miss ratio: in fair run 2 the expected miss work is 2.93 ms of Python's 4.94 ms blend and
+0.76 of the port's 1.04, so the blend (4.75) sits nearer the miss ratio (4.34) than the hit's (7.18). For the same
+reason large4, one long session's derivation dominating, stays the exception at 3.46.
+
 *The cluster, briefly.* The group pool's NFS mount hung on some compute nodes: on node1623 a job's slurmstepd sat in D
 state for 2 hours and a stat of the pool timed out while scratch answered, and node1294 had shown the same signature
 earlier. Jobs now write only to scratch, and each stage is copied to the pool from the login node and verified again
@@ -3344,17 +3419,18 @@ dependencies unpinned (three packages under a week old); the committed pinned sp
 2026-11-19) replaced it before any counted result.
 
 *What it means for the larger question: is a Rust port of the feed worth it?* The memo was the piece S6 said the steady
-state needed, and with it the port wins the steady state: about 3 times cheaper per build on these CPUs, about 4.1 to
-4.6 without the position cost (estimated), short of the plan's five and before the file stats both sides would pay in
-production. The stakes are small in absolute terms. In S6's `/perf` window (477 s on the Mac, 6 sessions) Python ran
-140 feed builds and spent 696.7 ms inside build_feed in all, measured as wall time (the kernel times each build as a
-time.monotonic difference, in a multithreaded process, so the build's CPU time is at most that): about 5.0 ms a build,
-at most 0.15% of one core. Since the kernel booted (the later snapshot: 6,954 builds, 38,885 ms over 13.6 hours) it was
-5.6 ms a build and at most about 0.08% of one core, so the figure does not rest on one 8-minute window, which
-included the measurement's own session. At the window's load a port three times cheaper would save at most about 0.1%
-of a core, and a port that cost nothing at most 0.15%. The memory gate already failed on real transcripts (0.476
-against one third). So the CPU case for porting the feed rests on a fraction of a percent of one core at production's
-load, and S7 should set that number beside the ratios. A Mac run can move the ratio; it cannot move those stakes.
+state needed, and with it the port wins the steady state: about 4.75 times cheaper per build on the large world on these
+CPUs with each side's memo rows placed fairly, short of the plan's five, before the file stats both sides would pay in
+production and with the leans above unsettled. Only the Mac run can say whether the gate's platform clears 5. The stakes
+are small in absolute terms. In S6's `/perf` window (477 s on the Mac, 6 sessions) Python ran 140 feed builds and spent
+696.7 ms inside build_feed in all, measured as wall time (the kernel times each build as a time.monotonic difference, in
+a multithreaded process, so the build's CPU time is at most that): about 5.0 ms a build, at most 0.15% of one core.
+Since the kernel booted (the later snapshot: 6,954 builds, 38,885 ms over 13.6 hours) it was 5.6 ms a build and at most
+about 0.08% of one core, so the figure does not rest on one 8-minute window, which included the measurement's own
+session. At the window's load a port 4.75 times cheaper would save at most about 0.12% of a core, and a port that cost
+nothing at most 0.15%. The memory gate already failed on real transcripts (0.476 against one third). So the CPU case for
+porting the feed rests on a fraction of a percent of one core at production's load, and S7 should set that number beside
+the ratios. A Mac run can move the ratio; it cannot move those stakes.
 
 ## Log
 
@@ -3767,3 +3843,9 @@ load, and S7 should set that number beside the ratios. A Mac run can move the ra
   port's); the heavy rows' process state changed with the move; gen2 builds dropped and counted in instrumented
   figures; the wrapper check and a held-walk check on the memo rows; `seq` on every port build, from which the driver
   checks each memo build's predecessor. Light checks only on this Mac, nothing measured.
+- 2026-11-26: the fair-placement measurement, two cluster runs at c57237149 on two EPYC 9474F nodes ("The
+  fair-placement measurement" under "S6.1 results (cluster)"); the setup and the three worlds rerun and passing at it.
+  The large world's blend is 4.75 in the run to quote, against 3.09 and 3.38 in the first layout and the estimate of
+  4.1 to 4.6 it replaces; the other run's 6.08 is inflated by Python's miss row alone (12.53 ms against 8.31 to 8.49).
+  The port's even/odd pattern now matches Python's on the large world (not on large4's hit row, by 5 microseconds).
+  Python's memo rows carry wrapper-check flags (1.10 to 1.28 on the large world), a new lean toward the port.
