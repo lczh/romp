@@ -34,8 +34,8 @@
 //!
 //! The summary-anchor memo (_SUMMARY_ANCHOR_MEMO) and _pure_delegation_top's per-derivation memo are left out.
 //! _pure_delegation_top's memo lives for one derivation, where a hit returns what a miss computes; its children index
-//! and _dictated_prompt_uuid's prompt index are built per call here (`PromptIndex` is built once per session, as the
-//! memo does). _SUMMARY_ANCHOR_MEMO returns what a miss computes only within one build, or across builds of the same
+//! and _dictated_prompt_uuid's prompt index are built per call here (`PromptIndex` is built once per session, on its
+//! first lookup, as the memo does). _SUMMARY_ANCHOR_MEMO returns what a miss computes only within one build, or across builds of the same
 //! parse and seams: its key, `(fsid, nid, seg key, hash(line), the turn's end or t, stub_ok)`, leaves out the
 //! segment's atoms, and only eviction clears it. A seam stamped between two builds keeps the head segment's key and
 //! the turn's end, so the second build's hit serves the landing found over the whole unsplit segment, while this port
@@ -46,6 +46,7 @@
 //! truthy `text` that is not a string (`tree::validate_atom`).
 
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
 use romp_json::Value as Out;
@@ -546,21 +547,33 @@ pub fn human_prompt_record(a: &Atom) -> Option<Cow<'_, str>> {
     None
 }
 
-/// _dictated_prompt_uuid's index of a parse: the first atom under each truthy uuid, in turn and atom order.
+/// _dictated_prompt_uuid's index of a parse: the first atom under each truthy uuid, in turn and atom order. Built on
+/// the first lookup, as Python's per-derivation memo builds it on the first call past the `pu and path` guard; a
+/// derivation that never asks never builds it (S6: built eagerly, it cost about 8 to 10 ms of a large-world build).
 #[derive(Debug, Default)]
-pub struct PromptIndex<'a>(HashMap<&'a str, &'a Atom>);
+pub struct PromptIndex<'a> {
+    tree: Option<&'a Tree>,
+    recs: OnceCell<HashMap<&'a str, &'a Atom>>,
+}
 
 impl<'a> PromptIndex<'a> {
     pub fn new(tree: Option<&'a Tree>) -> Self {
-        let mut recs = HashMap::new();
-        for turn in tree.and_then(|t| t.turns.as_deref()).unwrap_or_default() {
-            for a in turn.atoms.iter().flatten() {
-                if let Some(u) = a.uuid().filter(|u| !u.is_empty()) {
-                    recs.entry(u).or_insert(a);
+        PromptIndex { tree, recs: OnceCell::new() }
+    }
+
+    fn get(&self, pu: &str) -> Option<&'a Atom> {
+        let recs = self.recs.get_or_init(|| {
+            let mut recs = HashMap::new();
+            for turn in self.tree.and_then(|t| t.turns.as_deref()).unwrap_or_default() {
+                for a in turn.atoms.iter().flatten() {
+                    if let Some(u) = a.uuid().filter(|u| !u.is_empty()) {
+                        recs.entry(u).or_insert(a);
+                    }
                 }
             }
-        }
-        PromptIndex(recs)
+            recs
+        });
+        recs.get(pu).copied()
     }
 }
 
@@ -571,7 +584,7 @@ pub fn dictated_prompt_uuid(index: &PromptIndex<'_>, has_path: bool, pu: Option<
     if !has_path {
         return None;
     }
-    index.0.get(pu).map(|a| human_prompt_record(a).is_some())
+    index.get(pu).map(|a| human_prompt_record(a).is_some())
 }
 
 /// `isinstance(nd.get("handoff"), dict)`.

@@ -17,7 +17,7 @@ pub mod store;
 
 pub use decode::{DecodeError, decode, dumps_sorted};
 pub use scan::Kind;
-pub use store::{Entry, Field, FieldRef, Line, ReadKind, Stats, Store, StrRef, TAIL_GUARD, py_mtime};
+pub use store::{Entry, Field, FieldRef, Growth, Line, ReadKind, Stats, Store, StrRef, TAIL_GUARD, py_mtime};
 
 /// A deliberate defect the comparison's self-check plants to prove it would catch one (tools/rust-spike/check_store.py
 /// `--plant`). Never set outside that check.

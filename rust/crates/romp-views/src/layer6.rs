@@ -46,11 +46,12 @@
 //!   answer's `why` and `kind`, the current ask's `question` or `header` that is truthy and not a string (`.strip()`),
 //!   and every recorded answer the body reaches unrecorded.
 //!
-//! Left out, as in layers 3 and 5: the held aggregate (_FEED_SEG_HELD) and _SUMMARY_ANCHOR_MEMO (SPIKE.md, "What layer
-//! 6 needs": a pure cache within one build, so the spike's fresh-process comparisons never meet the memo's seam
-//! staleness). `lg.mark_refused` is a side effect on the login registry with no part in the entry, so it is not
+//! Left out, as in layer 5: _SUMMARY_ANCHOR_MEMO (SPIKE.md, "What layer 6 needs": a pure cache within one build, so the
+//! spike's fresh-process comparisons never meet the memo's seam staleness). The held aggregate (_FEED_SEG_HELD) is
+//! used only when a build is given a table (`Build::with_held`, S6: layer3::SegHeld); by default every turn is walked. `lg.mark_refused` is a side effect on the login registry with no part in the entry, so it is not
 //! ported. `faults` is the walk's lazy `seg_turn` faults, always 0 on a tree the loader admits.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
@@ -59,7 +60,7 @@ use serde_json::Value as J;
 
 use crate::layer1;
 use crate::layer2::{self, Raise};
-use crate::layer3::{self, py_max, FeedSegWalk};
+use crate::layer3::{self, py_max, ClosedPart, FeedSegWalk, SegHeld};
 use crate::layer4::{self, AnchorTable, Answered, Children, Ctx, Healed, Identity, Names, Ns, PeerWorld, WalkTrig, WalkWork};
 use crate::layer5::{self, PromptIndex, ProvisionalIn};
 use crate::pystr;
@@ -290,6 +291,25 @@ pub struct Build<'a> {
     board: &'a Board,
     live_map: &'a OMap<LiveRow>,
     pub plant: Option<Plant>,
+    /// S6's cheap bound (`Build::with_closed`): each session's closed part, folded ahead and taken by its derivation,
+    /// whose walk then folds only the open turn. None: every turn is walked, as Python's walk with nothing held.
+    closed: Option<&'a RefCell<HashMap<String, ClosedPart<'a>>>>,
+    /// S6's held aggregate (`Build::with_held`): the table kept across builds (kernel._FEED_SEG_HELD). None: nothing is
+    /// held, every turn is walked.
+    held: Option<&'a RefCell<SegHeld<'a>>>,
+}
+
+/// The session's walk inputs as Derive::new reads them (the replay key's hide gate, the tree's turns, the store unless
+/// it faulted) and whether the replay key hands a leaf head (`leafOk`), without which Python's walk holds nothing.
+fn walk_inputs<'a>(b: &Build<'a>, fsid: &str, facts: &'a SessionFacts) -> (Option<&'a [Turn]>, Option<&'a Store>, bool) {
+    let hide = facts.flags.as_ref().and_then(J::as_object).is_some_and(|f| f.get("hideFromFeed").is_some_and(py_truthy));
+    let tree = if hide { None } else { b.trees.get(fsid).copied() };
+    let turns: Option<&'a [Turn]> = tree.map(|t| t.turns.as_deref().unwrap_or_default());
+    let store = match facts.store.as_ref().expect("validated: every session has a store key") {
+        Some(st) => Some(st),
+        None => None,
+    };
+    (turns, store, flag(&facts.leaf_ok))
 }
 
 static EMPTY_BOARD: std::sync::LazyLock<Board> = std::sync::LazyLock::new(Board::default);
@@ -330,7 +350,42 @@ impl<'a> Build<'a> {
             board,
             live_map: snap.live_map.as_ref().unwrap_or(&EMPTY_LIVE),
             plant,
+            closed: None,
+            held: None,
         }
+    }
+
+    /// The build with the held aggregate: each derivation's walk is served from and stores into `held`, kept across
+    /// builds by the caller, as Python's _FEED_SEG_HELD is (the replay key's leaf head is the alive row's transcript
+    /// path when `leafOk`, as the S2 replay hands `(path, 0)`).
+    pub fn with_held(mut self, held: &'a RefCell<SegHeld<'a>>) -> Build<'a> {
+        self.held = Some(held);
+        self
+    }
+
+    /// The build with S6's cheap bound: each derivation takes its session's closed part out of `closed` (filled by
+    /// `closed_parts`, outside the timed region) and walks only the open turn. A session with no part walks every turn.
+    pub fn with_closed(mut self, closed: &'a RefCell<HashMap<String, ClosedPart<'a>>>) -> Build<'a> {
+        self.closed = Some(closed);
+        self
+    }
+
+    /// Every alive session's closed part (layer3::closed_part over the turns and store its derivation walks), for the
+    /// sessions whose walk Python would hold: a leaf head (`leafOk`) and at least one closed turn that folds.
+    pub fn closed_parts(&self) -> HashMap<String, ClosedPart<'a>> {
+        let mut out = HashMap::new();
+        for row in self.snap.alive() {
+            let fsid = row.sid.as_deref().expect("required at load");
+            let Some(facts) = self.snap.sessions.as_ref().and_then(|m| m.get(fsid)) else { continue };
+            let (turns, store, leaf_ok) = walk_inputs(self, fsid, facts);
+            if !leaf_ok {
+                continue;
+            }
+            if let Some(c) = layer3::closed_part(turns, store) {
+                out.insert(fsid.to_string(), c);
+            }
+        }
+        out
     }
 
     fn ctx(&self) -> Ctx<'_> {
@@ -375,7 +430,11 @@ impl<'a> Build<'a> {
     /// before the build). Each entry is `Ok(the entry)` or the raise that failed it.
     pub fn entries(&self) -> Vec<(String, Result<Out, Raise>)> {
         let mut table = AnchorTable::default();
-        self.snap
+        if let Some(h) = self.held {
+            h.borrow_mut().build_begin(); // _feed_seg_build_begin, before the loop
+        }
+        let out: Vec<(String, Result<Out, Raise>)> = self
+            .snap
             .alive()
             .iter()
             .map(|row| {
@@ -383,11 +442,17 @@ impl<'a> Build<'a> {
                 let got = self.entry(row, &mut table);
                 (sid, got)
             })
-            .collect()
+            .collect();
+        if let Some(h) = self.held {
+            // _feed_memo_forget's _feed_seg_forget, after the loop
+            let alive: HashSet<&str> = self.snap.alive().iter().filter_map(|r| r.sid.as_deref()).collect();
+            h.borrow_mut().forget(&alive);
+        }
+        out
     }
 
     /// kernel._feed_session_entry(s, ctx) for one alive row, with ctx as the replay's key hands it.
-    pub fn entry(&self, row: &AliveRow, table: &mut AnchorTable) -> Result<Out, Raise> {
+    pub fn entry(&self, row: &'a AliveRow, table: &mut AnchorTable) -> Result<Out, Raise> {
         let fsid = row.sid.as_deref().expect("required at load");
         let facts = self
             .snap
@@ -480,7 +545,17 @@ impl<'a, 'b> Derive<'a, 'b> {
         };
         let nodes = store.nodes.as_ref().unwrap_or(&EMPTY_NODES);
         let status = store.status.as_ref().unwrap_or(&EMPTY_STATUS);
-        let walk = layer3::feed_seg_walk(turns, if store_faulted { None } else { Some(store) });
+        let walk_store = if store_faulted { None } else { Some(store) };
+        let walk = match b.held {
+            Some(held) => {
+                let head = if flag(&facts.leaf_ok) { Some(row.transcript.as_deref().unwrap_or("")) } else { None };
+                held.borrow_mut().walk(fsid, head, turns, walk_store)
+            }
+            None => {
+                let closed = b.closed.and_then(|c| c.borrow_mut().remove(fsid));
+                layer3::feed_seg_walk_from(turns, walk_store, closed)
+            }
+        };
         Ok(Derive {
             b,
             fsid,
@@ -1054,7 +1129,11 @@ impl<'a, 'b> Derive<'a, 'b> {
             self.agent_open = layer4::agent_open_set(&self.ns, &self.children);
             self.parked = layer4::parked_rows(&self.ns, &self.children).into_iter().collect();
         }
-        let plain_user_t = if ps.is_some() { layer3::feed_seg_plain_t(&self.walk) } else { Num::Int(0) };
+        let plain_user_t = match (ps.is_some(), b.held) {
+            (false, _) => Num::Int(0),
+            (true, Some(held)) => held.borrow_mut().finish(&mut self.walk),
+            (true, None) => layer3::feed_seg_plain_t(&self.walk),
+        };
         let mut had_working = false;
         let mut had_awaiting = false;
         let live_tasks: &[J] = if ps.is_some() && !who_working {

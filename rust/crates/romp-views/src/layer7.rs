@@ -790,22 +790,57 @@ fn parked_fold(log: &[J]) -> Vec<(&str, Cand<'_>)> {
 /// `validate` must have admitted the snapshot.
 pub fn build_feed(snap: &Snapshot, trees: &[(String, Option<Tree>)], plant: Option<Plant>) -> Result<Feed, Raise> {
     let b = Build::new(snap, trees, None);
+    build_feed_on(&b, plant)
+}
+
+/// What the per-session loop leaves for the rest of the build: the folded cards, serving-fold candidates, dot names,
+/// awaiting rows, service chips and absent sessions. S6 times `fold_on` alone as the region Python's entry plus fold
+/// computes (rust/SPIKE.md, "S6 method"); the caller drops it after the clock stops.
+pub struct Folded {
+    asks: Vec<Out>,
+    working: Vec<Out>,
+    awaiting: Vec<Out>,
+    serving: Vec<Out>,
+    bg: Obj,
+    absent: Vec<String>,
+    working_sids: HashSet<String>,
+    sessions: usize,
+}
+
+impl Folded {
+    /// The cards the fold produced (asks only, before the serving join and the producers after the loop).
+    pub fn cards(&self) -> usize {
+        self.asks.len()
+    }
+}
+
+fn pass<'p, 'a>(b: &'p Build<'a>, plant: Option<Plant>) -> Pass<'p, 'a> {
+    let snap = b.snap;
     let world = snap.world.as_ref().expect("required at load");
-    let p = Pass {
-        b: &b,
+    Pass {
+        b,
         snap,
         now: snap.now(),
         cmap: world.colormap.as_ref().and_then(|c| c.as_deref()),
         bells: snap.board.as_ref().and_then(|bd| bd.notify_cards.as_ref()).and_then(J::as_object),
         plant,
-    };
-    let alive_rows = snap.alive();
-    let alive: HashSet<&str> = alive_rows.iter().filter_map(|r| r.sid.as_deref()).collect();
+    }
+}
+
+/// layer 6's entries for every alive session and the per-session fold (Python's `_feed_session_entry` and
+/// `_feed_fold_session` in the loop): the region S6 compares, without the serving join, the whoWorking stamp, the
+/// producers after the loop, the bell pass and the frame.
+pub fn fold_on(b: &Build<'_>, plant: Option<Plant>) -> Result<Folded, Raise> {
+    fold_sessions(&pass(b, plant))
+}
+
+fn fold_sessions(p: &Pass<'_, '_>) -> Result<Folded, Raise> {
+    let alive_rows = p.snap.alive();
     let (mut asks, mut working, mut awaiting, mut serving) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut bg: Obj = Vec::new();
     let mut absent: Vec<String> = Vec::new();
     let mut working_sids: HashSet<String> = HashSet::new();
-    let entries = b.entries();
+    let entries = p.b.entries();
     let sessions = entries.len();
     for (row, (sid, got)) in alive_rows.iter().zip(entries) {
         let entry = match got {
@@ -854,6 +889,17 @@ pub fn build_feed(snap: &Snapshot, trees: &[(String, Option<Tree>)], plant: Opti
             set(&mut bg, name, v.clone());
         }
     }
+
+    Ok(Folded { asks, working, awaiting, serving, bg, absent, working_sids, sessions })
+}
+
+/// build_feed over a prepared `Build` (S6 builds it outside its clock, with or without the cheap bound's closed parts).
+pub fn build_feed_on(b: &Build<'_>, plant: Option<Plant>) -> Result<Feed, Raise> {
+    let snap = b.snap;
+    let p = pass(b, plant);
+    let alive_rows = snap.alive();
+    let alive: HashSet<&str> = alive_rows.iter().filter_map(|r| r.sid.as_deref()).collect();
+    let Folded { mut asks, working, awaiting, serving, bg, absent, working_sids, sessions } = fold_sessions(&p)?;
 
     // THE SERVING FOLD, commit side: each candidate's rows join its tracker row when that row rendered this build.
     let n_folded = asks.len();

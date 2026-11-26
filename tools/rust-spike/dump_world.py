@@ -70,6 +70,10 @@ SIZE_CAP = 1 << 30               # nothing over ~1 GB (the spike's rule)
 WORLDS = {
     "small": {"sessions": 4, "records": 80, "chatTurns": 10, "fillers": 0},
     "large": {"sessions": 4, "records": 3000, "chatTurns": 3000, "fillers": 34},
+    # the large world without its 34 fillers: the four designed sessions at large sizes, the world s2-design section 4's
+    # 87 ms came from (rust/notes/probes/replay_probe.py writes four sessions); S6's continuity check against S2, never
+    # a gate world
+    "large4": {"sessions": 4, "records": 3000, "chatTurns": 3000, "fillers": 0},
 }
 BOUNDARY_TURN = 3                # the chat turn whose segment closes s001's completed g1 (its summary's landing)
 # 79 code points, 82 UTF-8 bytes: one short of jd.CITE_MIN_CHARS (80) as Python counts (len, code points), past it as a
@@ -1559,7 +1563,7 @@ def check_main(worlds, out, keep):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--world", default="small", choices=["small", "large", "both"])
+    ap.add_argument("--world", default="small", choices=["small", "large", "large4", "both"])
     ap.add_argument("--out", help="output directory (default <tmp>/romp-spike/<world>, or <tmp>/romp-spike-check)")
     ap.add_argument("--keep-world", action="store_true", help="keep the world under <out>/work after the dump")
     ap.add_argument("--no-replay", action="store_true", help="skip the fresh-process replay")
