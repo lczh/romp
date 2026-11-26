@@ -229,6 +229,15 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// A JSON file of inputs and Python's answers read through serde_json, refused when it holds an integer past i64
+/// anywhere: serde_json would read one past u64 as a float, where Python's json keeps the int (load.rs).
+fn json_doc(path: &Path, name: &str) -> Result<serde_json::Value, String> {
+    let bytes = read(path)?;
+    let doc = serde_json::from_slice(&bytes).map_err(|e| format!("{name}: {e}"))?;
+    load::refuse_big_ints(&bytes).map_err(|e| format!("{name}: {e}"))?;
+    Ok(doc)
+}
+
 fn world_name(snap: &Snapshot) -> String {
     snap.world.as_ref().and_then(|w| w.name.clone()).unwrap_or_else(|| "?".to_string())
 }
@@ -379,8 +388,7 @@ fn names(v: &serde_json::Value) -> Vec<String> {
 /// Layer 1 over the typed trees against Python's answers in DUMP/layer1.json.
 fn layer1_cmd(dir: &Path, plant_bytes: bool) -> Result<bool, String> {
     let dump = load::load_dump(dir)?;
-    let expect: serde_json::Value =
-        serde_json::from_slice(&read(&dir.join("layer1.json"))?).map_err(|e| format!("layer1.json: {e}"))?;
+    let expect = json_doc(&dir.join("layer1.json"), "layer1.json")?;
     if expect["schema"] != "romp-spike-layer1/1" {
         return Err(format!("layer1.json: schema {}, expected romp-spike-layer1/1", expect["schema"]));
     }
@@ -627,8 +635,7 @@ fn layer2_cmd(path: &Path, plant: Option<Plant2>) -> Result<bool, String> {
 
 fn layer2_dump(dir: &Path, plant: Option<Plant2>) -> Result<bool, String> {
     let dump = load::load_dump(dir)?;
-    let expect: serde_json::Value =
-        serde_json::from_slice(&read(&dir.join("layer2.json"))?).map_err(|e| format!("layer2.json: {e}"))?;
+    let expect = json_doc(&dir.join("layer2.json"), "layer2.json")?;
     if expect["schema"] != "romp-spike-layer2/1" {
         return Err(format!("layer2.json: schema {}, expected romp-spike-layer2/1", expect["schema"]));
     }
@@ -714,7 +721,7 @@ fn load_case(case: &serde_json::Value) -> Result<(Turn, Option<GoalStore>), Stri
 
 fn layer2_edge(file: &Path, plant: Option<Plant2>) -> Result<bool, String> {
     let name = file.display().to_string();
-    let doc: serde_json::Value = serde_json::from_slice(&read(file)?).map_err(|e| format!("{name}: {e}"))?;
+    let doc = json_doc(file, &name)?;
     if doc["schema"] != "romp-spike-layer2-edge/1" {
         return Err(format!("{name}: schema {}, expected romp-spike-layer2-edge/1", doc["schema"]));
     }
@@ -895,8 +902,7 @@ fn layer3_cmd(path: &Path, plant: Option<Plant3>) -> Result<bool, String> {
 
 fn layer3_dump(dir: &Path, plant: Option<Plant3>) -> Result<bool, String> {
     let dump = load::load_dump(dir)?;
-    let expect: serde_json::Value =
-        serde_json::from_slice(&read(&dir.join("layer3.json"))?).map_err(|e| format!("layer3.json: {e}"))?;
+    let expect = json_doc(&dir.join("layer3.json"), "layer3.json")?;
     if expect["schema"] != "romp-spike-layer3/1" {
         return Err(format!("layer3.json: schema {}, expected romp-spike-layer3/1", expect["schema"]));
     }
@@ -955,7 +961,7 @@ fn layer3_dump(dir: &Path, plant: Option<Plant3>) -> Result<bool, String> {
 
 fn layer3_edge(file: &Path, plant: Option<Plant3>) -> Result<bool, String> {
     let name = file.display().to_string();
-    let doc: serde_json::Value = serde_json::from_slice(&read(file)?).map_err(|e| format!("{name}: {e}"))?;
+    let doc = json_doc(file, &name)?;
     if doc["schema"] != "romp-spike-layer3-edge/1" {
         return Err(format!("{name}: schema {}, expected romp-spike-layer3-edge/1", doc["schema"]));
     }
@@ -1146,7 +1152,7 @@ fn layer4_edge(file: &Path, plant: Option<Plant4>) -> Result<bool, String> {
     for (case, exact_case) in cases.iter().zip(exact_cases) {
         let cname = case["name"].as_str().ok_or("a case without a name")?;
         let python_raises = case["expect"].get("raises").is_some();
-        let loaded_case = layer4::EdgeCase::load(case).and_then(|c| match c.refused_session() {
+        let loaded_case = layer4::EdgeCase::load_checked(case, exact_case).and_then(|c| match c.refused_session() {
             Some(e) => Err(e),
             None => Ok(c),
         });

@@ -546,16 +546,17 @@ U3 = "11111111-2222-3333-4444-0000000000a3"       # not in the registry; owned b
 U4 = "11111111-2222-3333-4444-0000000000a4"       # not in the registry; owned by h1, unnamed there; in the postal log
 U5 = "11111111-2222-3333-4444-0000000000a5"       # not in the registry; owned by h2 (whose row's host field is h1)
 U6 = "11111111-2222-3333-4444-0000000000a6"       # known nowhere
+U7 = "11111111-2222-3333-4444-0000000000a7"       # in the postal log only, paired with a name holding a colon
 NAMES = {U1: ["alpha", "/w/a", "#4a9eff"], U2: ["beta", "/w/b"], "s-red": ["red", "/w/r", "red"],
          "s-empty": ["", "/w/e", "#000000"], "s-short": ["short"], "h9:bob": ["bob-local", "/w", "#123456"],
          "s-null": None, "g-é": ["été", "/w", "#abcdef"]}
 REMOTES = {"h1": {"host": "h1", "sids": [U3, U4, U3 + "\n"], "names": {U3: "gamma", U3 + "\n": "gamma-nl"}},
            "h2": {"host": "h1", "sids": [U5], "names": {U5: "never-read"}},
            "h3": {"host": None, "sids": None, "names": None}}
-POSTAL = {U4: "h7:delta", U6 + "x": "h8:", "11111111-2222-3333-4444-0000000000b1": "h8:",
+POSTAL = {U4: "h7:delta", U7: "h7:delta:x", U6 + "x": "h8:", "11111111-2222-3333-4444-0000000000b1": "h8:",
           "11111111-2222-3333-4444-0000000000b2": ":eps", "11111111-2222-3333-4444-0000000000b3": "",
           "11111111-2222-3333-4444-0000000000b4": "noColon"}
-ID_QUERIES = [U1, U2, U3, U4, U5, U6, "peer:" + U1, "peer:" + U6, "peer:", "peer:peer:x", U3 + "\n", U6 + "\n",
+ID_QUERIES = [U1, U2, U3, U4, U5, U6, U7, "peer:" + U1, "peer:" + U6, "peer:", "peer:peer:x", U3 + "\n", U6 + "\n",
               U6 + "\n\n", U6 + " ", U6.upper(), "h9:bob", "h9:" + U6, "h9:" + U6 + "\n", "h9:", ":tail", "a:b:c",
               "s-red", "s-empty", "s-short", "s-null", "g-é", "été-long-name-\U0001F600", "x" * 20, "",
               None, "11111111-2222-3333-4444-0000000000b1", "11111111-2222-3333-4444-0000000000b2",
@@ -649,6 +650,9 @@ def edge_cases():
         nd("d", "t", agentTask={"status": "done"}), nd("e", "t", agentTask={"status": 5}),
         nd("f", "t", nodeComplete=True), nd("g", "f", nodeComplete=True), nd("h", "g", agentTask={"status": "open"}),
         nd("i", "t", agentTask=[]), nd("j", "t", agentTask=""))
+    one("an open to-do re-parented by the heal and one on a hidden top: _agent_open_set walks the body's children",
+        nd("a"), nd("b", agentTask={"status": "open"}), nd("h", agentTask={"status": "open"}), nd("c", "a"),
+        healed={"b": ["a", {"why": "healed"}], "h": [None, {"hidden": True, "why": "skill"}]})
     one("open leaves in document order; a flat top is its own leaf; a done top has none",
         nd("t"), nd("b", "t"), nd("a", "t"), nd("a1", "a"), nd("a2", "a", nodeComplete=True),
         nd("c", "t", cleared=True),
@@ -679,6 +683,9 @@ def edge_cases():
     one("equal times do not leapfrog; a cycle under a sibling is safe",
         nd("p"), nd("a", "p", t=5), nd("b", "p", t=5.0, handoff={"peer": U1}), nd("c", "p", t=6), nd("c1", "c2"),
         nd("c2", "c1"), nd("d", "p", t=7), nd("d1", "d", handoff={"peer": U2}), nd("d2", "d1"), nd("d3", "d2"))
+
+    one("a negative t: a sibling with no t reads as 0, younger, and leapfrogs",
+        nd("p"), nd("a", "p", t=-5), nd("b", "p", handoff={"peer": U1}), nd("c", "p", t=-5.5, log=[row("x")]))
 
     # _focus_open_top and jd._top_of
     for st_name, st in (("working", "working"), ("completed", "completed"), ("cleared", "cleared"),
@@ -731,6 +738,8 @@ def edge_cases():
     one("the stamp's peers name identities (sorted by name) and awaiting rows",
         nd("t"), nd("a", "t", awaitingWhy="w", awaitingAt=5, awaitingKind="peer",
                      awaitingPeers=[U3, "peer:" + U1, U6, "h9:bob", U2, ""]), reg=True)
+    one("the stamp's peers keep repeats: one identity per listed key, `peer:` prefix or not",
+        nd("t", awaitingWhy="w", awaitingAt=5, awaitingKind="peer", awaitingPeers=[U1, U1, "peer:" + U1]), reg=True)
     one("an unrecorded peer answer: no stamp asked", nd("t", awaitingWhy="w", awaitingAt=5), answered=ABSENT)
     one("a deep stamp under a healed child", nd("t"), nd("u"), nd("u1", "u", awaitingWhy="deep", awaitingAt=7),
         healed={"u": ["t", {"why": "healed"}]})
@@ -745,6 +754,10 @@ def edge_cases():
     one("done rows: a timeless one counts as 0, not mt; ties; no rows fall to mt or t",
         nd("a", mt=9, t=1, log=[row("done")]), nd("b", mt=9, log=[row("done", 0, at=4), row("done", None, at=4.0)]),
         nd("c", mt=0, t=6.5), nd("d"), nd("e", mt=3, log=[row("done", -2)]))
+    one("falsy times end on the literal int 0: `mt or t or 0` and a done row's `ev_t or at or 0`",
+        nd("a", mt=0, t=0.0), nd("b", mt=0, t=-0.0), nd("c", t=0.0), nd("d", mt=0.0, t=0),
+        nd("e", log=[row("done", at=0.0)]), nd("f", log=[row("done", 0, at=-0.0)]),
+        nd("g", log=[row("done", None, at=0.0), row("done", 0.0)]))
     one("newest block over a subtree: one unknown makes it None; none blocked is 0",
         nd("t", blocked=True, log=[row("block", 5)]), nd("a", "t", blocked=True, log=[row("block", 7.0)]),
         nd("b", "t", blocked=True, log=[row("block", at=7)]), nd("u", blocked=True, log=[row("block", 1)]),
@@ -778,6 +791,9 @@ def edge_cases():
         nd("i", "p", born=None), nd("j", "p"),
         healed={"d": [None, {"why": "healed", "parentText": "from heal"}], "i": ["p", {"why": "heal of a null born"}],
                 "j": ["p", {}], "e": ["p", {"why": "never read: own born wins"}]})
+
+    one("an own empty born is not None: the heal's record is never read, and the face is None",
+        nd("p", text="the ask"), nd("a", "p", born={}), healed={"a": ["p", {"why": "from the heal", "parentText": "x"}]})
 
     # _node_log_rows
     seg = "sx:100:abcd1234"
@@ -813,6 +829,10 @@ def edge_cases():
     W("anchors: an empty work anchor is warm (`is not None`), remembered and served to a later cold lookup",
       sess(store(nd("g4", trail=["sa:4:h4"])), seg_uuid=seg_u, seg_trig=seg_t),
       sess(store(nd("g4", trail=[], summaryAnchor="sa-g4")), **cold))
+    W("anchors: an empty node id is never remembered and never served (`if nid`)",
+      sess(store(nd("", None, _key="k1", trail=[st_[0]])), seg_uuid=seg_u, seg_trig=seg_t),
+      sess(store(nd("", None, _key="k2", trail=[], summaryAnchor="sa-own"), nd("", None, _key="k3", trail=["sb:9:zz"])),
+           **cold))
     W("anchors: the same id twice in one store (two keys) resolves in store order",
       sess(store(nd("dup", _key="k1", trail=[st_[0]]), nd("dup", _key="k2", trail=["zz:1:none"]),
                  nd("dup", _key="k3", trail=[st_[1]], promptUuid="x")), seg_uuid=seg_u, seg_trig=seg_t))
@@ -855,6 +875,8 @@ def edge_cases():
             ("separators before the arrow, a label over two lines",
              nd("h", text="\x1c　↪\x1fdelegated to a\nb: c\nd\n", handoff={"peer": U6})),
             ("a remote-named peer and its label", nd("h", text="↪ delegated to x:y: z", handoff={"peer": U3})),
+            ("registry miss: the label's name is after its last colon, the host before it",
+             nd("h", text="↪ delegated to a:b:c: work", handoff={"peer": U6})),
             ("registry miss: the first \": \" ends the label's name, the work keeps the rest",
              nd("h", text="↪ delegated to far:gamma: step one: step two", handoff={"peer": U6}))):
         one("handoff card: " + name, n, reg=True)
@@ -894,6 +916,7 @@ def edge_cases():
             ("peer", "i", "l", -2.7, {}), ("peer", "i", "l", 1e20, {}), ("peer", "i", "l", -1e20, {}),
             ("peer", "i", "l", 4611686018427387904, {}), ("peer", "i", "l", -0.0, {}), ("peer", "i", "l", 0.0, {}),
             ("peer", "i", "l", 9.223372036854775807e18, {}), ("peer", "i", "l", 0.9999999999999999, {}),
+            ("peer", "i", "l", 2 ** 63 - 1, {}), ("peer", "i", "l", -2 ** 63, {}),
             ("task", "i", "l", 1, {}), ("", "i", "l", 1, {}), ("Peer", "i", "l", 1, {})):
         p = {"itemKind": kind, "iid": iid if not isinstance(iid, int) else None, "label": label if not
              isinstance(label, int) else None, "since": since}
@@ -905,7 +928,10 @@ def edge_cases():
                       ("ends with a stop.", 120), ("A stop then　space? yes", 120), ("A stop then\x1cx. y", 120),
                       ("é" * 130, 120), ("ab   cd  " * 30, 13), ("one two three", 1), ("x\ny", 2),
                       ("\U0001F600" * 5, 4), ("long words then. " * 3, 10), ("x" * 117 + " \x1c" + "y" * 5, 120),
-                      ("x" * 118 + "\x1f" + "y" * 5, 120), ("x" * 118 + "\u3000" + "y" * 5, 120)):
+                      ("x" * 118 + "\x1f" + "y" * 5, 120), ("x" * 118 + "\u3000" + "y" * 5, 120),
+                      ("A first sentence.\x1cthen more", 120), ("A first sentence!\xa0then more", 120),
+                      ("A first sentence?\u3000then more", 120), ("A first sentence.\x0bthen more", 120),
+                      ("A first sentence.\x85then more", 120)):
         c.append(("title %r cap %d" % ((text or "")[:24], cap), "title", {"text": text, "cap": cap}))
     for answered, tup, n in (((60, {U1: 50}), True, nd("x", awaitingWhy="w", awaitingAt=40, awaitingPeers=[U1])),
                              (61.5, False, nd("x", awaitingWhy="w", awaitingAt=40, awaitingPeers=[U1])),
@@ -916,7 +942,8 @@ def edge_cases():
                              ((70, {}), True, nd("x", awaitingAt=40, awaitingPeers=[])),
                              ((70, {}), True, nd("x", awaitingAt=40, awaitingKind="timer")),
                              ((70, {}), True, nd("x", awaitingAt=40, awaitingKind="")),
-                             (45.0, False, nd("x", awaitingAt=40, log=[row("awaiting", 50), row("awaiting", at=44)]))):
+                             (45.0, False, nd("x", awaitingAt=40, log=[row("awaiting", 50), row("awaiting", at=44)])),
+                             (45, False, nd("x", awaitingWhy="w", awaitingAt=40, log=[row("awaiting", 50, at=30)]))):
         c.append(("superseded %r" % (answered,), "superseded", {"node": n, "answered": list(answered) if tup else
                                                                 answered, "tuple": tup}))
     sd = {"t": nd("t"), "a": nd("a", "t", awaitingWhy="w", awaitingAt=5), "b": nd("b", "a", awaitingWhy="w2",
@@ -948,6 +975,14 @@ def edge_cases():
     W("REFUSE a peer answer whose per-peer time is null",
       sess(store(nd("a", awaitingWhy="w", awaitingAt=5, awaitingPeers=[U1])), answered=(9, {U1: None})))
     c.append(("REFUSE a title cap of 0 (Python slices from the end)", "title", {"text": "abc", "cap": 0}))
+    # an integer literal past i64: Python's json reads an int, serde_json a float past u64 (Num refuses 2**63 to
+    # 2**64 - 1 itself), so the loader refuses every one
+    for since in (2 ** 63, 2 ** 64 + 1, -2 ** 63 - 1):
+        c.append(("REFUSE an awaited row's since of %d (an integer past i64)" % since, "item",
+                  {"itemKind": "peer", "iid": "i", "label": "l", "since": since}))
+    one("REFUSE a node mt of 10**20 (an integer past i64)", nd("a", mt=10 ** 20))
+    W("REFUSE an api error of 10**20 (an integer past i64)",
+      sess(store(nd("a")), live={"authLogin": "L1", "authLoginLive": "L1"}, aerr=10 ** 20))
     # the accepted side of the limits
     one("a parent chain at the limit", *chain(MAX_NODE_DEPTH))
     W("a healed forest at the limit",
@@ -1088,7 +1123,7 @@ FUZZ_CHARS = ("abcdefghijklmnopqrstuvwxyz   ABCXYZ0123456789.,:;-_/()!?'\"éï�
 FUZZ_PEERS = (U1, U2, U3, U4, U5, U6, "peer:" + U1, "peer:" + U3, U3 + "\n", U6 + "\n", "h9:bob", "h9:" + U6,
               "h9:", ":t", "a:b:c", "s-red", "s-empty", "s-short", "g-é", "", "peer:", "x" * 12,
               "11111111-2222-3333-4444-0000000000b1", "11111111-2222-3333-4444-0000000000b2",
-              "11111111-2222-3333-4444-0000000000b4", U6.upper())
+              "11111111-2222-3333-4444-0000000000b4", U6.upper(), U7)
 FUZZ_JUNK = list(("retry", "try again", "continue", "keep going", "go", "go ahead", "ok", "okay", "k", "yes", "y",
                   "yeah", "sure", "proceed", "please continue", "carry on", "resume", "keep at it",
                   "continue from where you left off", "/compact", "/model x", "/", "oK", "K", "okk",
@@ -1171,7 +1206,7 @@ def fz_store(rng, prefix, segs):
         for k, p in (("nodeComplete", 0.3), ("blocked", 0.25), ("cleared", 0.1)):
             if rng.random() < 0.8:
                 d[k] = rng.random() < p
-        put(d, "t", rng.choice((0, 1, 2, 2.0, 3, 5, 5.0, -0.0, 1781100000.5, "absent")))
+        put(d, "t", rng.choice((0, 1, 2, 2.0, 3, 5, 5.0, -0.0, -5, 1781100000.5, "absent")))
         put(d, "mt", rng.choice((0, 2, 4, 4.0, 9, "absent", "absent")))
         if rng.random() < 0.6:
             d["log"] = [fz_row(rng, segs) for _ in range(rng.choice((0, 1, 2, 3, 9)))]

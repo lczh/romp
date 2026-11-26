@@ -49,7 +49,7 @@ fn cases() -> Vec<Case> {
     raw.iter()
         .zip(exact_cases)
         .map(|(c, x)| {
-            let loaded = EdgeCase::load(c).and_then(|l| match l.refused_session() {
+            let loaded = EdgeCase::load_checked(c, x).and_then(|l| match l.refused_session() {
                 Some(why) => Err(why),
                 None => Ok(l),
             });
@@ -116,7 +116,20 @@ fn every_case_answers_as_python_does() {
         }
     }
     assert!(diffs.is_empty(), "{} differences:\n{}", diffs.len(), diffs.join("\n"));
-    assert_eq!((loaded, refused, refused_raises, digests), (195, 10, 2, 2));
+    assert_eq!((loaded, refused, refused_raises, digests), (210, 15, 2, 2));
+}
+
+#[test]
+fn an_integer_past_i64_in_an_input_is_refused_as_one() {
+    // Python's json reads it as an int; serde_json reads one past u64 as a float, which the typed loader would carry
+    let why: Vec<(String, String)> = cases()
+        .into_iter()
+        .filter(|(n, ..)| n.ends_with("(an integer past i64)"))
+        .map(|(n, c, ..)| (n, c.err().expect("refused")))
+        .collect();
+    let tail = ": an integer past i64, which Python reads as an int and serde_json as a float";
+    let paths: Vec<&str> = why.iter().map(|(_, e)| e.strip_suffix(tail).unwrap_or(e)).collect();
+    assert_eq!(paths, ["since", "since", "since", "world.sessions[0].store.nodes.a.mt", "world.sessions[0].apiError"]);
 }
 
 #[test]

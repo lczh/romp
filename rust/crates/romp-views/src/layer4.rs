@@ -18,13 +18,24 @@
 //!   stamp is the `max` over tuples `(awaitingAt or 0, why, kind or "", peers)`, so equal anchors break ties on the
 //!   strings, then on the peer lists, and a full tie keeps the first stamp the stack walk meets (its tag).
 //! - `int(since)` truncates toward zero, at any size (1e20 is an int of 21 digits).
-//! - `x or y` skips every falsy value: `ev_t or at` (a zero ev_t falls to at), `mt or t or 0`, `promptUuid or
-//!   seg_trig[...]` (an empty uuid falls through). _done_since keeps a done row with no time as 0 (its list is not
-//!   filtered), where _block_ev_t drops a falsy time.
+//! - `x or y` skips every falsy value and yields its last operand when all are: `ev_t or at` (a zero ev_t falls to
+//!   at), `promptUuid or seg_trig[...]` (an empty uuid falls through), `mt or t or 0` and a done row's
+//!   `ev_t or at or 0` (all falsy: the literal int 0, never the node's 0.0 or -0.0), and _parked_rows' `(t or 0) > t0`
+//!   (a sibling with no t reads as 0, younger than a negative t). _done_since keeps a done row with no time as 0 (its
+//!   list is not filtered), where _block_ev_t drops a falsy time.
+//! - `is None` against truthiness: an own `born: {}` is not None, so the heal's record is never read and the face is
+//!   None; an empty node id is never written to or read from the anchor table (`if nid`), while an empty work anchor
+//!   is warm (`is not None`).
 //! - Dicts keep insertion order: the children map's keys in first-seen order, _parked_rows in that order,
-//!   _open_leaves in document order, _handoff_peer_identities sorted by name, stably.
+//!   _open_leaves in document order, _handoff_peer_identities sorted by name, stably. The stamp's peers keep their
+//!   repeats (one identity per listed key); only _handoff_peer_identities deduplicates.
 //! - Absent and null: an awaiting item writes `agentId`, `detail` and `stoppable` only when truthy (never null);
 //!   _node_log_rows answers None for no rows, not [].
+//! - The body's own children feed _agent_open_set: an open to-do the heal re-parents marks its new parent, and one on
+//!   a hidden top marks nothing.
+//! - A str regex's `\s` is Unicode (`pystr::is_space`): the title's sentence cut takes U+001C, U+0085, U+00A0 or
+//!   U+3000 after the stop. Splits: the handoff label's `host:name` at its last colon (`rpartition`), the postal log's
+//!   pairing at its first (`partition`).
 //! - _UUIDISH_RE ends in `$`, which in Python also matches before one trailing newline, so `"<uuid>\n"` is uuid-shaped.
 //! - jd.junk_quote lowercases with Python's Unicode `lower()`: the Kelvin sign (U+212A) lowers to an ASCII "k", so a
 //!   quote "o\u{212a}" is the stub "ok". It is the only code point outside ASCII whose lowercase is all ASCII.
@@ -1541,7 +1552,17 @@ impl SessionCase {
     }
 }
 
+/// A case's members that are Python's answers, not its inputs.
+pub const ANSWER_KEYS: [&str; 3] = ["expect", "expectSha1", "expectBytes"];
+
 impl EdgeCase {
+    /// Load one case, `exact` being the same case as romp-transcript's decoder reads it (Python's reading): refused
+    /// when an input holds an integer past i64, which serde_json reads as a float (load.rs), else as `load` does.
+    pub fn load_checked(case: &serde_json::Value, exact: &Out) -> Result<EdgeCase, String> {
+        crate::load::refuse_big_int(exact, &ANSWER_KEYS)?;
+        EdgeCase::load(case)
+    }
+
     /// Load one case; `Err` names the part the loader refused.
     pub fn load(case: &serde_json::Value) -> Result<EdgeCase, String> {
         match case["kind"].as_str() {
@@ -1895,6 +1916,28 @@ mod tests {
         assert!(!all_outstanding_delegated(&ns, "t"));
         let aopen = agent_open_set(&ns, &Children::from_parents(&ns));
         assert_eq!(aopen, HashSet::from(["t".to_string(), "x".to_string()]));
+    }
+
+    #[test]
+    fn falsy_times_end_on_the_literal_int_zero() {
+        // `mt or t or 0` and `ev_t or at or 0`: when every operand is falsy, the answer is the trailing literal
+        assert_eq!(block_since(&node(r#"{"id": "x", "mt": 0, "t": 0.0}"#)), Num::Int(0));
+        assert_eq!(block_since(&node(r#"{"id": "x", "mt": 0, "t": -0.0}"#)), Num::Int(0));
+        assert_eq!(done_since(&node(r#"{"id": "x", "log": [{"kind": "done", "at": 0.0}]}"#)), Num::Int(0));
+        assert_eq!(block_since(&node(r#"{"id": "x", "mt": 0, "t": 2.0}"#)), Num::Float(2.0));
+    }
+
+    #[test]
+    fn an_empty_id_is_never_remembered_and_an_empty_born_hides_the_heal() {
+        let work = SegMap(HashMap::from([("s:h1".to_string(), Some("w1".to_string()))]));
+        let empty = SegMap::default();
+        let mut table = AnchorTable::default();
+        let warm = node(r#"{"id": "", "trail": ["s:1:h1"]}"#);
+        assert_eq!(node_anchor_uuids(&warm, &empty, &work, &mut table), (None, Some("w1".into())));
+        assert!(table.0.is_empty(), "`if nid`: an empty id is not written");
+        let m = nodes(r#"{"p": {"id": "p", "text": "ask"}, "a": {"id": "a", "parentId": "p", "born": {}}}"#);
+        let healed: Healed = serde_json::from_str(r#"{"a": ["p", {"why": "from the heal"}]}"#).unwrap();
+        assert_eq!(session_started_face(&Ns::new(&m), "a", &healed), None, "an own empty born is not None, and falsy");
     }
 
     #[test]

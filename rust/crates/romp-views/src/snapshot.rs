@@ -426,6 +426,17 @@ mod tests {
     }
 
     #[test]
+    fn an_integer_past_i64_is_refused() {
+        // serde_json would read it as the float 1e+20, where Python's json keeps the int
+        let big = SNAP.replace(r#""mt": 5.0"#, r#""mt": 100000000000000000000"#);
+        let e = crate::load::snapshot_from_slice(big.as_bytes()).unwrap_err();
+        assert_eq!(e, "sessions.s-1.store.nodes.s-1:g1.mt: an integer past i64, which Python reads as an int and \
+                       serde_json as a float");
+        let edge = SNAP.replace(r#""mt": 5.0"#, r#""mt": 9223372036854775807"#);
+        assert!(crate::load::snapshot_from_slice(edge.as_bytes()).is_ok(), "i64's top loads");
+    }
+
+    #[test]
     fn another_schema_is_refused() {
         let other = SNAP.replace("romp-spike-snapshot/1", "romp-spike-snapshot/2");
         let e = crate::load::snapshot_from_slice(other.as_bytes()).unwrap_err();
