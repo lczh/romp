@@ -13,6 +13,7 @@
 //! `Option<Option<X>>`.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::fmt;
 
 use romp_json::Value as Out;
@@ -41,6 +42,89 @@ impl Num {
             Num::Float(f) => f,
         }
     }
+
+    /// Python's comparison of two numbers. An int and a float compare exactly, as CPython compares them, not through
+    /// a conversion to float: `2**53 + 1 > 2.0**53` is true, where `(2**53 + 1) as f64` would make them equal. A
+    /// loaded float is finite (serde_json refuses NaN and infinities), so the order is total.
+    pub fn py_cmp(self, other: Num) -> Ordering {
+        match (self, other) {
+            (Num::Int(a), Num::Int(b)) => a.cmp(&b),
+            (Num::Float(a), Num::Float(b)) => a.partial_cmp(&b).expect("a loaded float is finite"),
+            (Num::Int(a), Num::Float(b)) => int_float_cmp(a, b),
+            (Num::Float(a), Num::Int(b)) => int_float_cmp(b, a).reverse(),
+        }
+    }
+
+    /// `x < y` in Python.
+    pub fn py_lt(self, other: Num) -> bool {
+        self.py_cmp(other) == Ordering::Less
+    }
+
+    /// `"%d" % x`: an int as is, a float truncated toward zero (`int(x)`, so 3.7 prints 3, -3.7 prints -3 and -0.5
+    /// prints 0), exactly, however large (`"%d" % 1e20` is `100000000000000000000`).
+    pub fn percent_d(self) -> String {
+        match self {
+            Num::Int(i) => i.to_string(),
+            Num::Float(f) => {
+                let t = f.trunc();
+                if t.abs() < TWO_63 { (t as i64).to_string() } else { integral_float_digits(t) }
+            }
+        }
+    }
+}
+
+const TWO_63: f64 = 9_223_372_036_854_775_808.0;
+
+/// An int against a finite float, exactly.
+fn int_float_cmp(i: i64, f: f64) -> Ordering {
+    if f >= TWO_63 {
+        return Ordering::Less;
+    }
+    if f < -TWO_63 {
+        return Ordering::Greater;
+    }
+    let fl = f.floor();
+    // `fl` is integral and in [-2**63, 2**63), so the conversion is exact
+    match i.cmp(&(fl as i64)) {
+        Ordering::Equal if f > fl => Ordering::Less,
+        o => o,
+    }
+}
+
+/// The decimal digits of an integral float of magnitude 2**63 or more: mantissa times a power of two, in base-1e9
+/// limbs (no big-integer crate).
+fn integral_float_digits(f: f64) -> String {
+    let bits = f.to_bits();
+    let exp = ((bits >> 52) & 0x7ff) as i32 - 1075;
+    debug_assert!(exp > 0, "a float past 2**63 has a positive binary exponent");
+    let mut limbs: Vec<u64> = Vec::new(); // little-endian, each < 1e9
+    let mut m = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    while m > 0 {
+        limbs.push(m % 1_000_000_000);
+        m /= 1_000_000_000;
+    }
+    let mut left = exp;
+    while left > 0 {
+        let s = left.min(30);
+        left -= s;
+        let mut carry = 0u64;
+        for l in &mut limbs {
+            let v = (*l << s) + carry;
+            *l = v % 1_000_000_000;
+            carry = v / 1_000_000_000;
+        }
+        while carry > 0 {
+            limbs.push(carry % 1_000_000_000);
+            carry /= 1_000_000_000;
+        }
+    }
+    let mut out = String::from(if f < 0.0 { "-" } else { "" });
+    let mut it = limbs.iter().rev();
+    out.push_str(&it.next().expect("a nonzero value").to_string());
+    for l in it {
+        out.push_str(&format!("{l:09}"));
+    }
+    out
 }
 
 impl<'de> Deserialize<'de> for Num {
@@ -482,6 +566,58 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(text).unwrap();
             assert_eq!(py_truthy(&v), want, "{text}");
         }
+    }
+
+    #[test]
+    fn numbers_compare_as_python_compares_them() {
+        use Num::{Float as F, Int as I};
+        use Ordering::{Equal, Greater, Less};
+        let two53 = 9_007_199_254_740_992i64;
+        for (a, b, want) in [
+            (I(5), F(5.0), Equal),
+            (F(5.0), I(5), Equal),
+            (I(5), F(5.5), Less),
+            (I(-5), F(-5.5), Greater),
+            (I(-6), F(-5.5), Less),
+            (I(0), F(-0.0), Equal),
+            (I(two53 + 1), F(two53 as f64), Greater), // as f64 the two would be equal
+            (F(two53 as f64), I(two53 + 1), Less),
+            (I(i64::MAX), F(9.223372036854775807e18), Less), // the float is 2**63
+            (I(i64::MIN), F(-9.223372036854775808e18), Equal),
+            (I(i64::MIN), F(-1e19), Greater),
+            (F(0.1), F(0.2), Less),
+            (I(3), I(2), Greater),
+        ] {
+            assert_eq!(a.py_cmp(b), want, "{a:?} vs {b:?}");
+        }
+        assert!(I(1).py_lt(F(1.5)) && !F(1.5).py_lt(I(1)) && !I(1).py_lt(F(1.0)));
+    }
+
+    #[test]
+    fn percent_d_truncates_a_float_as_python_does() {
+        // the right-hand sides are Python 3.12's `"%d" % x`
+        for (n, want) in [
+            (Num::Int(-7), "-7"),
+            (Num::Float(3.7), "3"),
+            (Num::Float(-3.7), "-3"),
+            (Num::Float(-0.5), "0"),
+            (Num::Float(-0.0), "0"),
+            (Num::Float(-5e-324), "0"),
+            (Num::Float(1781100000.9), "1781100000"),
+            (Num::Float(1e20), "100000000000000000000"),
+            (Num::Float(9.3e18), "9300000000000000000"),
+            (Num::Float(-1e19), "-10000000000000000000"),
+            (Num::Float(9.223372036854775808e18), "9223372036854775808"),
+            (Num::Float(-9.223372036854775808e18), "-9223372036854775808"),
+            (Num::Float(1.8446744073709556e19), "18446744073709555712"),
+            (Num::Float(1.2345678901234568e29), "123456789012345677877719597056"),
+        ] {
+            assert_eq!(n.percent_d(), want, "{n:?}");
+        }
+        let max = Num::Float(f64::MAX).percent_d();
+        assert_eq!(max.len(), 309);
+        assert!(max.starts_with("17976931348623157081452742373170435679807056752584499659891747680315726078"));
+        assert!(max.ends_with("26184124858368"));
     }
 
     #[test]

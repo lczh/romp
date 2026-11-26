@@ -6,24 +6,30 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
-- Step: S3 and S4.1 done (merged into `romp_fix` from `romp_fix-s3` and `romp_fix-s4a`, each with its review's fixes).
+- Step: S3, S4.1 and S4.2 done, merged into `romp_fix` from `romp_fix-s3`, `romp_fix-s4a` and `romp_fix-s42`, each
+  with its review's fixes. S4.2's two follow-ups (the empty-trigger pin, `dump_layer2.py --fuzz`) were independently
+  verified: 65,000 more random cases on fresh seeds with 0 differences, and 12 planted mutants all caught.
   - S3: romp-transcript reads both dumps' transcripts with every summary line identical to Python's reader, records
     compared in full, and matches Python's cache read for read on 46 lockstep steps of the identity contract and on
     1,200 random ones (`tools/rust-spike/check_store.py --fuzz 6`). See "S3 as built" below.
   - S4.1: the typed snapshot and trees load and write back through romp-json byte for byte on both worlds, and the 21
     layer-1 functions match Python's own answers with zero differences: 6,370 values on the small world, 2,499,514 on
     the large, plus 1,206 on 67 synthetic edge atoms. See "S4.1 as built" below.
+  - S4.2: segmentation (kernel._segs_seam and the six functions under it) matches Python's own answers with zero
+    differences on every turn of both worlds (336 values small, 135,016 large), on 100 Python-made edge cases (1,210
+    values and 300 counts; 10 more are refused at load, as built to be) and on 60,000 random cases (590,031 values,
+    `dump_layer2.py --fuzz`). See "S4.2 as built" below.
   - S2 done before them (byte-identical oracle dumps across seeds and roots, "S2 as built"); S1 before that
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: S4.2, layer 2 (segmentation), scoped in "What layer 2 needs" below.
-  - In progress since 2026-11-26 as workflow run `wf_17b67763-a10` in worktree `~/romp-romp_fix-s42` (branch
-    `romp_fix-s42`), with an adversarial review. If a session dies, check that worktree's commits first, then resume
-    the run with Workflow `resumeFromRunId`.
+- Next action: S4.3, layer 3 (tree facts and the anchor walk), scoped in "What layer 3 needs" below. S4.2 is merged.
   - Inputs: `python3 tools/rust-spike/dump_world.py --world small` (or `large`), then
-    `python3 tools/rust-spike/dump_layer1.py DUMP`. Never commit a dump.
-  - Checks: `romp-spike roundtrip DUMP`, `romp-spike layer1 DUMP` and
+    `python3 tools/rust-spike/dump_layer1.py DUMP` and `python3 tools/rust-spike/dump_layer2.py DUMP`. Never commit a
+    dump.
+  - Checks: `romp-spike roundtrip DUMP`, `romp-spike layer1 DUMP`, `romp-spike layer2 DUMP`,
+    `romp-spike layer2 rust/crates/romp-views/tests/fixtures/layer2_edge.json`,
+    `python3 tools/rust-spike/dump_layer2.py --fuzz 10000 --seed S` (seeds 1 to 6) and
     `python3 tools/rust-spike/check_store.py --dump DIR --fuzz 6` (`--dump` repeatable). Build with
     `~/.cargo/bin/cargo build --offline --release -p romp-spike`; the binary is in `rust/target/release/`.
   - Re-run check_store after any change to romp-transcript or to Python's reader. S6 should read "What the store
@@ -57,7 +63,7 @@ kernel, where the memory gain does not depend on interpreter speed.
 | `rust/crates/romp-transcript` | the transcript store: raw bytes plus a per-line index, the Python cache's identity contract (inode, size, mtime, CRC), positioned reads |
 | `rust/crates/romp-views` | the feed's per-card build only (the spike's slice of the views crate) |
 | `rust/crates/romp-spike` | the standalone binary: load a snapshot and transcripts, build the feed, print canonical JSON and timings |
-| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py`), the measurement |
+| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py`, `dump_layer2.py`), the measurement |
 
 ## Steps
 
@@ -302,29 +308,167 @@ boundaries), and the two regexes (ROMP_INJECT_RE, SCHEDULED_PREAMBLE_RE) are mat
   `len` counts code points (79 against 82 bytes); and a bare-string content reads three ways (em._content makes it a
   text block, em._prose_chars counts 0, jd._atom_text iterates its characters and finds "").
 
-## What layer 2 needs (segmentation)
+## S4.2 as built (2026-11-26)
 
-Section 2 item 2: em.segments with em._segment_id, em.split_segment (with em._seam_real_work), jd.apply_seams,
-kernel._segs_seam and kernel._turn_sans_placed_echoes. The per-card code reaches them through `_segs_seam`, from
-_provisional_card, _feed_seg_fold and _FeedSegTurns.get (the direct `em.segments` call in _blocked_placeholder is on
-a branch neither world reaches).
-- A derived `Segment` over borrowed atoms: `t`, `end`, `trigger`, `atoms`, `id`, and on a seam tail `seam: true`
-  and `seamOf {top, text}`. em.split_segment filters atoms by time (`a.get("t", 0) <= t`), so a piece is a list of
-  atom references, not a slice.
-- Numbers: a segment's `t` is an atom's or the turn's, and the id prints it with `"%d"`, which truncates a float.
-  apply_seams compares `p["t"] < s.get("t", 0) < p["end"]` across ints and floats, so `Num` needs Python's numeric
-  ordering, and `min(hits, key=t)` keeps the first of equal times.
-- Layer 1 supplies _segment_id's predicates (_has_text, _machine_written, is_interrupt_record, _text_hash8); the
-  uuid basis is a second SHA-1 call. `rompuuid` is `atoms[0]["session_id"]` (`.get(..., "")` in split_segment), and
-  `turn["trigger"]["uuid"] if turn["trigger"] else None` raises on a dict without `uuid`.
-- _seam_real_work counts the stripped joined text's code points against SEAM_PROSE_FLOOR (80): a second boundary
-  like CITE_MIN_CHARS, but over `_text_of` rather than `_prose_chars`. `seamOf.text` is `sm.get("text", "")`, so an
-  absent text and a null one differ.
-- Coverage: split_segment never runs in either world (no seam's `segs` holds a key whose span straddles its `t`),
-  so the dump comparison cannot prove the split. Port it anyway with Python-made edge cases as layer 1 did, or
-  refuse loudly when a seam hits. The restored pre-cut branch of em.segments stays refused at load.
-- The oracle: `dump_layer2.py` calling `kernel._segs_seam(turn, store)` per turn with the session's store, writing
-  each segment's t, end, trigger, id, atom uuids, seam and seamOf; `romp-spike layer2` compares, as for layer 1.
+**The problem.** A card is built per segment: a turn is cut at each new prompt, and when a goal settles while its
+segment is still growing, the rest of that segment is split off as its own "seam" segment, so the later work is not
+filed under the finished goal. Every card keys its anchors on these segments' ids. A port that cuts a turn one atom
+differently, or prints a time differently inside an id, moves cards. Layer 2 is that cutting: `layer2.rs` ports
+kernel._segs_seam and what it calls (kernel._turn_sans_placed_echoes, em.segments with em._segment_id, jd.apply_seams,
+em.split_segment with em._seam_real_work), line for line over the typed tree and store.
+- A `Segment` borrows its atoms (`Vec<&Atom>`): em.split_segment filters a segment's atoms by time, so a piece is a
+  list of references, not a slice.
+- Times keep the int/float tag and compare the way Python compares them (`Num::py_cmp`). An int and a float compare
+  exactly, so 2**53 + 1 is greater than 2.0**53, where a conversion to f64 would call them equal. An id prints its
+  time with `"%d"`, which truncates a float toward zero (-0.5 prints 0). It does so exactly at any size: past 2**63
+  `Num::percent_d` expands the float by hand in base-1e9 limbs.
+- `min(hits, key=lambda s: s["t"])` keeps the first of equal times. It also runs its key on every hit, so a hit seam
+  with no `t` raises KeyError, even though the hit test read the absent `t` as 0.
+- `seamOf.text` is `sm.get("text", "")`: an absent text gives "", a null one stays null.
+- The seam floor (SEAM_PROSE_FLOOR, 80) counts code points of the stripped, joined text (em._text_of). It does not
+  count bytes, and it is not layer 1's unstripped em._prose_chars. An API-error atom counts like any other.
+- Python raises KeyError on four inputs the loader accepts: no `session_id` on a turn's first atom, no `trigger` on a
+  turn without an input atom, a trigger dict without `uuid`, and a hit seam without `t`. The port returns
+  `Err(Raise)` carrying the exception's name and `str(e)`, and the comparison matches both.
+- The restored pre-cut branch of em.segments stays refused at load (`tree::validate_turn`, factored out of
+  `tree::validate` with the same messages). The loader now admits three shapes Python reads without error: a null
+  entry in `placedEchoes` (it drops the atoms that have no uuid), a null `seams` and a null `segs` (both skip). The
+  round trip and layer 1 still match on both worlds.
+
+**The oracle.** `tools/rust-spike/dump_layer2.py DUMP` loads the real kernel as dump_layer1.py does and calls
+kernel._segs_seam(turn, store) on every turn, with that session's store from `snapshot.json`. It writes
+`DUMP/layer2.json` (0.02 MB small, 8.9 MB large). Each segment is Python's dict, keys in their order, with `atoms`
+written as uuids and `atomIdx` added: each atom's index in its turn. Idle atoms have null uuids, so the uuids alone
+cannot prove which atoms a piece holds. Through wrappers on jd._seg_key and em.split_segment it also counts the pieces
+apply_seams examined, the splits it tried, and the splits made. `romp-spike layer2 DUMP` computes the same over the
+typed structs. It compares field by field: the key order, then each key as romp-json writes it, so an int/float tag
+or a negative zero counts. It also compares the counts.
+
+**Result on the worlds: zero differences.**
+- Small: 4 sessions, 42 turns, 42 segments, 336 values. Large: 38 sessions, 16,877 turns, 16,877 segments, 135,016
+  values (74 ms). The counts match Python's.
+- Why that is not enough. In both worlds every turn has exactly one input atom (so one segment per turn), every time
+  is an int, and no turn has leading atoms or placed echoes. The one seam (s001's settled g1) lists 4 segment keys,
+  and none of those segments' spans holds its time. So apply_seams examined 10 pieces on the small world and 3,000 on
+  the large, and never called em.split_segment. Nothing in the worlds tests the split, the floor or a float id.
+
+**The edge set.** `dump_layer2.py --edge-cases` writes `rust/crates/romp-views/tests/fixtures/layer2_edge.json`
+(synthetic; it regenerates byte-identical). Its 110 cases take their seam keys from the real em.segments, so a seam
+names the segment it is meant to hit. They cover:
+- seams: a straddling split; the strict bounds (a seam at the segment's `t` or `end` does not hit); an atom at the seam
+  time staying in the head; equal int and float times both ways; an int past 2**53 against a float; equal seam times
+  (the first listed wins) and an earlier seam listed second; absent and null seam text and top; recursive splits two
+  and three levels deep; a second seam inside the head (it re-hits the first seam, and that split finds no tail);
+  empty heads and empty tails; seams, stores and `segs` that are null, empty or absent;
+- the floor: 79, 80 and 81 code points of non-ASCII prose (88, 89 and 93 bytes), 79 and 80 ASCII, 79 after the strip,
+  80 across two joined blocks, 80 in a bare-string content, an API error, a user atom, a tool use without id or name;
+- em.segments: every trigger shape, leading atoms, inputs of every author, absent and null `session_id`, text-less and
+  machine-written anchors, placed echoes, and `%d` of fractional, negative and huge float times (1e20,
+  1.7976931348623157e308). One case pins the empty trigger: Python's `if trigger_uuid:` skips the anchor search
+  when the turn's trigger uuid is "", so a turn with no input, trigger `{"uuid": ""}` and atoms a1 ("x") and one
+  whose uuid is "" ("y") gets an id ending in sha1("x"). A port that searched for "" would anchor on the second atom
+  and hash "y". `layer2.rs` skips the search the same way (`.filter(|u| !u.is_empty())` in `segment_id`); with that
+  filter removed, this case is the fixture's one difference (the fixture before it had none);
+- five direct em.split_segment calls.
+
+Result: 100 cases load and match on every value (1,210) and every per-case count (300), 0 differences. The other 10
+are refused at load, and they are exactly the cases named REFUSE. Python raises on 8: the 5 KeyErrors match the same
+exception here, and the 3 TypeErrors are on refused shapes. Over the loaded cases the port tried 89 splits and made 38.
+Refused at load where Python answers, each checked against Python by the review; none is in either world:
+- a truthy `pre` with or without stored `segs`, and stored `segs` on a plain turn;
+- a seam that is not a dict, a seam text or key that is not a string, a seam `top` that is not a string (Python copies
+  any value into `seamOf.top`), and a string `segs` on a seam (Python matches it as a substring and really splits);
+- a `placedEchoes` that is a string or a dict, or that holds an int (Python makes a set of it);
+- a bool time on an atom or a seam, and an int trigger uuid;
+- a turn with no `t` whose first atom is an input (Python never reads `turn["t"]` there).
+
+**Planted mistakes, each caught.** `--plant end` ends each segment at its own last atom. It is caught on the small
+world (4 differences), the large (38) and the edge set (97). On the worlds it moves only the one turn per session that
+ends in an idle span: that turn's end is the idle span's end (the build clock), while every other turn, the open one
+included, ends at its last atom's time. `--plant bytes` counts the
+floor in UTF-8 bytes. The worlds cannot see it, since no split is ever tried there. The edge set catches it on exactly
+its two 79-code-point tails, "tail prose 79 code points, 88 bytes" and "tail prose 79 after strip (83 before)", and
+on their counts.
+
+Tests: 8 new unit tests (6 in `layer2.rs`, 2 in `record.rs` for `py_cmp` and `percent_d`, with Python's digits for
+1e20, 2**63 and f64::MAX), `tests/layer2_edge.rs` (5 tests over the fixture, both plants among them) and 1 in
+romp-spike for the comparison's messages. The workspace's 86 pass.
+
+**The randomized check** (added after the review). The edge set holds only the cases someone thought of, so the
+review asked for random ones too. `python3 tools/rust-spike/dump_layer2.py --fuzz N --seed S` makes N random turns
+and stores, answers each with the real kernel._segs_seam (one case in twelve: em.split_segment on the first segment),
+writes them in the edge-set format to a temporary file and runs `romp-spike layer2` on it. Any difference, or any
+case the loader refuses, fails it. The same seed makes the same file byte for byte, so a failure replays.
+- What it draws: atoms of every kind, uuids that repeat, are "" or null or absent; texts with non-ASCII (2, 3 and
+  4 UTF-8 bytes, a combining accent), whitespace Python strips (U+001C to U+001F, which Rust's trim keeps, and
+  U+0085, U+00A0, U+3000), the romp-injected marker, the scheduled preamble and the interrupt record (and near
+  misses), and prose lengths clustered at the 80-code-point floor; content as blocks, a bare string, absent; int
+  and float times with ties, the other tag of an equal time, -0.0, times just under 2**53 and past 2**62, floats
+  past 2**63 up to f64::MAX, and out-of-order atoms; every trigger shape; placed echoes (null entries among them);
+  absent, null and empty stores and seams. Seam keys and times come from the turn's own em.segments and the tails
+  em.split_segment cuts from them, up to three levels down, so seams hit, straddle a span, sit on its strict
+  bounds, re-split their tails and tie. Seam text and top are absent, null or a string.
+- Result, seeds 1 to 6 at 10,000 cases each (18 s for all six): 60,000 cases (54,922 kernel._segs_seam, 5,078
+  direct splits), 590,031 values and 180,000 counts compared, **0 differences**, 0 refused. Python raised on 4,712
+  (KeyError 'uuid' 1,867, 'trigger' 1,626, 'session_id' 1,104, 't' 115), each matched as the same exception. The
+  port examined 66,522 pieces, tried 24,931 splits and made 5,972; 5,449 cases split and 481 split more than once;
+  939 seam tails carry the text "" (an absent or empty text) and 391 a null one; 1,346 segments have the trigger "" and
+  a later atom whose uuid is "", where a search for "" would choose another anchor.
+- Each mistake below is caught by seed 1 alone (10,000 cases). The plants are romp-spike's own (`--plant end` and
+  `--plant bytes`, passed through by `dump_layer2.py --fuzz ... --plant NAME`, which then passes only when the plant
+  is caught). The others were edits to `layer2.rs`, each built, run and reverted. The fixture columns show where the
+  edge set alone also catches it; the empty-trigger mutant is the one the fixture before this step missed.
+
+| Mistake | Fixture before (109 cases) | Fixture now (110) | Fuzz, seed 1 |
+|---|---|---|---|
+| `--plant end` (a segment ends at its last atom) | 97 | 97 | 5,197 |
+| `--plant bytes` (the floor in UTF-8 bytes) | 8 | 8 | 216 |
+| a trigger uuid of "" is searched for | 0 | 1 | 153 |
+| an anchor uuid of "" is the hash basis | 1 | 1 | 225 |
+| the last of equal seam times wins | 2 | 2 | 225 |
+| an absent seam text reads as null | 1 | 1 | 97 |
+| a seam at the piece's end hits | 1 | 1 | 1,005 |
+| the split compares times as f64 | 4 | 4 | 116 |
+| the id prints its time through f64 as i64 | 5 | 5 | 3,666 |
+| a hit seam without `t` reads as 0, no KeyError | 8 | 8 | 48 |
+| an absent session_id in a split tail's id reads as None | 1 | 1 | 3 |
+| a null placedEchoes entry drops nothing | 2 | 2 | 715 |
+| an API-error atom is not real work | 4 | 4 | 58 |
+| leading atoms keep the input's `t` | 7 | 7 | 5,037 |
+
+The weakest catch is the absent session_id (3 of 10,000): it needs a split of a segment whose first atom has no
+`session_id` (2% of atoms), and not the turn's first segment, where em.segments raises KeyError before any split.
+
+## What layer 3 needs (tree facts and the anchor walk)
+
+Section 2 item 3: _session_working with _suspended_after, _open_turn_progress and _last_plain_user_turn_t;
+_seg_anchors, jd._prompt_anchor_uuid and _seg_last_text; _feed_seg_fold, _feed_seg_walk and _feed_seg_plain_t without
+the held aggregate, and _FeedSegTurns.get. Found while scoping it from the current source and the large world's
+`coverage/port.json`:
+- One unlisted function: `_seg_jump`. _feed_seg_fold stores `r or _seg_jump(atoms)`, and `r` (the text reply) is set
+  on every segment of both worlds, so _seg_jump never runs. Port it with edge cases or refuse loudly. It reads
+  em.atom_has_text and em.atom_tool_uses (layer 1).
+- From layer 2: _feed_seg_fold walks `_segs_seam(turn, store)` per turn and keys every map by
+  `_seg_key(seg["id"])`. A later segment with the same key overwrites an earlier one but keeps the earlier one's place
+  (a Python dict), so the maps need an insertion-ordered upsert. `pos[k] = (turn index, segment ordinal)` feeds
+  _FeedSegTurns.get, which segments that one turn again and, when the segment at the ordinal carries another key,
+  takes the turn's last segment with the key.
+- Raises: _feed_seg_walk runs both folds inside one try. A raise leaves the maps as far as the fold got and marks the
+  walk not ok. _FeedSegTurns.get answers its default when segmentation raises. So layer 2's `Err(Raise)` must reach
+  layer 3 as a partial result, never a panic.
+- Numbers: `seg_best[k]` carries `seg.get("t", 0)` with its tag. _last_plain_user_turn_t takes
+  `max(best, a.get("t") or turn.get("t") or 0)`: `or` skips a zero time, and `max` keeps the first of equal values
+  (5 before 5.0), so the tag depends on order. _open_turn_progress returns the turn's `t` as is.
+- _open_turn_progress counts tool uses over `(message or {}).get("content") or []` directly, not em._content (a
+  bare-string content iterates characters, none a dict), and swallows any exception per atom.
+- Outside the tree: _suspended_after reads `_downtime`, the snapshot's `board.downtime` (raw JSON today, empty in both
+  worlds). The held aggregate (_FEED_SEG_HELD, _turn_hold_key, _seams_fp, _feed_seg_copy) stays out, so the port walks
+  every turn; the oracle must clear _FEED_SEG_HELD (dump_world's clear_build_memos) or call _feed_seg_fold directly.
+- Branches the worlds miss, each needing Python-made edge cases as layers 1 and 2 had: _session_working's empty turns
+  and its skip of trailing command atoms; _last_plain_user_turn_t's echo-turn and romp-goal-id skips;
+  jd._prompt_anchor_uuid's no-trigger and attachment branches; _seg_anchors' settle anchor; _open_turn_progress's
+  empty, ended and exception branches; _FeedSegTurns.get's absent key, raise and fallback (it runs once on the large
+  world); and _feed_seg_fold's stored `pcs` branch, which is unreachable while the loader refuses pre-cut turns.
 
 ## Log
 
@@ -389,3 +533,22 @@ a branch neither world reaches).
   - serde_json's default parser read 14,434 of 100,000 fractional times below 2e9 (and 59,330 of 199,913 random
     bit patterns) one ULP off; `float_roundtrip` (no added crate) reads them all exactly.
   - Rust tests: 27 unit tests in romp-views, 7 edge tests, 2 in romp-spike; the workspace's 40 pass.
+- 2026-11-26: S4.2, layer 2 (segmentation), on fresh dumps (`dump_layer2.py`, `romp-spike layer2`).
+  - Worlds: small 42 turns, 42 segments, 336 values; large 16,877 turns, 16,877 segments, 135,016 values; 0
+    differences, counts equal to Python's. Neither world calls em.split_segment (10 and 3,000 pieces examined, 0 split
+    calls).
+  - Edge set: 109 cases; 99 match on 1,202 values and 297 counts, 0 differences; 10 refused at load (every REFUSE
+    case); Python's 5 KeyErrors matched as the same exception; 89 splits tried, 38 made.
+  - Planted: `end` caught on small (4), large (38) and the edge set (97); `bytes` caught only by the edge set, on its
+    two 79-code-point tails.
+  - Re-run after the loader change (null `placedEchoes` entries, `seams`, `segs`): round trip identical and layer 1 at
+    0 differences on both worlds (6,370 and 2,499,514 values). Rust tests: 86 pass.
+- 2026-11-26: S4.2 review follow-ups.
+  - Empty trigger pinned: an edge case (no input, trigger uuid "", a later atom with uuid "") makes the fixture
+    110 cases, 100 loaded (1,210 values, 300 counts), 0 differences. Removing `layer2.rs`'s filter on "" now fails it
+    on exactly that case (it passed the 109-case fixture). The fixture's header coverage no longer counts the
+    generator's own em.split_segment and jd._seg_key calls (pieces 139, split calls 96, splits 41, down from 180, 100
+    and 45); the cases are unchanged apart from the added one.
+  - `dump_layer2.py --fuzz`: seeds 1 to 6 at 10,000 cases, 590,031 values and 180,000 counts, 0 differences. Seed 1
+    catches both plants (end 5,197, bytes 216) and all 12 source mutants tried (3 to 5,037 differences each).
+  - Rust tests: 86 pass.
