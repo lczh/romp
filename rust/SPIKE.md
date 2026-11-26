@@ -30,6 +30,9 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
 - Next action: S4.4, layer 4 (the store helpers), scoped in "What layer 4 needs" below. S4.3 is reviewed (ship) and merged.
+  - In progress since 2026-11-26 as workflow run `wf_51e4ccc1-6ef` in worktree `~/romp-romp_fix-s44` (branch
+    `romp_fix-s44`). If a session dies, check that worktree's commits first, then resume the run with Workflow
+    `resumeFromRunId`.
   - Inputs: `python3 tools/rust-spike/dump_world.py --world small` (or `large`), then
     `python3 tools/rust-spike/dump_layer1.py DUMP`, `python3 tools/rust-spike/dump_layer2.py DUMP` and
     `python3 tools/rust-spike/dump_layer3.py DUMP`. Never commit a dump.
