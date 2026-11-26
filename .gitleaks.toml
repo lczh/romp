@@ -36,3 +36,14 @@ the name as a key whose value is empty. ANCHORED (^...$) to the exact name and i
 '=', so a value written after the '=' is still caught.
 """
 regexes = ['''^ANTHROPIC_API_KEY=$''']
+
+[[allowlists]]
+description = """
+Python's json.dumps keyword argument, written as prose (2026-11-26). The Rust spike's
+design notes (rust/notes/s2-maps.json, commit 63ff6aef3) describe the feed's encoder
+as "... ensure_ascii=True, no sort_keys, allow_nan=True.", and generic-api-key reads
+"sort_keys," as a key name followed by an assignment, then "allow_nan=True." as its
+value (entropy 3.51). ANCHORED (^...$) to that exact value, so a real value on the
+same line is still caught.
+"""
+regexes = ['''^allow_nan=True\.$''']
