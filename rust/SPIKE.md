@@ -6,8 +6,16 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
-- Step: S6, the measurement harness, on `romp_fix-s6` (worktree `~/romp-romp_fix-s6`), with its design review applied
-  (6 must-fix, 12 should-fix; "The review round" under "S6 method"); smoke runs only, no figure is quoted yet.
+- Step: S6 done on `romp_fix-s6` (worktree `~/romp-romp_fix-s6`): the full alternated measurement ran on fresh dumps
+  (8 runs per configuration, both interpreters, CPU on the small, large and large4 worlds, memory cold and after
+  appends on small and large), every run raw in `rust/notes/s6-runs.json`; see "S6 results". By the decision rule fixed
+  in advance the CPU gate passes, narrowly: Python's heldWarm derivation over the port's held build is 5.24 (5.03 to
+  5.51, n=8) on the large world under arm64 3.13.18, with the instructive exception that the 4-session large4 world
+  gives 3.11. The steady state does not pass: at production's miss rate (7.7% in this run's `/perf` window), memoized
+  Python costs 1.56 to 2.25 ms per build against the memo-less port's 3.07 ms. The memory gate is unclear: the store is
+  0.248 of Python's footprint after appends on the synthetic transcripts (a pass as measured), but 0.39 to 0.42 at the
+  expansion real transcripts are thought to have (a fail); real-shaped transcripts, which need lczh's OK, decide it.
+  What follows in this bullet is the harness as its review left it.
   `tools/rust-spike/measure.py` (Python's replay build by process CPU, five rows round-robin, with its key, memo,
   serialization, stand-ins, frame and file work attributed apart and per session; the record cache's footprint,
   resident and traced bytes, cold and over an append schedule), `romp-spike measure` (the port's build by process CPU
@@ -105,13 +113,16 @@ with no server. Both implementations run on one synthetic state, and the feed JS
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: S6 proper (S5, the serde_json::Value variant, stays in the plan and does not block it), in this order:
-  (1) ask lczh for the OK to measure memory on real-shaped transcripts (a read-only temp copy, numbers only, nothing
-  committed, the copy deleted: `measure_drive.py --mem --mem-dir DIR`), since the synthetic transcripts inflate Python's
-  cache (S6 method, unfairness item 16); (2) the full alternated run on a quiet machine with the decision rule as
-  written ("The decision rule" under "S6 method"), `--runs 6` or more, two `/perf` snapshots around an active window.
-  The harness covers every item of the list below; it is kept as the requirements the harness was built to. What S6
-  needs, from the earlier steps:
+- Next action: S7, the report (S5, the serde_json::Value variant, stays in the plan and does not block it): the numbers
+  against both gates from "S6 results" and `rust/notes/s6-runs.json`, what replicated and what did not, and the
+  recommendation. Before S7 can read the memory gate, one item needs lczh: the OK to measure memory on real-shaped
+  transcripts (a read-only temp copy, numbers only, nothing committed, the copy deleted: `measure_drive.py --mem
+  --mem-dir DIR`, 8 runs), since the synthetic transcripts inflate Python's cache (S6 method, unfairness item 16) and
+  that one number decides the gate (see "What would change it" under "S6 results"). Decisions S7 should put to lczh,
+  not take: whether to port the memo (the steady state cannot pass without it), and whether to tune the port before
+  reporting (an in-tree FxHash-style hasher for the uuid maps, LTO and one codegen unit; no new crate), which bears on
+  the large4 exception. What S6 needed, from the earlier steps (every item met by the harness and the run; kept as the
+  record of what it was built to):
   - CPU: Python's `time.process_time()` in a single-threaded process (`time.thread_time()` under-reports about 42x on
     this Mac, s2-design section 4), and Rust's process CPU through a raw `getrusage` or `clock_gettime` extern (no
     crate), each checked against wall time; the two alternated several times on the same load; Python timed in replay
@@ -207,8 +218,9 @@ Each step lands as its own commit(s) with tests green. The status above is updat
   byte comparison shows zero differences.
 - **S5 the serde_json::Value variant.** The same build over Rust's generic JSON tree, which measures the cost of
   porting dict-shaped code as dict-shaped data.
-- **S6 measurement.** CPU per build (warm and cold), cold load, and the store's resident size. Python's side uses
-  tracemalloc over the record cache plus its RSS difference. Alternate the two several times on the same load.
+- **S6 measurement** (done: "S6 results"). CPU per build (warm and cold), cold load, and the store's resident
+  size. Python's side uses tracemalloc over the record cache plus its RSS difference. Alternate the two several
+  times on the same load.
   Warm builds: Python's _SUMMARY_ANCHOR_MEMO survives across builds and its key leaves out the segment's atoms, so a
   warm Python build after a seam is stamped can serve a landing a memo-less port does not compute (S4.5's review,
   "S4.6 as built"). A warm comparison stamps no seam between builds, or clears that memo first.
@@ -2379,10 +2391,200 @@ results; S6 proper quotes the figures. What they showed:
   checked), 9 (unfairness item 8; the production-sized world not built, as said there), 10 (every plain-build ratio
   labeled an unfair upper bound), 11 (stand-ins subtracted), 12 (unfairness item 15).
 
-Next for S6 proper: lczh's OK for real-shaped transcripts; then on a quiet machine `measure_drive.py --dump large
---dump large4 --dump small --runs 6 --python <3.13 arm64> --python <3.12 x86_64> --cpu --mem --relief` with the
-defaults (11 rounds, 5 instrumented, 6 append rounds, the active schedule, both growth policies) and two `/perf`
-snapshots taken around an active window; the verdict is `summary.large.gate`.
+Next for S6 proper (as written before it ran): lczh's OK for real-shaped transcripts; then on a quiet machine
+`measure_drive.py --dump large --dump large4 --dump small --runs 6 --python <3.13 arm64> --python <3.12 x86_64> --cpu
+--mem --relief` with the defaults (11 rounds, 5 instrumented, 6 append rounds, the active schedule, both growth
+policies) and two `/perf` snapshots taken around an active window; the verdict is `summary.large.gate`. It ran with 8
+runs as two invocations (CPU, then memory), without the real-shaped transcripts, which still wait on lczh's OK: "S6
+results".
+
+## S6 results (2026-11-26)
+
+**What the run had to answer.** The plan's gate is two plain questions. Does the port build the feed for at least five
+times less CPU than Python, over typed structs? Does its transcript store hold the same files in at most a third of the
+memory Python's record cache needs? "S6 method" lists the ways a naive timing answers neither: Python's build does work
+the port never does (the memo key, the memo's serialization, the frame, file reads), its memo means production rarely
+derives at all, its held anchor aggregate means a production miss walks only the newest turn, the thread clock reads 42x
+low under Rosetta, a row's predecessor moves its time, and synthetic transcripts may expand in Python's cache more than
+real ones. The CPU gate's decision rule was written down before this run ("The decision rule" under "S6 method"):
+Python's heldWarm region over the port's held build, large world, arm64 CPython 3.13.18, the median of the paired ratios
+over at least 6 runs, pass at 5.0. The memory gate has no rule finer than the plan's sentence.
+
+**What ran.** At afdaaf242 with a clean tree, the release binary current and the 180 Rust tests passing, on fresh dumps
+of the small, large and large4 worlds (each dump's own replay check passing; oracles 17,878, 114,338 and 17,890 bytes;
+`romp-spike feed` identical on all three):
+- CPU: `measure_drive.py --dump large --dump large4 --dump small --runs 8 --python <3.13.18 arm64> --python <3.12.11
+  x86_64> --cpu` with the defaults (11 rounds, 5 instrumented builds per row): 72 runs, 0 failed, 12:46 to 12:51 UTC.
+- Memory: `measure_drive.py --dump large --dump small --runs 8 --python <both> --mem --relief` with the defaults (6 append
+  rounds, the active schedule, both growth policies): 160 runs, 0 failed, 12:51 to 12:54 UTC.
+- The live kernel's `/perf` read with a GET before and after both (12:46:27 to 12:54:24 UTC); the kernel did not
+  restart between them.
+- Every run is kept raw in `rust/notes/s6-runs.json` (the two invocations merged, both `/perf` snapshots, and the
+  summary; `measure_drive.py --summarize rust/notes/s6-runs.json` recomputes the summary identically). With 8 runs each
+  side went first 4 times.
+
+The machine (Apple M4 Max, 12 performance and 4 efficiency cores): no pytest, cargo, dump or other workflow's build was
+running, and the CPU was 80 to 89% idle just before. The load average was 5.1 to 10.8 during the CPU runs and 4.6 to 5.5
+during the memory runs; this desktop idles at about 5 to 7. The 10.8 is run 0, which started as the three dumps
+finished, while the one-minute average still carried them. Its deciding ratio (5.30) is mid-pack, and leaving it out
+keeps the median at 5.24. Every calibration spin's process CPU agreed with its wall time (1.00), no spin rate was flagged
+(all within 10% of their side's median), and no build ran a full collection. arm64 3.13 ran on 1 OS thread and x86_64
+3.12 on 2 (Rosetta's; its thread clock read 0.024 of wall, as before). Every checked build equaled the oracle. The held
+counters agreed on all three worlds (large: Python's heldWarm and the port's held build both 38 walks, 16,839 turns held
+and 38 walked per build; emptyMemo and heldCold 0 held and 16,877 walked).
+
+### The CPU gate: passes as written, narrowly
+
+**In one sentence:** on the large world, under the interpreter romp runs, Python's derivation costs 5.24 times the port's,
+and all 8 paired runs were over 5.0 (5.03 to 5.51), so the rule fixed in advance says pass, not a marginal pass.
+
+The figures behind it, in ms per build, median over 8 runs (minimum to maximum): Python's heldWarm region 16.14 (15.66 to
+16.91) on arm64 3.13 and 20.83 (20.35 to 22.10) on x86_64 3.12, against the port's held build at 3.07 (3.03 to 3.13). The
+per-run ratios, in run order, were 5.30, 5.25, 5.51, 5.19, 5.03, 5.29, 5.20 and 5.24. The comparisons beside it on the
+large world, as paired-ratio medians (minimum to maximum, n=8):
+
+| Comparison | arm64 3.13.18 | x86_64 3.12.11 |
+|---|---|---|
+| Deciding: heldWarm region / held | 5.24 (5.03 to 5.51) | 6.80 (6.51 to 7.20) |
+| Same work, interpreter vs compiled: noHold region / region | 10.47 (10.38 to 10.78) | 16.74 (16.46 to 17.15) |
+| Empty memo: emptyMemo region / heldCold | 11.19 (11.15 to 11.37) | 17.97 (17.61 to 18.18) |
+| Without the landing memo: heldNoLanding region / held | 5.28 (5.14 to 5.49) | 6.79 (6.56 to 7.50) |
+| The cheap bound: heldWarm region / bound | 7.26 (6.91 to 7.51) | 9.46 (8.65 to 10.06) |
+
+The rows the run was asked for, as whole plain builds: Python's empty-memo build is 222.7 ms (217.4 to 224.8) on arm64 and
+353.3 (348.6 to 368.4) on x86_64; its memo-served build is 1.46 (1.38 to 1.47) and 2.35 (2.31 to 2.43). The port's
+builds: held 3.07, heldCold 19.62 (19.36 to 19.80), every turn walked 20.14, the whole build_feed 20.19, the first build
+in the process 24.0, and loading the dump 136 ms. On the small world the empty-memo and memo-served builds are 1.37 and
+0.39 ms on arm64 (2.22 and 0.67 on x86_64), the port's held and heldCold builds 0.058 and 0.087 ms; the deciding ratio
+there is 8.38 (7.97 to 8.82) on arm64 and 9.23 on x86_64.
+
+What the replay's Python build does outside the region, reported apart and charged to neither side (large world, arm64,
+heldWarm's instrumented builds, ms): the key's own work 0.68, the memo's bookkeeping 0.42, its serialization 0.73, the
+helper stand-ins 0.40 (265 deep copies), the frame 0.52, the pre-loop reads 0.01, `_parked_handoffs` 0.02 and
+`_notice_cards` 0.02 (the file work S4.7's review named, near zero since neither world has a postal log or notices), and
+the residual 0.59 (the inline loop, the serving join, the whoWorking and bell passes). The instrumented build totals 19.66
+ms, 18.95 less the wrappers' estimated cost, against 18.63 for the plain build (the wrapper check, 1.02). On x86_64 the
+same parts are 0.98, 0.69, 1.17, 0.80, 0.86, 0.02, 0.03, 0.03 and 0.92.
+
+**Why believe it, and how close it is.** The margin is 5%, and the method's own correction choices move the figure by
+about that much, so the pass is real under the rule but thin:
+- The wrapper correction's stated uncertainty (0.11 ms either way) gives 5.21 to 5.28, with the minimum run between 4.99
+  and 5.07.
+- Rescaling the region so the instrumented build less its wrappers equals the plain build (the 1.02 above charged
+  entirely to the region) gives 5.15 (4.96 to 5.28): a median pass with one run under 5.0, which the rule calls a
+  marginal pass.
+- A cruder estimate, the plain build less every part reported apart, gives 4.95 (4.73 to 5.10). It is biased low,
+  because each part's figure includes the wrappers' cost inside it (about 0.57 ms outside the region in all); adding that
+  back gives about 5.13.
+- The smoke figures shrank or held: the smoke pairs gave 5.52 and 5.02 (n=2 each), and this run gives 5.24 (n=8);
+  x86_64's deciding ratio went from 6.63 to 6.80 and the secondary row from 10.4 to 10.47. The two sides' counters agree
+  per build, and the port's held build is byte-identical to the oracle, so the held path really ran on both sides.
+- What leans which way: the port's default release profile, system malloc and SipHash maps make it slower than a tuned
+  port would be (unfairness item 15). Python's helper stand-ins are subtracted, while its live helpers, which read
+  files, probably cost more than the stand-ins; the port reads the same answers from its snapshot and a production port
+  would have to compute them (item 3). Neither is measured.
+
+**The instructive exception: large4, 3.11 on arm64 (2.96 to 3.59) and 4.26 on x86_64 (3.91 to 4.63).** This is the same
+rule on the large world's four designed sessions without its 34 fillers. The port's held build is 1.22 ms there, and the
+cheap bound, which walks no closed turns at all, is already 1.04 ms. Almost all of it is one dictionary:
+`_dictated_prompt_uuid`'s prompt index over s001's 24,000 atoms (0.9 ms in the review's profile). Both sides build it on
+demand, once per derivation of s001. Python's dict reuses each uuid string's cached hash, while the port's std HashMap
+hashes every uuid with SipHash on every build. On the 38-session world that index is a small share among 37 other
+sessions' work, which is why the ratio there is 5.2. So the ratio belongs to the session mix, not to the port as a single
+number: 8.4 on four short sessions, 5.2 on 38 mid-sized ones, 3.1 when one long session dominates. As a continuity check,
+large4 on x86_64 3.12 reproduces S2's figures again: an empty-memo build of 90.3 ms (87.8 to 91.3) and a region of 88.7,
+against S2's 90 and 87 ms.
+
+**A label in the summary to discount.** The driver labels every plain-build ratio "unfair upper bound". That is right for
+the noHold and emptyMemo plain builds over the port's whole build (10.5 and 11.0 on arm64): they carry Python's frame,
+key, memo and file work. It is wrong for the heldWarm, heldNoLanding and memoServed plain builds over it (0.92, 0.92 and
+0.07): the port's whole-build row walks every turn with no held aggregate (20.2 ms), so those three set Python's held or
+memo-served build against the port's full walk, and they are unfair to the port, not to Python. Nothing here uses them.
+The plain cold ratio (9.8) stays an unfair upper bound (item 10).
+
+### The steady state: memoized Python is cheaper than the memo-less port
+
+The deciding row compares derivation with derivation. In production, most sessions in a build are memo hits and derive
+nothing, and the port has no memo. The `/perf` window (477 s) had 140 builds and 740 cached feed requests, so 15.9% of
+feed requests ran build_feed. Those builds made 840 session lookups, 775 hits and 65 misses: a miss rate of 7.7% per
+session per build, 0.46 misses per build over 6 sessions. 95% of the closed turns those misses walked were served from
+the held aggregate (19 per walk). Since boot (13.6 hours) the rate was 7.25%; the review's 13-minute window had 2.9%. The
+window includes this measurement's own session, whose transcript grew while it ran.
+
+At that rate, the large world's 38 sessions cost memoized Python 1.56 ms per build on arm64 (1.52 to 1.61) with misses
+spread evenly, and 2.25 ms (2.20 to 2.33) with production's 0.46 misses per build all on s001, the largest session. The
+port's held build costs 3.07 ms. So memoized Python costs 0.51 and 0.73 of the port, and on x86_64 2.14 and 3.04 ms (0.70
+and 0.99). The key is left out of both the hit and the miss, which flatters Python (the replay's stand-in key understates a
+production hit about tenfold, "S6 method"). The port would draw level with memoized Python at a miss rate of about 17% (12% on x86_64),
+or 0.65 misses per build on s001. To be five times cheaper it would need a miss rate of about 89%. Charged at emptyMemo's
+cost, with no held aggregate, the blend would be 17.3 and 19.6 ms (5.6 and 6.4 times the port), but production served
+95% of closed turns from the aggregate, so that is not its path. On the memo-served row alone, Python's whole memo-served
+build (1.46 ms, frame and key included) is under the port's 3.07 ms derivation, and its hit without the key (0.48 ms) is
+0.16 of it.
+
+So, as the decision rule said in advance, the steady state cannot pass without the memo ported too. With the memo it
+would compare hit with hit, which neither side has measured.
+
+### The memory gate: unclear, and leaning toward a fail as built
+
+**In one sentence:** on the synthetic transcripts the store needs a quarter of Python's memory, which passes, but those
+transcripts swell in Python's cache far more than real ones are thought to, and at the real expansion the same store
+would need about 0.39 to 0.42 of Python's memory, which fails.
+
+The figures (large world: 82.7 MB of transcripts in 38 files, 135,005 records cold; 6 append rounds to the 4 largest
+files added 62 records and 37,958 bytes; footprint growth over each process's own baseline, in MB, median of 8 with
+minimum to maximum):
+
+| | Cold | After 6 rounds | Bytes per file byte, after |
+|---|---|---|---|
+| Store, whole-line blocks (the decided policy) | 96.5 (96.4 to 96.5) | 99.6 (99.5 to 99.6) | 1.20 |
+| Store, S3's doubling buffer | 94.1 | 99.9 | 1.21 |
+| Python cache, arm64 3.13.18 | 400.1 (400.1 to 402.1) | 400.8 (400.4 to 403.6) | 4.84 |
+| Python cache, x86_64 3.12.11 | 402.3 (400.8 to 403.2) | 403.8 (402.8 to 406.5) | 4.88 |
+| Python cache, traced (both interpreters) | 373.2 | 373.4 | 4.51 |
+
+The store over Python's cache, paired by run: 0.241 (0.240 to 0.241) cold and 0.248 (0.247 to 0.249) after the rounds
+against arm64; 0.240 and 0.247 against x86_64; S3's doubling buffer 0.235 and 0.249. Rescaled so Python expands the files
+as event_model's own estimate for real transcripts says (2.85 bytes per file byte): 0.409 cold and 0.422 after. Rescaled
+to S3's lab resident growth (3.1): 0.376 and 0.388.
+
+After appends, the whole-line blocks grew 2.4 MB at the first round and 0.7 MB over the next five. Their live bytes did
+not move (93.2 to 93.3 MB in use) while the malloc zone's total went from 94.8 to 99.0 MB at round 1 and stayed there:
+the index buffers that each read's shrink-to-fit replaces, freed and kept by the allocator and reused afterward. The
+doubling buffer's live bytes went from 96.3 to 117.0 MB (the doubled buffers of the 4 grown files). Pressure relief
+handed back 0 bytes at every reading, on both sides. Python's footprint moved 0.7 MB on arm64 and 1.5 MB on x86_64.
+
+Why believe the measured figures: both sides counted the same records after every round (135,067); the cache evicted and
+dropped nothing; clearing it gave back all but 0.019 MB of its 373 traced MB; and no reading's resident size drifted from
+its footprint or showed compressed bytes. The small world is too small to read: Python's footprint does not move for 0.2
+MB of files (a growth of 0.0 MB, so no ratio), though its traced growth, 0.90 MB, is the same 4.5 bytes per file byte.
+
+**What would change it.** The store keeps every file's raw bytes, so it needs at least 1.0 byte per file byte. It can
+pass only if Python's cache expands real transcripts by more than 3.0 times, and by more than 3.6 times at this world's
+index overhead (1.20 bytes per file byte after appends). The two real-transcript figures on record, 2.85 and 3.1, are
+under both. Real records are larger than the synthetic ones (613 bytes on average), so the index costs less per byte
+there and the store's own figure would fall toward 1.0, but not by enough on these figures. The deciding measurement is
+`measure_drive.py --mem --mem-dir DIR` on a read-only temp copy of real transcripts, which needs lczh's OK. If it fails,
+the fallback is already named ("The store's growth policy"): hold only the index (0.11 bytes per file byte here) and
+fetch each record by a positioned read, which would pass at any plausible expansion, at the cost of a read per record.
+
+### The verdicts
+
+- **CPU gate: pass, by the rule fixed before the run**, at 5.24 (5.03 to 5.51, n=8). As a claim about production it is
+  unclear. The margin is within the method's own correction choices (one reasonable alternative gives 5.15 with a run at
+  4.96). The ratio depends on the session mix (3.11 on large4, 8.38 on small), and no world matches production's shape
+  (6 sessions per build with about 20 closed turns each, plus lazy atoms and stored segments the port's loader refuses).
+  What would move it: a production-sized world, which needs the loader to admit pre-cut turns and lazy atoms; tuning the
+  port without a new crate (an in-tree FxHash-style hasher for the uuid maps, which large4 points at, then LTO and one
+  codegen unit); or a quieter rerun, though the 8 runs agree to within 10%.
+- **The steady state: fails.** Memoized Python costs 0.51 to 0.73 of the memo-less port per build at production's miss
+  rate. Only a ported memo can change this.
+- **Memory gate: unclear, leaning toward a fail as built.** It passes as measured (0.248 after appends) and fails at
+  real transcripts' expected expansion (0.39 to 0.42). Real-shaped transcripts decide it.
+- **For the plan's question (S7):** the port's derivation is about five times cheaper only on a favorable session mix
+  and only before the memo is counted, and the raw-bytes store probably misses a third. That points toward the plan's
+  staged fallback ("The question the spike answers"): the store first, behind the Python kernel, redesigned to hold only
+  its index if real transcripts confirm the miss. The recommendation is S7's to make, after the real-transcript number.
 
 ## Log
 
@@ -2670,3 +2872,20 @@ snapshots taken around an active window; the verdict is `summary.large.gate`.
     `dump_layer6.py` and `dump_layer7.py --fuzz 4000 --seed 1`, 0 differences; check_store (both dumps, the edge corpus,
     46 lockstep steps, 6 fuzz seeds of lines and of steps), mismatches 0. Rust tests: 180 pass (5 new: three for the
     held aggregate, two for the growth policies).
+- 2026-11-26: S6 proper, the full alternated measurement ("S6 results"), on fresh dumps of the small, large and large4
+  worlds at afdaaf242 (Rust tests: 180 pass). 8 runs per configuration: CPU on all three worlds under arm64 CPython
+  3.13.18 and x86_64 3.12.11 (72 runs), memory cold and over 6 append rounds on small and large with both growth
+  policies and the relief readings (160 runs); 0 failed. Every run is raw in `rust/notes/s6-runs.json`, and the summary
+  recomputes from it identically. The two `/perf` snapshots were read with a GET only, with no restart between them.
+  - CPU gate, by the rule fixed in advance: pass, narrowly. heldWarm region over held is 5.24 (5.03 to 5.51, n=8) on
+    arm64 3.13 (16.14 ms against 3.07) and 6.80 on x86_64. The secondary row (same work) is 10.47 and 16.74. The smoke
+    pairs' 5.52 and 5.02 settle at 5.24. Under one alternative wrapper correction it is 5.15 with one run at 4.96.
+  - The instructive exception: large4 gives 3.11 (one prompt index over s001's 24,000 atoms, SipHash in the port against
+    CPython's cached string hashes); small gives 8.38. Large4 on 3.12 reproduces S2's 90 and 87 ms (90.3 and 88.7).
+  - Steady state: the window's miss rate is 7.7% (65 of 840; 7.25% since boot). Memoized Python costs 1.56 to 2.25 ms
+    per build against the memo-less port's 3.07 ms, and the port draws level only at about a 17% miss rate.
+  - Memory: the store over Python's footprint is 0.241 cold and 0.248 after appends (96.5 and 99.6 MB against 400.1 and
+    400.8). Rescaled to real transcripts' expected expansion, 0.39 to 0.42 after appends. Unclear until real-shaped transcripts are
+    measured (lczh's OK). Relief released nothing; the whole-line blocks' live bytes stayed flat over the rounds.
+  - Flagged: the driver labels the plain heldWarm, heldNoLanding and memoServed builds over the port's whole build
+    "unfair upper bound", but the port's whole-build row walks every turn, so those three are unfair to the port.
