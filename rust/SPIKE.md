@@ -6,7 +6,21 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
-- Step: S4.6 (layer 6, the body and its closures) done and merged into `romp_fix` from `romp_fix-s46`, with its
+- Step: S4.7 (layer 7, the loop, the fold and the cross-session pass) done and merged into `romp_fix` from
+  `romp_fix-s47`, with its review round's fixes (two must-fix). With it every port step S4.1 to S4.7 is merged. The whole feed frame comes out of the port: `romp-spike feed DUMP` builds it from
+  a dump, and its canonical and wire bytes equal the S2 oracle's on both worlds (17,878 and 114,338 bytes, 0
+  differences). The edge set (154 worlds, 118 load and give the feed byte for byte, 36 refused at load as built to be,
+  plus 5,797 tint points) and 24,000 random worlds (6,629,814 values, `dump_layer7.py --fuzz`) show 0 differences. 6
+  plants and 48 of the first round's 52 source mutants are each caught by the edge set (the other 4 are equivalent), and
+  so are the review round's 21. The review's must-fix: Python finds a parked handoff's mail by a path lookup (which drops
+  `.` components and trailing slashes, and on APFS ignores letter case) where the port reads `mailNew` as exact pairs, so
+  the loader now refuses a parked send whose id or recipient fails kernel._safe_id and the harness refuses a world whose
+  `mailNew` this filesystem contradicts; and a float clock past i64 is refused while the postal log holds a parked send
+  (the port's `int(now)` saturated). The replay's cleared set is a dict now (both worlds re-dumped byte-identical but for
+  `run.json`). A Python-side finding for the bug lane: a null card in an entry's asks (the awaiting placeholder of a
+  session that is not live) makes the fold raise outside build_feed's per-session guard, failing the whole build; the
+  port mirrors it. See "S4.7 as built" and its review round.
+- Before it: S4.6 (layer 6, the body and its closures) done and merged into `romp_fix` from `romp_fix-s46`, with its
   review's fixes. Every alive session's entry (the dict _feed_session_entry returns, written through romp-json) equals
   Python's real memo entry byte for byte on both worlds (the S2 dump's `oracle/entries/`), on 289 synthetic worlds and
   on 24,000 random ones; 6 plants, 59 of the 60 source mutants (the 60th is equivalent) and the review's 17 more are
@@ -18,7 +32,7 @@ with no server. Both implementations run on one synthetic state, and the feed JS
   signal for S6, not a measurement: the release build makes the large world's 38 entries in 31 to 33 ms of wall time
   (ten runs, a quiet machine), against the 87 ms Python's derivation took from an empty memo (s2-design section 4):
   about 2.7x, short of the gate's 5x.
-- Before it: S4.5 (layer 5) done and merged into `romp_fix` from `romp_fix-s45` with its review's fixes. Its review (ship,
+- Earlier: S4.5 (layer 5) done and merged into `romp_fix` from `romp_fix-s45` with its review's fixes. Its review (ship,
   no must-fix) is under "The review round" in "S4.5 as built": its 10 edge-set gaps are filled, each shown to catch its
   mutant, and the memo claim is corrected. A Python-side finding from it: `_SUMMARY_ANCHOR_MEMO`'s key leaves out the
   seams, so after a seam splits a turn a later build can serve a stale summary anchor (reproduced with the real kernel
@@ -63,33 +77,61 @@ with no server. Both implementations run on one synthetic state, and the feed JS
     at load, as built to be) and 24,000 random worlds (40,058 entries, 3,813,717 values, `dump_layer6.py --fuzz`).
     Python's line trace over the edge set runs 585 of the 592 lines; the 7 left cannot run on an admitted input.
     Python's `str.upper()` comes from a table generated from its own engine, checked on every code point.
+  - S4.7: the loop, the fold and the cross-session pass (the build_feed loop minus memo and key, the fold with
+    cm.age_rgb and ramp, the bells, the serving-fold join, the whoWorking stamp, the parked-handoff and notice cards, the
+    frame) give the whole feed byte for byte: both worlds' canonical and wire oracles, 118 Python-made worlds (one build
+    raises in both; 36 more worlds are refused at load) and 24,000 random worlds (83,744 cards, 6,629,814 values). The
+    tint table checks 5,797 of Python's cm.age_rgb and cm.ramp points. Python's line trace runs 371 of the 414 lines; the
+    43 left cannot run on an admitted world in a fresh replay.
   - S2 done before them (byte-identical oracle dumps across seeds and roots, "S2 as built"); S1 before that
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: S4.7, layer 7 (the loop, the fold and the cross-session pass), scoped in "What
-  layer 7 needs" below, which carries forward what layer 6 found about the replay's cleared set, the raising session,
-  the serving fold and the handoff row's working bit. S4.6 is merged.
-  - In progress since 2026-11-26 as workflow run `wf_6084aa72-e63` in worktree `~/romp-romp_fix-s47` (branch
-    `romp_fix-s47`). If a session dies, check that worktree's commits first, then resume the run with Workflow
-    `resumeFromRunId`.
+- Next action: S6, the measurement (S5, the serde_json::Value variant, stays in the plan and does not block it). The
+  port now builds the whole feed (`layer7::build_feed`), so both sides can time the same region, derivation plus fold.
+  What S6 needs, from the earlier steps:
+  - CPU: Python's `time.process_time()` in a single-threaded process (`time.thread_time()` under-reports about 42x on
+    this Mac, s2-design section 4), and Rust's process CPU through a raw `getrusage` or `clock_gettime` extern (no
+    crate), each checked against wall time; the two alternated several times on the same load; Python timed in replay
+    mode, with what its key computation and frame work cost reported apart, not charged to either side.
+  - The memo rows: a build from an empty memo (Python's 90 ms on the large world, 87 ms of it derivation) and a
+    memo-served build (7.7 ms, no derivation), since the port has no memo; either port the memo or fold in production
+    miss rates from `/perf builds.feed.memo`. A warm Python build after a seam can serve a stale landing (S4.5's
+    review), so warm runs stamp no seam between builds or clear `_SUMMARY_ANCHOR_MEMO` first; with the memo, a hit runs
+    no body and writes nothing to the anchor table.
+  - Memory: the store's resident size after appends, not only cold ("What the store holds" under "S3 as built": the
+    large world's allocation went from 96.0 MB to 178.7 MB after one appended line per file), against Python's record
+    cache under tracemalloc plus its RSS difference, with transcript mtimes near now so the cache keeps its entries.
+  - The informal signal to check, not a result: S4.6's release build made the large world's 38 entries in 31 to 33 ms
+    of wall time against Python's 87 ms derivation, about 2.7x, short of the gate's 5x; S4.7's whole feed takes about
+    the same. Profile before timing: most of the work is segmenting and walking the 16,877 turns (layers 2 and 3), and
+    the port allocates freely.
+  - An asymmetry to report apart (S4.7's review): Python's timed build_feed includes file work the port does not do.
+    _parked_handoffs runs fold_records' cursor over the postal log (a stat, and a read when it changed) and a maildir
+    stat per candidate, and _notice_cards lists the notice directory and checks its memo per file; the port takes the
+    decoded `postalLog`, `mailNew` and `notices` records and does no I/O. Both worlds have no postal log and no notice
+    files, so the cost is small, but measure it (time those two calls alone) and name it, rather than charge it to
+    either side.
   - Inputs: `python3 tools/rust-spike/dump_world.py --world small` (or `large`), then
     `python3 tools/rust-spike/dump_layer1.py DUMP`, `python3 tools/rust-spike/dump_layer2.py DUMP`,
     `python3 tools/rust-spike/dump_layer3.py DUMP`, `python3 tools/rust-spike/dump_layer4.py DUMP` and
-    `python3 tools/rust-spike/dump_layer5.py DUMP`. Layer 6 compares with the dump's own `oracle/entries/`;
-    `python3 tools/rust-spike/dump_layer6.py DUMP` checks its harness against them. Never commit a dump.
+    `python3 tools/rust-spike/dump_layer5.py DUMP`. Layer 6 compares with the dump's own `oracle/entries/`, layer 7 with
+    its `oracle/feed.canon.json` and `feed.wire.json`; `python3 tools/rust-spike/dump_layer6.py DUMP` and
+    `python3 tools/rust-spike/dump_layer7.py DUMP` check their harnesses against them. Never commit a dump.
   - Checks: `romp-spike roundtrip DUMP`, `romp-spike layer1 DUMP`, `romp-spike layer2 DUMP`, `romp-spike layer3 DUMP`,
-    `romp-spike layer4 DUMP`, `romp-spike layer5 DUMP`, `romp-spike layer6 DUMP`,
+    `romp-spike layer4 DUMP`, `romp-spike layer5 DUMP`, `romp-spike layer6 DUMP`, `romp-spike feed DUMP`,
     `romp-spike layer2 rust/crates/romp-views/tests/fixtures/layer2_edge.json`,
     `romp-spike layer3 rust/crates/romp-views/tests/fixtures/layer3_edge.json`,
     `romp-spike layer4 rust/crates/romp-views/tests/fixtures/layer4_edge.json`,
     `romp-spike layer5 rust/crates/romp-views/tests/fixtures/layer5_edge.json`,
     `romp-spike layer6 rust/crates/romp-views/tests/fixtures/layer6_edge.json`,
+    `romp-spike feed rust/crates/romp-views/tests/fixtures/layer7_edge.json`,
     `python3 tools/rust-spike/dump_layer2.py --fuzz 10000 --seed S`,
     `python3 tools/rust-spike/dump_layer3.py --fuzz 10000 --seed S`,
     `python3 tools/rust-spike/dump_layer4.py --fuzz 10000 --seed S`,
     `python3 tools/rust-spike/dump_layer5.py --fuzz 10000 --seed S` (seeds 1 to 6),
-    `python3 tools/rust-spike/dump_layer6.py --fuzz 4000 --seed S` (seeds 1 to 6), and
+    `python3 tools/rust-spike/dump_layer6.py --fuzz 4000 --seed S` (seeds 1 to 6),
+    `python3 tools/rust-spike/dump_layer7.py --fuzz 4000 --seed S` (seeds 1 to 6), and
     `python3 tools/rust-spike/check_store.py --dump DIR --fuzz 6` (`--dump` repeatable). Build with
     `~/.cargo/bin/cargo build --offline --release -p romp-spike`; the binary is in `rust/target/release/`.
   - Re-run check_store after any change to romp-transcript or to Python's reader. S6 should read "What the store
@@ -123,7 +165,7 @@ kernel, where the memory gain does not depend on interpreter speed.
 | `rust/crates/romp-transcript` | the transcript store: raw bytes plus a per-line index, the Python cache's identity contract (inode, size, mtime, CRC), positioned reads |
 | `rust/crates/romp-views` | the feed's per-card build only (the spike's slice of the views crate) |
 | `rust/crates/romp-spike` | the standalone binary: load a snapshot and transcripts, build the feed, print canonical JSON and timings |
-| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py` to `dump_layer6.py`), the measurement |
+| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py` to `dump_layer7.py`), the measurement |
 
 ## Steps
 
@@ -1613,6 +1655,8 @@ awaiting dots, the service chip, the serving-fold join, absent sessions); "What 
 
 ## What layer 7 needs (the loop, the fold and the cross-session pass)
 
+(Kept as the scope S4.7 was built to; "S4.7 as built" below answers each item.)
+
 Section 2 item 7: the build_feed loop minus memo and key (57255-57320 at this HEAD), _feed_fold_session, _feed_fold_stamp
 and _feed_fold_card, cm.age_rgb and ramp (colormap.py), _notify_card_effective, _push_explicit_bell, the handoff
 whoWorking stamp, the serving-fold join, and the frame assembled from the passthrough keys. Found while building layer 6:
@@ -1635,6 +1679,370 @@ whoWorking stamp, the serving-fold join, and the frame assembled from the passth
   neither, so layer 6 met no bell. `heal`, `hidden` and `cold` only feed build_feed's log line and the background warm.
 - The anchor table carries across a build's sessions in alive order and across builds; with the memo (S6's warm
   builds), a hit runs no body and writes nothing to the table that build.
+
+## S4.7 as built (2026-11-26)
+
+**The problem.** Layer 6 makes one session's entry, but the feed a dashboard receives is more than the entries side by
+side. build_feed folds each entry into the board in alive order, and the fold writes what no entry holds: every card's
+and every tree row's age tint (`trgb`, from the card's `_ageT` and the build's clock through colormap.py), the clock
+itself on a placeholder whose time is the clock, and the two bell fields (`notify`, `notifyRaw`) from the bells store and
+the session's own flag. Then come the passes across sessions. A worker's mirror card folds its rows under the handoff row
+of the card that dispatched it, when that row rendered this build. A handoff row's working dot takes its recipient's
+bit. The parked handoffs (a send to a dead session whose mail still waits) and the notice cards join the board, a bell
+pass stamps every card the fold did not, and the frame wraps it all in the keys build_feed passes through. A port can
+get every entry right and still ship a different feed: a tint rounded half up, a bell override of `false` read as no
+override, a mirror folded under the wrong row, a re-sent message moved to the end of its list, a notice cap that counts
+the wrong cards, a conditional frame key in the wrong place. The worlds reach the fold, the tint and one whoWorking
+stamp, and nothing else here: no mirror, parked handoff, notice, bell override, cleared id, raising session or float
+clock.
+
+`layer7.rs` ports, line for line, the build_feed loop minus the memo and its key, _feed_fold_session's fresh path with
+_feed_fold_tints, _feed_fold_stamp, _feed_fold_card and _feed_fold_bell, cm.age_rgb, cm.ramp and cm.stops_for,
+_notify_card_effective and _push_explicit_bell, the serving-fold join, the handoff whoWorking stamp, _parked_handoffs
+with _parked_fold_step, the parked-handoff card, _notice_cards with _notice_rows' row filter, _notice_projection,
+_held_mail_row, _notice_item_id and _notice_action_kind, the bell pass, and the frame. `build_feed` takes the snapshot and
+trees, runs layer 6's `Build::entries`, and answers the frame in Python's key order (`Feed::wire`, `Feed::canon` for the
+sorted gate), or the raise that fails the whole build. `romp-spike feed DUMP` compares it with the dump's
+oracle/feed.canon.json and feed.wire.json, byte for byte (exit 1 on any difference). What the notes flagged, as built:
+- The cleared set: dump_world's replay now answers a dict, as the real reader does (see "The replay fix" below).
+- A raising session is absent: build_feed has no previous entry to serve in a fresh process, so the sid goes in
+  `absentSids` (right after `now` in the frame, with `servingFoldedIds` before it when the join folded a candidate) and
+  nothing of it folds. A hidden session's null entry folds nothing and is not absent.
+- The serving fold: a candidate whose tracker row (a handoff row of that id, the last one on the board winning)
+  rendered this build adds its first row's id to that row's children and every one of its rows to that card's tree; its
+  item id goes in `servingFoldedIds`. Otherwise it lands as its own card after every session card, and the bell pass
+  stamps it (the fold stamps no bell on a candidate).
+- The handoff row's working bit: build_feed stamps `whoWorking` on handoff rows only, from the sids whose fold added a
+  `working` name, so a recipient that raised, is hidden, or works under the name "" (a falsy name adds none) stays dark.
+- The bells: a card override is read with `is None`, so a stored `false` or `0` is an explicit mute that never falls to
+  the session flag or the master; `notify` is `true` or null, never false; `notifyRaw` never reads the master.
+- The tint: the age is `now - _ageT` in Python arithmetic (int minus int exactly, then `float()`: with a clock past 2**53,
+  an age of 1000 s reads 1024 s through floats, and the tint moves), the log position, `ramp(1 - f)`, each channel
+  rounded half to even (59.5 reads 60, 50.5 reads 50). The colormap name goes through `lower()`, and an unknown or null
+  name is colormap.DEFAULT, "aurora": the module docstring still says the default is "hawaii". age_rgb clamps the age to
+  [120, 345600] s and ramp clamps `v` to [0, 1]; the two overlap, so taking out the age clamp moves no feed (M03 and M04
+  are equivalent), and ramp's clamp (M02) shows only on a direct ramp call outside [0, 1], which the tint table makes.
+- What the S2 notes did not know: the fold runs outside build_feed's per-session guard, and a null card in an entry's
+  `asks` reaches it. _awaiting_card answers None for a session that is not live, and the body appends that None. The
+  fold's `card.get("_ageT")` then raises AttributeError, and the whole build fails, every session's cards with it. The
+  port answers that raise (see "Findings beyond the port").
+
+**The inputs.** The snapshot gains three optional board keys, which the S2 dumper never writes (neither world has any)
+and dump_layer7.py's worlds carry: `postalLog` (the postal log's records, decoded, in file order), `mailNew` (each
+maildir file that stands, `[recipient, message id]`) and `notices` (each notice file's lines, decoded). They are file
+reads, the same boundary as the recorded helpers: the port folds the postal log with _parked_fold_step's rules and
+filters and projects the notice rows, while the reading, caching and checkpointing of the files stay Python's. The
+held-mail backfill, which runs before _notice_cards reads the files, is a writer (it posts and retires held-mail rows
+from the hold directory); its effect is in the rows, and the harness stubs it. `layer7::validate` refuses, each with its
+path, the shapes found that Python would raise on or read in a way the port does not mirror; none is in either world: an
+alive name that is not a string (bgServices is keyed by it), a world without a colormap key, a bells store that is not a
+dict, a serving `goalId` that is a list or a dict (the join hashes it), postal rows whose id, recipient or sender is not
+a string on a parked send (or not hashable on a recall), whose truthy time is a string (`int(str)` is not ported) or
+truncates past i64, or whose truthy body is neither a string nor a list; a parked send whose id or recipient fails
+kernel._safe_id's rule (Python finds the mail with `Path(base/"mail"/to/"new"/mid).exists()`, a path lookup, where the
+port looks the exact pair up in `mailNew`; added in the review round); a float clock whose `int()` is past i64 while the
+postal log holds a parked send (a parked send with no time reads `int(now)`, which Python keeps exact; added in the
+review round); notice rows (op post, expire or acted) whose key is not a string, whose truthy rev, time or expiry is not
+a number or a bool within i64, whose truthy actions are not a list of dicts, or whose action has a truthy kind or route
+that is not a string or a truthy body that is not a dict, a notice file sid that is empty or holds `/`, and frame keys
+without `now` or naming a key the frame lacks. What no loader can see is whether two different safe names reach one file
+on the filesystem Python runs on (APFS ignores letter case, so a send `M1` finds a file `m1`): `mailNew` is a record of
+the files that stand, and the harness answers no world whose `mailNew` its own filesystem contradicts (see "The
+oracle").
+
+**The replay fix.** S4.6 found that the replay's `_cleared_ids_display` answered a set where build_feed's frame code
+reads a dict (`_cleared_foreign(cleared)` calls `cleared.get(i)`), so any world with a cleared id raised after the
+session loop. It now answers `dict.fromkeys(board["cleared"])`: the snapshot keeps the ids, sorted, and the clear times,
+which only order the frame's clearedForeign (a key the replay passes through from the dump), read as 0. Both worlds were
+dumped before and after the fix at the same HEAD: every file but run.json is byte-identical (23 of 23 and 159 of 159).
+The layer 6 edge fixture, regenerated, differs only in losing the one case note that recorded the old raise.
+
+**The oracle.** For the worlds it is the dump's own oracle/feed.canon.json and feed.wire.json. For synthetic worlds,
+`tools/rust-spike/dump_layer7.py` answers each case with one replay build_feed over it, the real fold and every pass
+after the loop included: dump_world's Replay harness and dump_layer6's stubs, the postal log served to the real fold
+through em.serve_records, the maildir and notice files written into the replay's empty state root for the real readers
+(the notice memo cleared first), the clock the case's `world.now`. The harness answers no world whose files would not
+read back as the case says: notice files that collide on this filesystem, and (since the review round) a parked
+candidate whose maildir `exists()` here disagrees with its `mailNew` membership, found by folding the postal log with
+the real _parked_fold_step before the build (`Unfaithful`; a REFUSE case is answered as Python reads it). A case's frame
+keys are the build's own (its keys minus the two conditional ones, which the port decides), and the harness checks that
+this assembly gives Python's wire bytes back. The expected answer is the feed, decoded from Python's wire string, with
+the SHA-1 of Python's canonical and wire strings, or build_feed's raise. Its own check: `dump_layer7.py DUMP` runs this
+harness over a dump's inputs with the dump's frame spliced in, and its canonical and wire bytes equal the oracle's on
+both worlds.
+
+**Result on the worlds: zero differences.** Small: 4 sessions, 7 cards, 10 tree rows, the canonical and wire feeds
+identical (17,878 bytes each), 826 values. Large: 38 sessions, 41 cards, 78 tree rows, 114,338 bytes each, 5,348 values.
+Of the six plants, only `who-owner` moves the worlds (one value each: s001's handoff row to s003, which works).
+Python runs 185 of the 414 ported lines on either world.
+
+**The edge set.** `dump_layer7.py --edge-cases` writes `rust/crates/romp-views/tests/fixtures/layer7_edge.json`
+(synthetic, 1.8 MB; it regenerates byte for byte under another hash seed). Its 154 worlds, built with dump_layer6's
+builders: the tint over every colormap name, null, empty, upper and title case, an unknown name and one with a trailing
+space; ages at the clamp's edges (0, 119, 120, 121, 345,600 and 345,601 s, a future time, a fractional age, a negative
+time), two ages whose channel lands on an exact half, an age where ramp's float order shows, an int clock minus a float
+time, a float clock (fractional and integral), a small int clock, a clock past 2**53, a float clock past i64 with no
+parked send; the placeholders dated by the clock and by their own time; the bells (nothing set, the master on, off and
+truthy, the turn switch alone, card overrides true, false, 0, "", null, 1 and "yes", a card whose itemId is "", session
+flags of every shape with the master on and off, a peer row's flags against the session's own); the session fold
+(raising sessions absent in alive order, a hidden session, working and awaiting names, a cold session with heal counts,
+bgServices under a repeated name, the null card that fails the build); the serving join (a candidate folded before and
+after its tracker's session, no rendered tracker, a tracker id two cards render, an ask row of that id, two candidates
+into one card, a completed and a needs-you candidate, a numeric tracker, joined handoff rows taking the stamp, a tracker
+row that already has children, a candidate aimed at a joined row or at a kept candidate's handoff row); the whoWorking
+stamp (a working, idle, absent, hidden or not-alive recipient, a working owner, a working session named "", a handoff to
+oneself); parked handoffs (a dead recipient with its mail standing, an alive recipient, consumed mail, mail under
+another box, recall, bounce and re-send, every non-parked shape, every time shape, ties, names from the registry, an
+empty name, a non-ASCII sender and an unknown recipient, a 128-character id, ids a path lookup misreads on rows the fold
+does not park, a recipient alive but absent, a cleared id, a re-sent id, non-dict rows, a float clock, bells); notices
+(the owner-less home, a session's file, an unknown sid, revisions, expires, acted rows, expiries around the clock and a
+float clock, a cleared id, the sort within and across files, the cap with and without held mail, held-mail recognition,
+boards and categories, actions of every kind and route shape, absent fields, lines that are not rows, other ops, float
+and bool revs and times, bells, non-ASCII text); a cleared set over every producer; the frame's two conditional keys
+together; every producer at once. And 36 worlds the loader must refuse, 12 of them added in the review round
+(kernel._safe_id's rule on a parked send, a clock past i64). It also carries Python's cm.age_rgb over 4,037 (colormap,
+age) points and cm.ramp over 1,760 (v, colormap) points.
+
+Result: 118 worlds load and give the whole feed byte for byte in both key orders (181 sessions, 408 cards, 227 tree
+rows, 32,013 values; 6 absent sessions, 11 folded candidates, 31 parked and 202 notice cards), 0 differences; one build
+raises in both (the null card). The other 36 are refused at load, exactly the cases named REFUSE. The 5,797 tint and ramp
+points equal Python's. Python's line trace ran 371 of the 414 lines of the 19 ported functions. The 43 it did not run
+cannot run on an admitted world in a fresh replay: build_feed's memo and key arms (a held entry, a hit, a raise served
+from the memo, the live map read when the caller passes none, the subagent reads the replay's derivation never makes; 10
+lines), the fold's kept-record path (20), the maildir stat that raises (2), and _notice_rows' absent, memoized,
+unreadable, blank and undecodable lines (11; a decoded snapshot holds none). The first round said all 43 cannot run in a
+fresh replay; that was wrong for the maildir stat. When the recipient's new/ directory exists, an id longer than the
+filesystem's name limit makes `Path.exists()` raise OSError 63 (file name too long), which it does not swallow, so
+`except OSError: continue` runs (the reviewer checked it on this Mac; the card list is the same either way). Since the
+review round the loader refuses an id over kernel._safe_id's 128 characters, so no admitted world reaches it.
+
+**The randomized check.** `python3 tools/rust-spike/dump_layer7.py --fuzz N --seed S` draws worlds from dump_layer6's
+generator, then what layer 7 reads: the clock (NOW most of the time, an integral and a fractional float, clocks near the
+trees' own times so the tints spread), the colormap, handoff peers aimed at the world's alive sessions, serving trackers
+aimed at its node keys and at planted handoff rows (now and then the same tracker id in two stores), service chips and
+repeated or empty session names, bells of every shape on the world's item ids and session flags, a postal log of parked
+sends, recalls, bounces, re-sends around a tie and noise with a maildir that stands for some, notice files with
+revisions, expires, acted rows, expiries around the clock, boards, categories, actions and held-mail rows (now and then
+past the cap), and cleared parked and notice ids. A parked send's recipient is a safe id (the loader refuses others since
+the review round); the non-ASCII sid is drawn as a sender and on rows the fold does not park, where its first 8 code
+points still show. Any difference or refusal fails the run (a world the harness cannot answer faithfully raises out of
+it), and the same seed makes the same file byte for byte under another hash seed (seed 1 checked again under
+PYTHONHASHSEED=7 after the review round).
+- Result after the review round's generator change, seeds 1 to 6 at 4,000 worlds each (about 20 s apiece): 24,000
+  worlds, 39,019 sessions, 83,744 cards (8,785 parked, 42,609 notices) and 43,207 tree rows, 6,629,814 values, **0
+  differences**, 0 refused. 4,202 sessions are absent (their derivation raised), 771 candidates folded, and 563 builds
+  raise in both (the null card). Python's line trace on seeds 1 to 3: the same 371 of 414 lines as the edge set. (The
+  first round's generator gave 24,000 worlds, 85,434 cards and 6,692,301 values, also 0 differences.)
+
+**Planted mistakes, each caught but four equivalent mutants.** The six plants are romp-spike's `--plant` options
+(`dump_layer7.py --fuzz ... --plant NAME` passes only when the plant is caught; `tests/layer7_edge.rs` checks each is
+caught on exactly the cases built for it). The 52 source mutants were edits to `layer7.rs`, each built, run on all four
+inputs and reverted by a scratch script (not committed). The table is the first round's second sweep, on that round's
+final bytes: the 131-world edge set and that round's generator's fuzz seed 1. Each cell is differences, then the worlds
+or cases they fell in; "tint points" are the fixture's cm.age_rgb and cm.ramp table, part of the edge set. The review
+round re-ran eight of its rows (M24 to M31, the parked block, whose names world and generator pools changed) on the final
+bytes and added 21 mutants of its own; see its table under "The review round" below. The other rows were not re-run:
+their edge cells are on the 131-world set, and their fuzz cells on the first round's generator.
+
+| Mistake | Small | Large | Edge set (131) | Fuzz, seed 1 (4,000) |
+|---|---|---|---|---|
+| `--plant bell-falsy-skip` (a falsy card override falls through to the flag) | 0 | 0 | 12 in 5 | 519 in 350 |
+| `--plant serving-first-row` (the join keys the first handoff row of an id) | 0 | 0 | 2 in 1 | 12 in 6 |
+| `--plant who-owner` (a handoff row's dot is its owner's) | 1 | 1 | 3 in 3 | 409 in 338 |
+| `--plant parked-unsorted` (parked handoffs in the fold's order) | 0 | 0 | 66 in 3 | 1,925 in 83 |
+| `--plant notice-cap-held` (the cap counts held mail) | 0 | 0 | 3 in 3 | 1 in 1 |
+| `--plant absent-last` (absentSids at the end of the frame; wire only) | 0 | 0 | 4 in 4 | 648 in 648 |
+| ramp rounds half away from zero, Rust's `round` (M01) | 0 | 0 | 6 in 2, and 105 tint points | 0 |
+| ramp does not clamp v to [0, 1] (M02) | 0 | 0 | the run dies (a panic) | 0 |
+| age_rgb has no lower clamp at FADE_LO (equivalent) (M03) | 0 | 0 | 0 | 0 |
+| age_rgb has no upper clamp at FADE_HI (equivalent) (M04) | 0 | 0 | 0 | 0 |
+| the colormap name is not lowercased (M05) | 0 | 0 | 12 in 2, and 527 tint points | 9,855 in 528 |
+| an unknown colormap falls back to hawaii, the module docstring's word (M06) | 0 | 0 | 1,719 in 97, and 1,581 tint points | 19,642 in 1,126 |
+| an int clock minus an int time computed in floats (M07) | 0 | 0 | 3 in 1 | 0 |
+| the card keeps _ageT (M08) | 7 | 41 | 161 in 106 | 5,432 in 2,877 |
+| the rows keep _ageT (M09) | 10 | 78 | 207 in 104 | 7,390 in 2,206 |
+| a placeholder's t is not restamped with the clock (equivalent in a fresh build) (M10) | 0 | 0 | 0 | 0 |
+| a placeholder's t is restamped as `int(now)`, the clock's tag lost (M11) | 0 | 0 | 2 in 2 | 21 in 21 |
+| rows tinted from the card's _ageT (M12) | 0 | 4 | 29 in 10 | 3,525 in 694 |
+| the bell pair written before trgb, a key-order difference (M13) | 7 | 41 | 157 in 106 | 4,338 in 2,556 |
+| notifyRaw falls back to the master (M14) | 0 | 0 | 24 in 15 | 3,605 in 1,061 |
+| notify writes false, not null (M15) | 7 | 41 | 363 in 100 | 10,203 in 2,825 |
+| the session flag read as _session_flag, absent reading false (M16) | 7 | 41 | 395 in 105 | 13,429 in 3,095 |
+| a kept candidate's own card gets no bells, the pass starting at the parked cards (M17) | 0 | 0 | 4 in 4 | 1,094 in 927 |
+| the candidate's first row id is not appended to the tracker row's children (M18) | 0 | 0 | 9 in 8 | 112 in 112 |
+| the candidate's rows do not join the tracker card's tree (M19) | 0 | 0 | 8 in 8 | 112 in 112 |
+| a candidate with no rendered tracker row lands first, not last (M20) | 0 | 0 | 49 in 4 | the run dies (a panic) |
+| servingFoldedIds lists the tracker, not the candidate's item id (M21) | 0 | 0 | 10 in 8 | 116 in 110 |
+| every row kind takes the whoWorking stamp, not only handoff rows (M22) | 0 | 0 | 1 in 1 | 92 in 40 |
+| every session with an entry counts as working for the stamp (M23) | 1 | 1 | 3 in 3 | 426 in 353 |
+| a parked handoff to an alive recipient still shows (M24) | 0 | 0 | 1 in 1 | 271 in 271 |
+| a parked handoff shows without its maildir file (M25) | 0 | 0 | 2 in 2 | 432 in 432 |
+| a parked handoff's missing time reads 0, not int(now) (M26) | 0 | 0 | 42 in 2 | 3,067 in 387 |
+| an unnamed sid falls back to the whole sid, not its first 8 code points (M27) | 0 | 0 | 25 in 5 | 8,783 in 1,679 |
+| an unnamed sid falls back to its first 8 bytes (M28) | 0 | 0 | 5 in 1 | 1,712 in 317 |
+| a re-sent message id moves to the end of the fold (M29) | 0 | 0 | 18 in 1 | 1,742 in 296 |
+| a recall or bounce does not remove its id (M30) | 0 | 0 | 1 in 1 | 68 in 40 |
+| a cleared parked id still shows (M31) | 0 | 0 | 2 in 2 | 175 in 175 |
+| `int()` of a float rounds instead of truncating (M32) | 0 | 0 | 13 in 3 | 3,687 in 1,106 |
+| an expiry applies only past the clock (>), not at it (M33) | 0 | 0 | 1 in 1 | 328 in 328 |
+| an equal rev posted later does not replace (>) (M34) | 0 | 0 | 4 in 2 | 12,027 in 773 |
+| an acted card keeps its actions (M35) | 0 | 0 | 1 in 1 | 47 in 47 |
+| an acted card's acted flag is the row's own (M36) | 0 | 0 | 1 in 1 | 165 in 160 |
+| a file's notices sorted by key alone (M37) | 0 | 0 | 26 in 1 | 2,577 in 51 |
+| notice cards across files sorted by itemId alone (M38) | 0 | 0 | 508 in 6 | 39,063 in 896 |
+| the owner-less home's name from the registry (M39) | 0 | 0 | 88 in 19 | 2,707 in 772 |
+| a card on another board takes its category as its column (M40) | 0 | 0 | 1 in 1 | 47 in 47 |
+| a route is not read as a kind (M41) | 0 | 0 | 3 in 1 | 128 in 123 |
+| an action's kind is not stripped (M42) | 0 | 0 | 2 in 1 | 423 in 366 |
+| an action's kind is stripped with Rust's `trim`, U+001C kept (M43) | 0 | 0 | 1 in 1 | 196 in 183 |
+| a notice line without an op counts as a row (equivalent) (M44) | 0 | 0 | 0 | 0 |
+| an expire row retires every rev of its key (M45) | 0 | 0 | 1 in 1 | 1,418 in 474 |
+| an action's kind appended at the end even when the action has one (M46) | 0 | 0 | 6 in 2 | 1,044 in 727 |
+| servingFoldedIds written even when no candidate folded (M47) | 1 | 1 | 98 in 98 | 3,784 in 3,784 |
+| a repeated bgServices name moves to the end (M48) | 0 | 0 | 1 in 1 | 0 |
+| a hidden session is listed absent (M49) | 0 | 0 | 2 in 2 | 636 in 636 |
+| a null card is skipped, not a raise of the whole build (M50) | 0 | 0 | 1 in 1 | 104 in 104 |
+| every card's t restamped with the clock, not only a null _ageT's (M51) | 7 | 41 | 157 in 105 | 5,296 in 2,817 |
+| a notice line with a falsy key counts as a row (M52) | 0 | 0 | the run dies (a panic) | the run dies (a panic) |
+
+The worlds catch 10 of the 58 rows, nine mutants and the who-owner plant: every card's and row's `_ageT` and tint (M08, M09, M12 on the
+large world), the bell pair's place and values (M13, M15, M16), the restamp of every card (M51), servingFoldedIds written
+empty (M47), and the one whoWorking stamp both worlds make (s001's handoff row to s003, which works: M23 and who-owner).
+The edge set catches every row but the four equivalent ones, two of them (M02, M52) by killing the run with a panic.
+Fuzz seed 1 catches every row but those four and four more: M01 (no fuzz age puts a channel on an exact half; the edge
+set's two exact-half worlds and the tint table catch it), M02 (no feed reads ramp outside [0, 1]), M07 (the fuzz draws no
+clock past 2**53) and M48 (it needs three sessions with service chips, the first and the last under one name). M13 and
+`absent-last` change only key order: the canonical bytes, the gate, are identical, and only the wire comparison
+catches them, which is why both are compared.
+
+The equivalent four, each tried as a mutant and moving nothing on any check: age_rgb's clamp to [120, 345600] s and ramp's
+clamp of `v` overlap, so taking out the age clamp's low side (M03) or high side (M04) gives every age the same tint (ramp's
+own clamp, M02, shows only on a direct call outside [0, 1]); a placeholder whose `_ageT` is null already carries the clock
+as its `t` in a fresh build, so the fold's restamp changes nothing (M10; it matters for an entry the memo serves from an
+earlier build, and its tag and its "only" are pinned by M11 and M51); and _notice_rows' truthy-op filter is redundant with
+the projection, which reads only post, expire and acted rows (M44; the truthy-key half is pinned by M52).
+
+The first sweep (the 129-world edge set and the generator before its last changes) found three gaps, each closed and
+shown closed in the second sweep. The edge set caught M01 only through the tint table, not in any feed: two worlds whose
+clock is an age that puts a channel on an exact half (a card at time 0) now catch it in the feed. It missed M22 entirely:
+its "working session named \"\"" case was not one, because dump_layer6's `S()` reads a falsy name as its default; the case
+now sets the alive row's name directly and catches M22. Fuzz seed 1 missed M22, M29, M48 and the serving-first-row plant;
+the generator now draws re-sends around a tie, the same tracker id in two stores, service chips with repeated and empty
+session names, and catches all but M48.
+
+**Findings beyond the port.**
+- The null card (above): reproduced through the replay with a recorded _session_awaiting answer for a session with no
+  live row ("fold: a null card in an entry ..." in the edge set; 637 fuzz builds raise this way). In production it
+  needs _session_awaiting to answer, with `stamp` off, for a session that is not live: the states overlay's awaiting:true
+  row (the comments say no producer writes one now) or a live-row source answering without a live row. Not reproduced
+  live; a candidate for the bug lane. The memo does not protect the board: the raise is in the fold, after the guard.
+- colormap.py's docstring names "hawaii" as the default; the code's DEFAULT is "aurora" (M06).
+- age_rgb's clamp and ramp's clamp overlap (M03, M04).
+- An informal signal, not a measurement: the release build makes the large world's whole feed in 25.7 to 27.0 ms of
+  wall time (the command's own clock, ten runs) and its 38 entries alone in 25.3 to 26.3 ms (five runs), on a busy
+  machine (load average about 21), so the fold, the passes and the frame add about a millisecond. S4.6 read 31 to 33 ms
+  for the entries on a quiet machine; the spread between those readings is itself a reason S6 times process CPU.
+
+**The review round.** Two must-fix, both applied:
+- The parked mail's maildir test. Python asks `Path(base/"mail"/to_id/"new"/mid).exists()`, a path lookup: pathlib
+  drops `.` components and trailing slashes, and APFS (the macOS filesystem) ignores letter case. The port looks the
+  exact (recipient, id) pair up in `mailNew`, and `validate` checked only that the id, to_id and from_id were strings, so
+  the module's contract (refuse what Python reads in a way the port does not mirror) did not hold. The reviewer's four
+  probe worlds, rebuilt here and answered by the real kernel through this harness, each show a `parked:` card in Python
+  and none in the port (4 differences in 4 cases): a parked send with id `.` while another file stands in the
+  recipient's new/ (the path is new/ itself), id `m1/` with a file `m1` standing, id `M1` with a file `m1`, and a
+  recipient `<sid>/` with `<sid>/new/m1` standing. The loader now refuses a parked send whose id or to_id fails
+  kernel._safe_id's rule: empty, over 128 characters, or not `[A-Za-z0-9][A-Za-z0-9._-]*` (Python's pattern is a
+  literal ASCII range, so `/`, `\`, NUL, a leading dot and every non-ASCII letter are out; APFS also folds Unicode
+  normalization). The sender is never part of a path and is not checked. `layer7::safe_id` agrees with the real
+  kernel._safe_id on the 22 strings of its unit test. Ten REFUSE worlds: `.`, `m1/`, a recipient ending in `/`, `.m1`,
+  a backslash, NUL, 129 characters, a space, a leading hyphen, a non-ASCII recipient. The rule is the kernel's, whole:
+  only `.`, a trailing slash and (through APFS's Unicode folding) a non-ASCII name are read as another path; the
+  others are refused for the rule's sake, not because Python reads them differently. A case-only collision
+  passes the rule (`M1` and `m1` are both safe) and depends on the filesystem, so the harness now does for the maildir
+  what it did for notice files that collide: before each build it folds the postal log with the real
+  _parked_fold_step and refuses to answer (`Unfaithful`) a world where a candidate's `exists()` on this filesystem
+  disagrees with its `mailNew` membership. On this Mac it refuses a send `M1` with a file `m1`, and `m1` with `M1`; with
+  the check disabled, both are answered and the port differs on both (2 differences in 2). So of the reviewer's four,
+  three are refused at load and the fourth by the harness. The edge set's one non-ASCII recipient (the names world) is
+  refused now: that recipient became an unknown ASCII sid, and the non-ASCII sid stays as a sender, where the
+  first-8-code-points fallback still shows (M28 is caught there). The fuzz draws recipients from safe ids only and the
+  non-ASCII sid among senders and on rows the fold does not park.
+- A float clock past i64. `int_now` cast `f.trunc() as i64`, which saturates at the i64 limit, where Python's
+  `int(now)` is exact. The reviewer's two worlds (now 1e19 and -1e19, each with a parked send that has no time), rebuilt
+  here, gave 5 differences in 2 cases: at 1e19 Python ships t 10000000000000000000 with the brightest tint (age 0), the
+  port 9223372036854775807 with the darkest; at -1e19 only t differs. The loader now refuses a float clock whose
+  `int()` is past i64 while the postal log holds a parked send (`int(now)` has no other reader), with two REFUSE
+  worlds, and `int_now` asserts it; a float clock past i64 with no parked send stays admitted (an edge world: 1e19, every
+  tint the darkest stop). The validate paragraphs in `layer7.rs` and under "The inputs" above say so. Carrying `int(now)`
+  as a big integer was the other option; a refusal keeps the parked times i64 everywhere they sort and subtract.
+
+Should-fix, all applied:
+- The edge-set gaps from the reviewer's mutants: 8 worlds, each rebuilt from the review's description with
+  dump_layer6's builders and each mutant as an edit to the final `layer7.rs` in a scratch copy. Each gives 0 on the old
+  set and fails the new one on its own world (the table below). R35 (ramp mixed as `a * (1 - fr) + b * fr`, equal on
+  paper) was caught only by the tint table; the world for it is a card at time 0 under the clock 146335.799933855, found
+  by a scratch search over every colormap for an age whose channel the two orders round apart (474 such ages). R07
+  (`log10` for `ln`) was already caught in a feed and needed nothing.
+- The claim that the 43 lines Python never ran "cannot run in a fresh replay" was wrong for the two maildir-stat lines
+  (see the edge set's result above). With the 128-character cap it now holds for admitted worlds, and the docs and
+  `tests/layer7_edge.rs` say so, with the reason.
+- S6's next action names the I/O asymmetry: Python's timed build includes the postal log's fold_records cursor, the
+  maildir stats and the notice directory's listing and memo checks; the port takes decoded records and does no I/O.
+- The float-order nit: the R35 world above is that feed world.
+
+The review round's mutants, on the final bytes: the old edge set (130 of its 131 worlds; the 131st, the names world with
+its non-ASCII recipient, is refused now), the new 154-world set, and fuzz seed 1 of the final generator. Neither world
+catches any of them. The validate mutants that loosen a rule cannot show in the fuzz, which draws only admitted worlds;
+the edge set's REFUSE worlds catch them.
+
+| Mutant | Edge set, old 130 | Edge set, 154 | Fuzz, seed 1 (4,000) | The world that catches it |
+|---|---|---|---|---|
+| notifyRaw reads a card override when the itemId is "" (R01) | 0 | 2 in 2 | 0 | the two itemId "" worlds: muted with the master on (Python: notifyRaw null), armed with the session's flag false (Python: false) |
+| notify reads a truthy override that is not a bool (1, "yes") as false (R25a) | 0 | 2 in 1 | 125 in 115 | card overrides 1 and "yes", the master off (Python: notify true) |
+| notifyRaw reads it as false (R25b) | 0 | 2 in 1 | 125 in 115 | the same world (Python: notifyRaw true) |
+| a kept candidate's handoff rows become trackers (R10) | 0 | 1 in 1 | 27 in 25 | a later candidate aimed at a kept candidate's handoff row (Python: its own card) |
+| joined handoff rows become trackers (R11) | 0 | 2 in 1 | 2 in 1 | a second candidate aimed at a joined row of the first (Python: its own card) |
+| parked and notice cards read the alive set minus the absent sessions (R36) | 0 | 1 in 1 | 218 in 114 | a recipient and a notice file's owner alive but absent (Python: no parked card, the notice live) |
+| an int clock minus a float time truncates the time (R06) | 0 | 3 in 1 | 5 in 2 | a card and its row at NOW - 121.5 (Python [144, 136, 240], truncated [143, 136, 240]) |
+| ramp mixes `a * (1 - fr) + b * fr` (R35) | 0, and 3 tint points | 2 in 1, and 3 tint points | 0 | the clock 146335.799933855, the card at 0 (Python [12, 180, 100], the mutant [11, 180, 100]) |
+| age_rgb's log position through `log10`, not `ln` (R07) | 4 in 1, and 15 tint points | 4 in 1, and 15 tint points | 0 | an exact-half world (caught before the round) |
+| no safe-id check on a parked send (V01) | 0 | 10 in 10 | 0 | the ten safe-id REFUSE worlds load |
+| the check on the id only (V02) | 0 | 2 in 2 | 0 | a recipient ending in `/`, a non-ASCII recipient |
+| the check on the recipient only (V03) | 0 | 8 in 8 | 0 | the eight id REFUSE worlds |
+| the sender checked too (V04) | 0 | 2 in 2 | 334 in 334 | the names world and the misread-ids world, each with a non-ASCII sender, are refused |
+| every sent row checked, parked or not (V05) | 0 | 1 in 1 | 0 | ids a path lookup misreads on rows the fold does not park (refused) |
+| no 128-character cap (V06) | 0 | 1 in 1 | 0 | a 129-character id loads |
+| the cap off by one, `>= 128` (V07) | 0 | 1 in 1 | 0 | a 128-character id is refused |
+| the first character may be `.`, `_` or `-` (V08) | 0 | 1 in 1 | 0 | a leading hyphen loads (a leading dot has its own check) |
+| Unicode alphanumerics, not ASCII (V09) | 0 | 1 in 1 | 0 | a non-ASCII recipient loads |
+| no clock check (V10) | 0 | 2 in 2 | 0 | the two clocks past i64 load |
+| the clock check without its parked-send condition (V11) | 0 | 1 in 1 | 0 | the clock 1e19 with no parked send is refused |
+| the clock check on the upper bound only (V12) | 0 | 1 in 1 | 0 | the clock -1e19 loads |
+| the harness's maildir check answers nothing (`parked_unfaithful` returns []) | - | - | - | not an edge world (the loader admits both): a send `M1` with a file `m1`, and `m1` with `M1`, are answered and the port differs, 2 in 2; with the check both are refused |
+| re-run: a parked handoff to an alive recipient still shows (M24) | 1 in 1 | 2 in 2 | 318 in 318 | first round: 1 in 1; the absent-recipient world now too |
+| re-run: a parked handoff shows without its maildir file (M25) | 2 in 2 | 2 in 2 | 432 in 432 | first round: 2 in 2 |
+| re-run: a missing time reads 0, not `int(now)` (M26) | 42 in 2 | 42 in 2 | 2,439 in 345 | first round: 42 in 2 |
+| re-run: an unnamed sid falls back to the whole sid (M27) | 17 in 4 | 26 in 6 | 8,174 in 1,616 | first round: 25 in 5, the names world's 8 in 1 among them |
+| re-run: an unnamed sid falls back to its first 8 bytes (M28) | 0 | 2 in 2 | 126 in 122 | first round: 5 in 1, all in the names world; now the non-ASCII senders of the names and misread-ids worlds |
+| re-run: a re-sent message id moves to the end of the fold (M29) | 18 in 1 | 18 in 1 | 1,654 in 281 | first round: 18 in 1 |
+| re-run: a recall or bounce does not remove its id (M30) | 1 in 1 | 1 in 1 | 49 in 39 | first round: 1 in 1 |
+| re-run: a cleared parked id still shows (M31) | 2 in 2 | 2 in 2 | 175 in 175 | first round: 2 in 2 |
+
+Not done: the first round's other 44 mutant rows were not re-run on the final bytes. The edge set only gained worlds
+(and the names world's recipient), and the generator changed only its postal pools, so the re-run covered the parked
+block those touch (M24 to M31, each matching its first-round edge cell on the old worlds, M27 and M28 less the names
+world) and the review's own mutants; the other rows' fuzz cells are the first round's generator's.
+
+Tests: 15 new, 173 pass in the workspace: 8 unit tests in `layer7.rs` (the tint, Python's age arithmetic, `int()`, the
+action kinds and held mail, the parked fold, and from the review round `safe_id` against the kernel's answers and `int()`
+of a clock past i64), `tests/layer7_edge.rs` (6: every case byte for byte in both key orders with both SHA-1s, every tint
+and ramp point, each plant caught on exactly its cases, the line trace's missed lines, the schema, and from the review
+round each of its 12 refusals naming its rule, the message compared whole) and 1 in romp-spike for the feed check's
+messages and its tint-table reader.
+
+What this feeds: S6. The whole feed comes out of the port, so a timed region can be the same on both sides (derivation
+plus fold), as s2-design section 4 asks.
 
 ## Log
 
@@ -1841,3 +2249,41 @@ whoWorking stamp, the serving-fold join, and the frame assembled from the passth
     mismatches 0. Rust tests: 158 pass.
   - Docs: the placeholders' `_ageT` in "What layer 7 needs", the `validate` and upper claims, and a comment on the
     left-out `_note_peers([handoff_to] ...)`, a dead call in Python (for the bug lane).
+- 2026-11-26: S4.7, layer 7 (the loop, the fold and the cross-session pass), on fresh dumps (`romp-spike feed`,
+  `dump_layer7.py`).
+  - Worlds: the whole feed built in Rust, canonical and wire bytes equal to oracle/feed.canon.json and feed.wire.json:
+    small 4 sessions, 7 cards, 17,878 bytes, 826 values; large 38 sessions, 41 cards, 114,338 bytes, 5,348 values; 0
+    differences. The harness reproduces both oracles itself.
+  - Edge set: 131 worlds; 107 load and give the whole feed byte for byte in both key orders (165 sessions, 391 cards,
+    29,926 values), 0 differences, one build raising in both; 24 refused at load (every REFUSE case); 5,797 tint and ramp
+    points equal Python's. Python ran 371 of the 414 lines; the 43 left cannot run in a fresh replay.
+  - `dump_layer7.py --fuzz`: seeds 1 to 6 at 4,000 worlds, 24,000 worlds, 85,434 cards (9,186 parked, 44,017 notices),
+    6,692,301 values, 0 differences, 0 refused; 637 builds raise in both.
+  - Planted: 6 `--plant` options and 52 source mutants. The edge set catches every plant and 48 mutants (two by a
+    panic); the other 4 are equivalent (the overlapping clamps, the fresh build's restamp, the op filter). Fuzz seed 1
+    misses 4 more (M01, M02, M07, M48); the worlds catch 10 rows. Of the first sweep's gaps, M01 in a feed and M22 were
+    closed with two worlds and a fixed case, and three of the fuzz's four misses with generator changes (M48 stays a
+    fuzz miss); the table was run again on the final bytes.
+  - The replay's cleared set answers a dict (dump_world.py); both worlds re-dumped at one HEAD, every file but
+    `run.json` byte-identical (23 of 23, 159 of 159). The layer 6 fixture, regenerated, loses only the note of the old
+    raise. Re-run: the round trip and layers 1 to 6 on both worlds, every number as before; the layer 1 to 7 edge sets
+    (`cargo test`). Rust tests: 170 pass.
+  - Findings: a null card in an entry's asks fails the whole Python build (the fold runs outside the per-session guard;
+    bug lane); colormap.py's docstring names a stale default; age_rgb's and ramp's clamps overlap.
+- 2026-11-26: S4.7's review round (two must-fix), on fresh dumps.
+  - Must-fix: a parked send whose id or recipient fails kernel._safe_id is refused at load (Python finds its mail by a
+    path lookup that drops `.` components and trailing slashes; the port reads `mailNew` as exact pairs), and the harness
+    refuses a world whose `mailNew` its own filesystem contradicts (APFS: a send `M1` finds a file `m1`); a float clock
+    past i64 is refused while the postal log holds a parked send (the port's `int(now)` saturated). The reviewer's six
+    probe worlds gave 9 differences in 6 before the fix; after it, five are refused at load and the case-only collision
+    by the harness. 12 REFUSE worlds.
+  - Should-fix: 8 edge worlds, one per review mutant the edge set missed (R01, R25a, R25b, R10, R11, R36, R06, R35), each
+    0 on the old set and caught by the new; the missed-lines claim corrected for the maildir stat; S6's next action
+    names the I/O asymmetry.
+  - Edge set: 154 worlds; 118 load and give the feed byte for byte (32,013 values), 0 differences; 36 refused (every
+    REFUSE case); 5,797 tint points equal. `dump_layer7.py --fuzz` seeds 1 to 6 at 4,000 (recipients now safe ids):
+    6,629,814 values, 0 differences, 0 refused. The review round's 21 mutants and 8 re-run first-round mutants are each
+    caught by the edge set; the six plants by the edge set and fuzz seed 1.
+  - Re-run: the round trip and layers 1 to 7 on both worlds, every number as before (the feed's 17,878 and 114,338
+    bytes identical), the harness against both oracles, the fuzz of layers 2 to 6 at seeds 1 to 6 (590,031, 8,059,862,
+    30,625,221, 9,054,772 and 3,813,717 values), 0 differences; check_store, mismatches 0. Rust tests: 173 pass.

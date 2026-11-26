@@ -893,7 +893,12 @@ class Replay:
         km._live_scope.sessions = {}
         km._live_scope.names = names
         self._patch(km, "_alive_sessions", lambda now, lm: [dict(r) for r in self.rows])
-        self._patch(km, "_cleared_ids_display", lambda: set(board["cleared"]))
+        # The real reader answers a dict (a cleared item id to its clear time). The body only tests membership, but
+        # build_feed's frame code reads it as a dict (_cleared_foreign: `cleared.get(i)`), so the set this answered
+        # until S4.7 raised AttributeError after the session loop in any world with a cleared id (S4.6's finding). The
+        # snapshot keeps the ids, sorted, not their times, which only order the frame's clearedForeign, a key the
+        # replay passes through from the dump; so each id maps to None (`cleared.get(i) or 0` reads 0).
+        self._patch(km, "_cleared_ids_display", lambda: dict.fromkeys(board["cleared"]))
         self._patch(jd, "_debug_mode", lambda: bool(board["debug"]))
         self._patch(km, "_judge_error_rows", lambda now: copy.deepcopy(board["debugRows"]))
         self._patch(km, "_wait_for_graph", lambda now, sids: copy.deepcopy(board["wmap"]))

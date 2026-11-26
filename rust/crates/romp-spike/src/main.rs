@@ -15,6 +15,11 @@
 //!         Layer 6 (the body and its closures): each alive session's entry, byte for byte against the S2 dump's own
 //!         oracle/entries/<sid>.json, or against an edge set or fuzz file (dump_layer6.py), whose expected entries carry
 //!         the SHA-1 of Python's entry string.
+//!     romp-spike feed DUMP|EDGE.json [--plant bell-falsy-skip|serving-first-row|who-owner|parked-unsorted|notice-cap-held|absent-last]
+//!         Layer 7 (the loop, the fold and the cross-session pass): the whole feed frame, byte for byte against the S2
+//!         dump's oracle/feed.canon.json (sorted keys, the gate) and oracle/feed.wire.json (insertion order), or
+//!         against an edge set or fuzz file (dump_layer7.py), whose expected feeds carry the SHA-1 of Python's
+//!         canonical and wire strings, and whose tint table is checked point by point.
 //!     romp-spike store DUMP [--records] [--plant NAME]
 //!         Read every file of DUMP/transcripts/ through the transcript store and print the canonical summary
 //!         (romp_transcript::canon): per file one line, then one line per record. --records prints each record's
@@ -39,6 +44,10 @@
 //! `fsubmax-last` keeps the last of equal subtree times, `mt-or` reads a row's mt as `mt or t`, `land-first-equal`
 //! keeps the first of equal trail-segment times in the landing, `peers-unsorted` leaves the peers in read order and
 //! `born-empty-kept` ships an empty born record as `{}`;
+//! feed's `bell-falsy-skip` lets a falsy card bell override fall through to the session flag, `serving-first-row` keys
+//! the serving join on the first handoff row of a tracker id, `who-owner` stamps a handoff row's whoWorking from its
+//! card's owner, `parked-unsorted` leaves the parked handoffs in the fold's order, `notice-cap-held` counts held-mail
+//! notices in the cap and `absent-last` writes absentSids at the end of the frame;
 //! the store's plants are no-tool-result, vt-strip and skip-held-crc.
 //! Exit status: 0 when everything matched, 1 on any difference, 2 on a usage or load error.
 
@@ -57,13 +66,14 @@ use romp_views::layer3::{self, Plant as Plant3};
 use romp_views::layer4::{self, Plant as Plant4};
 use romp_views::layer5::{self, Plant as Plant5};
 use romp_views::layer6::{self, Plant as Plant6};
+use romp_views::layer7::{self, Plant as Plant7};
 use romp_views::load;
 use romp_views::record::{Num, OMap, ToJson};
 use romp_views::snapshot::{Snapshot, Store as GoalStore};
 use romp_views::tree::{self, Atom, Content, Tree, Turn};
 
 const USAGE: &str =
-    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]\n       romp-spike layer5 DUMP|EDGE.json [--plant lowercase|em-text|uuid-exclude|outrun-float|prompt-bytes|idle-tail]\n       romp-spike layer6 DUMP|EDGE.json [--plant anchor-store-order|fsubmax-last|mt-or|land-first-equal|peers-unsorted|born-empty-kept]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
+    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]\n       romp-spike layer5 DUMP|EDGE.json [--plant lowercase|em-text|uuid-exclude|outrun-float|prompt-bytes|idle-tail]\n       romp-spike layer6 DUMP|EDGE.json [--plant anchor-store-order|fsubmax-last|mt-or|land-first-equal|peers-unsorted|born-empty-kept]\n       romp-spike feed DUMP|EDGE.json [--plant bell-falsy-skip|serving-first-row|who-owner|parked-unsorted|notice-cap-held|absent-last]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
 const MAX_SHOWN: usize = 10;
 
 fn store_usage() -> ExitCode {
@@ -228,6 +238,8 @@ fn main() -> ExitCode {
         ("layer5", Some(p)) if Plant5::parse(p).is_some() => layer5_cmd(&dir, Plant5::parse(p)),
         ("layer6", None) => layer6_cmd(&dir, None),
         ("layer6", Some(p)) if Plant6::parse(p).is_some() => layer6_cmd(&dir, Plant6::parse(p)),
+        ("feed", None) => feed_cmd(&dir, None),
+        ("feed", Some(p)) if Plant7::parse(p).is_some() => feed_cmd(&dir, Plant7::parse(p)),
         _ => return usage(),
     };
     match result {
@@ -1599,6 +1611,218 @@ fn layer6_edge(file: &Path, plant: Option<Plant6>) -> Result<bool, String> {
     Ok(tally.diffs == 0)
 }
 
+fn plant7_name(plant: Option<Plant7>) -> String {
+    plant.map_or_else(String::new, |p| format!(" [planted: {}]", p.name()))
+}
+
+/// Layer 7 against Python's whole feed: a dump directory's oracle/feed.canon.json and feed.wire.json, or an edge set or
+/// fuzz file.
+fn feed_cmd(path: &Path, plant: Option<Plant7>) -> Result<bool, String> {
+    if path.is_dir() { feed_dump(path, plant) } else { feed_edge(path, plant) }
+}
+
+fn feed_dump(dir: &Path, plant: Option<Plant7>) -> Result<bool, String> {
+    let dump = load::load_dump(dir)?;
+    let snap = &dump.snapshot;
+    layer6::validate(snap).map_err(|e| format!("snapshot.json: {e}"))?;
+    layer7::validate(snap).map_err(|e| format!("snapshot.json: {e}"))?;
+    let t0 = Instant::now();
+    let feed = layer7::build_feed(snap, &dump.trees, plant)
+        .map_err(|r| format!("build_feed raised {}: {} (the S2 oracle never raises)", r.exc, r.arg))?;
+    let (canon, wire) = (feed.canon(), feed.wire());
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    let want_canon = read(&dir.join("oracle").join("feed.canon.json"))?;
+    let want_wire = read(&dir.join("oracle").join("feed.wire.json"))?;
+    let want = exact_doc(&want_wire, "oracle/feed.wire.json")?;
+    let mut tally = Tally::default();
+    tally.compare("feed", &feed.frame, &want);
+    let canon_same = canon.as_bytes() == want_canon.as_slice();
+    let wire_same = wire.as_bytes() == want_wire.as_slice();
+    if !canon_same && tally.diffs == 0 {
+        tally.diff(format!("the values agree but the canonical bytes differ: {}",
+                           first_difference(&want_canon, canon.as_bytes()).unwrap_or_default()));
+    }
+    if !wire_same && tally.diffs == 0 {
+        tally.diff(format!("the values agree but the wire bytes differ: {}",
+                           first_difference(&want_wire, wire.as_bytes()).unwrap_or_default()));
+    }
+    for s in &tally.shown {
+        println!("  {s}");
+    }
+    let same = |b: bool| if b { "identical" } else { "DIFFER" };
+    println!(
+        "feed {}{}: {} sessions, {} cards, {} tree rows, {} absent, {} serving folded, {} parked, {} notices: canonical \
+         {} bytes {}, wire {} bytes {}, {} values compared, {} differences ({:.1} ms for the build)",
+        world_name(snap),
+        plant7_name(plant),
+        feed.sessions,
+        feed.cards,
+        feed.rows,
+        feed.absent,
+        feed.folded,
+        feed.parked,
+        feed.notices,
+        want_canon.len(),
+        same(canon_same),
+        want_wire.len(),
+        same(wire_same),
+        tally.values,
+        tally.diffs,
+        ms
+    );
+    Ok(canon_same && wire_same && tally.diffs == 0)
+}
+
+/// The tint table an edge set carries: Python's cm.age_rgb over (colormap, age) and cm.ramp over (v, colormap), each
+/// against the port's; returns (points, differences, the first few shown).
+fn tint_table(exact: &Out) -> Result<(usize, usize, Vec<String>), String> {
+    let (mut n, mut diffs, mut shown) = (0, 0, Vec::new());
+    let name_of = |v: &Out| match v {
+        Out::Str(s) => Ok(Some(s.clone())),
+        Out::Null => Ok(None),
+        other => Err(format!("a colormap name that is not a string or null: {}", romp_json::dumps(other))),
+    };
+    let num = |v: &Out| match v {
+        Out::Int(i) => Ok(*i as f64),
+        Out::Float(f) => Ok(*f),
+        other => Err(format!("a number expected, not {}", romp_json::dumps(other))),
+    };
+    for (key, is_ramp) in [("tints", false), ("ramps", true)] {
+        let Some(Out::Array(rows)) = member(exact, key) else { continue };
+        for row in rows {
+            let Out::Array(r) = row else { return Err(format!("{key}: a row that is not a list")) };
+            if r.len() != 3 {
+                return Err(format!("{key}: a row of {} items", r.len()));
+            }
+            let (x, name) = if is_ramp { (num(&r[0])?, name_of(&r[1])?) } else { (num(&r[1])?, name_of(&r[0])?) };
+            let got = if is_ramp {
+                layer7::ramp(x, layer7::stops_for(name.as_deref()))
+            } else {
+                layer7::age_rgb(x, name.as_deref())
+            };
+            let got = Out::Array(got.iter().map(|&c| Out::Int(c)).collect());
+            n += 1;
+            if romp_json::dumps(&got) != romp_json::dumps(&r[2]) {
+                diffs += 1;
+                if shown.len() < MAX_SHOWN {
+                    shown.push(format!("{key} {}: rust {} python {}", romp_json::dumps(row), romp_json::dumps(&got),
+                                       romp_json::dumps(&r[2])));
+                }
+            }
+        }
+    }
+    Ok((n, diffs, shown))
+}
+
+fn feed_edge(file: &Path, plant: Option<Plant7>) -> Result<bool, String> {
+    let name = file.display().to_string();
+    let bytes = read(file)?;
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("{name}: {e}"))?;
+    if doc["schema"] != "romp-spike-layer7-edge/1" {
+        return Err(format!("{name}: schema {}, expected romp-spike-layer7-edge/1", doc["schema"]));
+    }
+    let exact = exact_doc(&bytes, &name)?;
+    let exact_cases = exact_items(&exact, "cases", &name)?;
+    let cases = doc["cases"].as_array().ok_or_else(|| format!("{name}: no cases"))?;
+    if cases.len() != exact_cases.len() {
+        return Err(format!("{name}: {} cases, {} read exactly", cases.len(), exact_cases.len()));
+    }
+    let mut tally = Tally::default();
+    let (mut loaded, mut refused, mut differing, mut raised) = (0, 0, 0, 0);
+    let (mut sessions, mut cards, mut rows, mut absent, mut folded, mut parked, mut notices) = (0, 0, 0, 0, 0, 0, 0);
+    for (case, exact_case) in cases.iter().zip(exact_cases) {
+        let cname = case["name"].as_str().ok_or("a case without a name")?;
+        let loaded_case = load::refuse_big_int(member(exact_case, "snapshot").unwrap_or(&Out::Null), &[])
+            .and_then(|()| layer7::load_case(case));
+        let c = match loaded_case {
+            Ok(c) => c,
+            Err(e) => {
+                if cname.starts_with("REFUSE ") {
+                    refused += 1;
+                } else {
+                    tally.diff(format!("{cname}: the loader refused it: {e}"));
+                    differing += 1;
+                }
+                continue;
+            }
+        };
+        if cname.starts_with("REFUSE ") {
+            tally.diff(format!("{cname}: the loader accepted it"));
+            differing += 1;
+            continue;
+        }
+        loaded += 1;
+        let expect = member(exact_case, "expect").ok_or_else(|| format!("{cname}: no expect"))?;
+        let got = layer7::build_feed(&c.snapshot, &c.trees, plant);
+        let (feed, want) = match (got, member(expect, "feed")) {
+            (Ok(f), Some(w)) => (f, w),
+            (Err(r), None) => {
+                raised += 1;
+                let (g, w) = (romp_json::dumps(&r.to_json()), romp_json::dumps(expect));
+                if g != w {
+                    tally.diff(format!("{cname}: build_feed raised here {g}, in python {w}"));
+                    differing += 1;
+                }
+                continue;
+            }
+            (Ok(_), None) => {
+                tally.diff(format!("{cname}: python's build raised {}, here it built a feed", romp_json::dumps(expect)));
+                differing += 1;
+                continue;
+            }
+            (Err(r), Some(_)) => {
+                tally.diff(format!("{cname}: build_feed raised here {}: {}, python built a feed", r.exc, r.arg));
+                differing += 1;
+                continue;
+            }
+        };
+        sessions += feed.sessions;
+        cards += feed.cards;
+        rows += feed.rows;
+        absent += feed.absent;
+        folded += feed.folded;
+        parked += feed.parked;
+        notices += feed.notices;
+        let before = tally.diffs;
+        tally.compare(cname, &feed.frame, want);
+        for (key, got) in [("wireSha1", feed.wire()), ("canonSha1", feed.canon())] {
+            let digest = romp_views::sha1::hex(got.as_bytes());
+            if member(expect, key) != Some(&Out::Str(digest)) && tally.diffs == before {
+                tally.diff(format!("{cname}: the values agree but the SHA-1 of Python's {} string differs",
+                                   if key == "wireSha1" { "wire" } else { "canonical" }));
+            }
+        }
+        differing += usize::from(tally.diffs > before);
+    }
+    let (points, tint_diffs, tint_shown) = tint_table(&exact)?;
+    for s in tally.shown.iter().chain(&tint_shown) {
+        println!("  {s}");
+    }
+    println!(
+        "feed edge set{}: {} cases, {} loaded and compared ({} sessions, {} cards, {} tree rows, {} absent, {} serving \
+         folded, {} parked, {} notices, {} values), {} refused at load (every REFUSE case), {} differences in {} cases \
+         (python {})",
+        plant7_name(plant),
+        cases.len(),
+        loaded,
+        sessions,
+        cards,
+        rows,
+        absent,
+        folded,
+        parked,
+        notices,
+        tally.values,
+        refused,
+        tally.diffs,
+        differing,
+        doc["python"].as_str().unwrap_or("?")
+    );
+    println!("  builds that raise in Python and here: {raised}");
+    println!("  tints: {points} points of cm.age_rgb and cm.ramp against Python's, {tint_diffs} differences");
+    Ok(tally.diffs == 0 && tint_diffs == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1709,6 +1933,21 @@ mod tests {
         assert_eq!(entry_check(&mut t, "s2", &entry(Out::Float(5.0)), want.as_bytes()), Ok(false));
         assert_eq!(t.shown, ["s2.asks[0].t: rust 5.0 python 5"]);
         assert_eq!(t.diffs, 1);
+    }
+
+    #[test]
+    fn the_feed_check_names_its_plants_and_reads_the_tint_table() {
+        assert_eq!(plant7_name(Some(Plant7::AbsentLast)), " [planted: absent-last]");
+        assert_eq!(plant7_name(None), "");
+        for p in Plant7::ALL {
+            assert_eq!(Plant7::parse(p.name()), Some(p));
+        }
+        let doc = exact_doc(br#"{"tints": [["aurora", 0, [144, 136, 240]], [null, 1e12, [84, 178, 4]]],
+                                 "ramps": [[0.0625, null, [42, 179, 60]], [0.3125, "aurora", [50, 172, 167]]]}"#, "t")
+            .unwrap();
+        let (n, diffs, shown) = tint_table(&doc).unwrap();
+        assert_eq!((n, diffs), (4, 1));
+        assert_eq!(shown, ["ramps [0.3125, \"aurora\", [50, 172, 167]]: rust [50, 172, 166] python [50, 172, 167]"]);
     }
 
     #[test]

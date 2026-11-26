@@ -1144,7 +1144,8 @@ def answer_cases(km, dw, specs, lines=None):
         case = {"name": name, "snapshot": snap, "trees": {k: v for k, v in trees.items()}, "expect": expect}
         if note is not None:
             # build_feed's frame code after the session loop (layer 7's), not the body: the entries are already taken.
-            # The one known: the replay's _cleared_ids_display answers a set, which _cleared_foreign reads as a dict.
+            # Until S4.7 the replay's _cleared_ids_display answered a set, which _cleared_foreign reads as a dict, and
+            # a world with a cleared id raised here; dump_world.py now answers a dict, so only a refused world notes.
             case["buildNote"] = note
         cases.append(case)
     return cases
