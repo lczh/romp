@@ -169,7 +169,8 @@ class TheTextAtom(unittest.TestCase):
 
     def test_the_rest_of_the_turn_rewritten_under_the_same_end_is_searched_again(self):
         # the other half of the key (2026-11-26): the turn's atoms outside the segment are candidates too, so a turn whose
-        # wrap-up is now another atom (a transcript rewritten in place) with its end unchanged is a miss, never the old atom
+        # wrap-up is now another atom (a transcript rewritten in place) with its end unchanged is a miss, never the old atom;
+        # and the key names every atom of both lists in order, not only the last (a) nor as a set (b)
         sid = "11111111-2222-3333-4444-555555555555"
         seg = [tool("a1", T0), think("th", T0 + 1)]
         wrap = "The wrap-up here is the reply the user reads, long enough to count as prose by the walk's own floor."
@@ -181,6 +182,29 @@ class TheTextAtom(unittest.TestCase):
         self.assertEqual(fresh, ("t8", None))
         self.assertEqual(km._summary_text_anchor((after, seg), "Nothing that matches.", memo_key=(sid, "g1", "k1")), fresh,
                          "the same segment and end over other atoms: a fresh search's answer")
+        # (a) a MIDDLE text atom rewritten under a new uuid, the last atom and the end unchanged (review round two): a key
+        # that named only each list's last uuid would serve the old middle atom
+        line = "The exporter keeps both clients now. Tests run against the old one."
+        carry = "The exporter keeps both clients now. I checked the call sites and the tests first."
+        mid_before = {"t": T0, "end": T0 + 60, "atoms": seg + [text("m1", T0 + 40, carry), text("t7", T0 + 50, wrap)]}
+        mid_after = {"t": T0, "end": T0 + 60, "atoms": seg + [text("m2", T0 + 40, carry), text("t7", T0 + 50, wrap)]}
+        self.assertEqual(km._summary_text_anchor((mid_before, seg), line, memo_key=(sid, "g1", "k2"))[0], "m1")
+        fresh = km._summary_text_anchor((mid_after, seg), line)
+        self.assertEqual(fresh[0], "m2", "a fresh search lands on the rewritten middle atom, which carries the opening sentence")
+        self.assertEqual(km._summary_text_anchor((mid_after, seg), line, memo_key=(sid, "g1", "k2")), fresh,
+                         "a middle atom rewritten, the last atom and the end the same: a fresh search's answer")
+        # (b) two text atoms of the segment trading places under the same uuids (review round two): the newest substantive
+        # atom is now the other one, so a key over the uuids as a set, not in order, would serve the old order's landing
+        x = "The first of two long replies in this segment, written for the user and past the walk's own prose floor."
+        y = "The second of two long replies in this segment, also written for the user and past the same prose floor."
+        xy = [tool("a1", T0), text("x", T0 + 10, x), text("y", T0 + 20, y)]
+        yx = [tool("a1", T0), text("y", T0 + 10, y), text("x", T0 + 20, x)]
+        xy_turn, yx_turn = {"t": T0, "end": T0 + 60, "atoms": xy}, {"t": T0, "end": T0 + 60, "atoms": yx}
+        self.assertEqual(km._summary_text_anchor((xy_turn, xy), "Nothing that matches.", memo_key=(sid, "g1", "k3")), ("y", None))
+        fresh = km._summary_text_anchor((yx_turn, yx), "Nothing that matches.")
+        self.assertEqual(fresh, ("x", None))
+        self.assertEqual(km._summary_text_anchor((yx_turn, yx), "Nothing that matches.", memo_key=(sid, "g1", "k3")), fresh,
+                         "the same atoms in another order: a fresh search's answer")
 
 
 # The states the verifier executed plus the one producible pair they left out, one row each: (name, distillState, column, completed, blocked). The webview

@@ -61448,8 +61448,9 @@ def _summary_anchor_memo_report():
 
 def _atom_uuids(atoms):
     """The uuids of `atoms` in order, as a tuple, building no atom: a restored turn's em.LazyAtoms (and a segment's view
-    of one) answers from its index (LazyAtoms.uuids), a plain list from its atoms. The summary anchor memo's key reads
-    it (2026-11-26)."""
+    of one) answers from its index (LazyAtoms.uuids: one row decode each at the list's first ask, the tuple kept on the
+    list after, a view slicing its parent's), a plain list from its atoms. The summary anchor memo's key reads it
+    (2026-11-26)."""
     if isinstance(atoms, em.LazyAtoms):
         return tuple(atoms.uuids())
     return tuple(a.get("uuid") for a in atoms or ())
@@ -61538,7 +61539,9 @@ def _summary_text_anchor(turn_seg, line, memo_key=None, stub_ok=False):
         # in the head. With both uuid sequences in the key a hit is a search over the same atoms, whatever moved them
         # (a seam, a placed echo, a rewritten transcript); a body is the same text for the same uuid (the memo's
         # standing premise), so a hit still saves every body read and quote locate. The uuids are read without building
-        # an atom (_atom_uuids), so a hit on a restored turn materializes nothing, as before.
+        # an atom (_atom_uuids), so a hit on a restored turn materializes nothing, as before; it does decode each row of
+        # the turn once for its uuid, at the turn's first ask, and the list keeps the tuple after (LazyAtoms.uuids; before
+        # it kept it, a restored hit decoded every row of the turn and the segment each time: 9 to 14 ms on 2,002 atoms).
         key = tuple(memo_key) + (hash(str(line or "")), (turn or {}).get("end") or (turn or {}).get("t"), bool(stub_ok),
                                  hash(_atom_uuids(seg_atoms)), hash(_atom_uuids((turn or {}).get("atoms"))))
         hit = _summary_anchor_memo_get(key)

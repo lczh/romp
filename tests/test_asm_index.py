@@ -587,6 +587,38 @@ class ScalarWalkers(Restored):
         self.assertEqual((again, km._SUMMARY_ANCHOR_STATS["hit"]), (first, hits + 1), "the restored turn's ask is a hit")
         self.assertEqual(em.asm_index_stats()["materialized"], 0, "…that built nothing: %s" % em.asm_index_stats()["materializedBy"])
 
+    def test_a_restored_turns_segment_views_key_the_memo_by_their_own_uuids_decoded_once(self):
+        # 2026-11-26, review round two: the fixture above restores turn 0 as ONE segment covering the whole turn, so it cannot
+        # tell a segment view's uuids from its parent's. multi_input_absorbed restores turn 0 as two views (3 atoms, then 2):
+        # each answers its own uuids, and the second asked under the first's memo-key prefix (a seam that moved atoms) is a
+        # miss. The list keeps its uuids after the first ask (LazyAtoms.uuids) and a view slices its parent's, so a later
+        # hit decodes no row, through the same views or the next build's fresh ones (a restored hit used to decode every
+        # row of the turn and of the segment)
+        path, whole, tree = self.restored_tree("multi_input_absorbed")
+        km = self.km
+        pre, w_turn = tree["turns"][0], whole["turns"][0]
+        segs, w_segs = em.segments(pre), em.segments(w_turn)
+        self.assertEqual([len(s["atoms"]) for s in segs], [3, 2], "two segment views of one restored turn")
+        for s, w in zip(segs, w_segs):
+            self.assertIsInstance(s["atoms"], em.LazyAtoms)
+            self.assertEqual(km._atom_uuids(s["atoms"]), km._atom_uuids(w["atoms"]), "a view's own uuids, never its parent's")
+        self.assertEqual(em.asm_index_stats()["materialized"], 0, "reading the uuids built nothing: %s" % em.asm_index_stats()["materializedBy"])
+        line, mk = "No atom of the turn carries this opening sentence.", (SID, "g1", "k1")
+        for k in [k for k in km._SUMMARY_ANCHOR_MEMO if k[:3] == mk]:
+            km._SUMMARY_ANCHOR_MEMO.pop(k)
+        first = km._summary_text_anchor((pre, segs[0]["atoms"]), line, memo_key=mk)     # a miss, stored
+        self.assertEqual(first, km._summary_text_anchor((w_turn, w_segs[0]["atoms"]), line), "a fresh search's answer")
+        for seg_atoms in (segs[0]["atoms"], em.segments(pre)[0]["atoms"]):             # the same view, then a fresh one
+            hits, d0 = km._SUMMARY_ANCHOR_STATS["hit"], em.asm_index_stats()["rowDecodes"]
+            again = km._summary_text_anchor((pre, seg_atoms), line, memo_key=mk)
+            self.assertEqual((again, km._SUMMARY_ANCHOR_STATS["hit"]), (first, hits + 1), "the first segment asked again is a hit")
+            self.assertEqual(em.asm_index_stats()["rowDecodes"], d0, "…that decodes no row: the uuids are kept on the list")
+        hits, misses = km._SUMMARY_ANCHOR_STATS["hit"], km._SUMMARY_ANCHOR_STATS["miss"]
+        second = km._summary_text_anchor((pre, segs[1]["atoms"]), line, memo_key=mk)
+        self.assertEqual((km._SUMMARY_ANCHOR_STATS["hit"], km._SUMMARY_ANCHOR_STATS["miss"]), (hits, misses + 1),
+                         "the second segment under the first's memo-key prefix is a miss")
+        self.assertEqual(second, km._summary_text_anchor((w_turn, w_segs[1]["atoms"]), line), "…answered by its own search")
+
     def test_the_work_rule_is_pinned_beside_the_document_version(self):
         """The document stores atom_has_work's verdict (w), seg_prompt_atom's (hp), _prose_chars (pc, pcs) and postal_mids
         (mid, mids): a change to any of them changes what a stored document means, so it is a version bump. Re-pin here
