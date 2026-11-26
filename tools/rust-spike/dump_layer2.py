@@ -11,23 +11,35 @@ typed structs and compares.
 
     python3 tools/rust-spike/dump_layer2.py DUMP_DIR [DUMP_DIR ...]   # writes DUMP_DIR/layer2.json
     python3 tools/rust-spike/dump_layer2.py --edge-cases OUT.json     # the synthetic cases (romp-spike layer2 OUT.json)
+    python3 tools/rust-spike/dump_layer2.py --fuzz N [--seed S] [--plant end|bytes] [--bin ROMP_SPIKE] [--out FILE]
 
 Neither world splits a segment (each holds one seam, and no piece's span holds its time), so the edge cases build
 the branches the worlds never reach: straddling seams, recursive splits, equal and int-vs-float times, absent and null
 seam text and top, the prose floor at 79/80/81 code points of non-ASCII text, placed echoes, triggers of every shape,
 float times printed with "%d", and the inputs on which Python raises. A case that raises records
 {"raises": <exception name>, "arg": str(e)}, and every case records what apply_seams did (`counts`: pieces examined,
-em.split_segment calls, splits). A case named "REFUSE ..." is one the Rust loader must refuse. Stdlib only.
+em.split_segment calls, splits). A case named "REFUSE ..." is one the Rust loader must refuse.
+
+`--fuzz N` is the randomized differential check: N random turns and stores (atom kinds, texts with non-ASCII and
+Python-only whitespace, int and float times with ties, seams whose keys and times come from the turn's own segments
+and their tails, absent and null seam text and top, placed echoes, every trigger shape), answered by the real
+kernel._segs_seam, written in the edge-set format and compared by `romp-spike layer2`; any difference fails it. Seeded:
+`--seed S` replays. With `--plant NAME` it passes only when romp-spike's planted mistake is caught. Stdlib only.
 """
 import argparse
 import contextlib
 import importlib.util
 import json
+import math
 import os
 import platform
+import random
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 
 sys.dont_write_bytecode = True
 
@@ -232,6 +244,10 @@ def edge_cases(km):
     add("no inputs, trigger without uuid", turn([asst("a1", 100, "x")], trigger={"other": 1}))
     add("no inputs, trigger uuid null", turn([asst("a1", 100, "x")], trigger={"uuid": None}))
     add("no inputs, trigger uuid empty", turn([asst("a1", 100, "x")], trigger={"uuid": ""}))
+    # `if trigger_uuid:` skips the anchor search for "": the id hashes the first atom's text ("x"), not the text of
+    # the atom whose uuid is "" ("y"). A search that ran for "" would find that atom (layer2.rs: the filter on "").
+    add("no inputs, trigger uuid empty, an atom with an empty uuid",
+        turn([asst("a1", 100, "x"), asst("", 101, "y")], trigger={"uuid": ""}))
     add("no inputs, trigger uuid not among the atoms", turn([asst("a1", 100, "x")], trigger={"uuid": "zz"}))
     add("no inputs, no text, no uuids", turn([dict(tool("a1", 100), uuid=None), idle(101, 105)], trigger=None))
     add("no inputs, text-less first atom without uuid", turn([idle(99, 100), tool("a2", 101)], trigger=None))
@@ -397,6 +413,34 @@ def plain(v):
     return json.loads(json.dumps(v))
 
 
+def answer_cases(km, specs):
+    """Python's answer to each (name, kind, turn, store or t), as the edge-set cases (the turn and store as JSON reads
+    them back), and the coverage over all of them."""
+    em = km.em
+    cases, cov = [], new_cov()
+    with counting(km) as (stats, seg_key):
+        for name, kind, tr, arg in specs:
+            tr = plain(tr)
+            index_of = {id(a): i for i, a in enumerate(tr.get("atoms") or [])}
+            case = {"name": name, "kind": kind, "turn": tr}
+            before = dict(stats)
+            if kind == "segs":
+                case["store"] = plain(arg)
+                cov["turns"] += 1
+                case["expect"] = segs_answer(km, tr, case["store"], cov, seg_key)
+            else:
+                case["t"] = arg
+                try:
+                    sp = em.split_segment(em.segments(tr)[0], arg)
+                    case["expect"] = None if sp is None else [seg_out(s, index_of) for s in sp]
+                except Exception as e:           # noqa: BLE001
+                    case["expect"] = raised(e)
+            case["counts"] = {k: stats[k] - before[k] for k in stats}
+            cases.append(case)
+    cov.update(stats)
+    return cases, cov
+
+
 def edge_main(out):
     l1 = load_l1()
     dw = l1.load_dw()
@@ -404,27 +448,7 @@ def edge_main(out):
     try:
         _root, km, _rec = l1.load_kernel(dw, tmp)
         em = km.em
-        cases, cov = [], new_cov()
-        with counting(km) as (stats, seg_key):
-            for name, kind, tr, arg in edge_cases(km):
-                tr = plain(tr)
-                index_of = {id(a): i for i, a in enumerate(tr.get("atoms") or [])}
-                case = {"name": name, "kind": kind, "turn": tr}
-                before = dict(stats)
-                if kind == "segs":
-                    case["store"] = plain(arg)
-                    cov["turns"] += 1
-                    case["expect"] = segs_answer(km, tr, case["store"], cov, seg_key)
-                else:
-                    case["t"] = arg
-                    try:
-                        sp = em.split_segment(em.segments(tr)[0], arg)
-                        case["expect"] = None if sp is None else [seg_out(s, index_of) for s in sp]
-                    except Exception as e:           # noqa: BLE001
-                        case["expect"] = raised(e)
-                case["counts"] = {k: stats[k] - before[k] for k in stats}
-                cases.append(case)
-        cov.update(stats)
+        cases, cov = answer_cases(km, edge_cases(km))
         doc = {"schema": EDGE_SCHEMA, "python": platform.python_version(),
                "generatedBy": "tools/rust-spike/dump_layer2.py --edge-cases",
                "constants": {"SEAM_PROSE_FLOOR": em.SEAM_PROSE_FLOOR}, "coverage": cov, "cases": cases}
@@ -441,15 +465,430 @@ def edge_main(out):
     return 0
 
 
+# ───────────────────────────── the randomized check (--fuzz) ─────────────────────────────
+# Random turns and stores, Python's answers from the real kernel._segs_seam (one case in twelve: em.split_segment on
+# the first segment of em.segments), written in the edge-set format and compared by `romp-spike layer2`. Seeded, so a
+# failure replays: `--fuzz N --seed S` makes the same cases. Every case is a shape the loader accepts, so a refusal
+# counts as a difference. Seam keys and times come from the real em.segments and em.split_segment of the case's own
+# turn, so seams hit, straddle a span, sit on its strict bounds, re-split their tails, and tie.
+FUZZ_SIDS = (SID, SID, SID, SID, "eeeeeeee-0000-0000-0000-000000000003", "", "a:b:c", "s\u00e9ance \u2192 \U0001F600")
+FUZZ_UUIDS = ("u1", "u2", "a1", "a2", "", "\u00fc-1", "x:y")
+# Python's str.strip() and \s whitespace, including the 4 Rust's trim misses (U+001C..U+001F)
+FUZZ_WS = " \t\n\x0b\x0c\r\x1c\x1d\x1e\x1f\x85\xa0\u1680\u2000\u200a\u2028\u2029\u202f\u205f\u3000"
+# ASCII, 2-, 3- and 4-byte UTF-8, a zero-width space and a soft hyphen (not whitespace), a combining accent
+FUZZ_CHARS = ("abcdefghijklmnopqrstuvwxyz      ABCXYZ0123456789.,:;-_/()[]<>!?'\""
+              "\u00e9\u00ef\u00f1\u00fc\u00df\u00e7\u00f8\u2192\u2014\u2026\u00ab\u00bb\u03a9\u03bb\u0436\u0416"
+              "\u65e5\u672c\u8a9e\u4e2d\u6587\U0001F600\U0001F389\u200b\u00ad\u0301")
+FUZZ_MARKERS = (INJECT, "<!--romp-injected-->", "<!--\t romp-injected\n-->", "<!- romp-injected -->",
+                "<!-- romp-injected ->", PREAMBLE, PREAMBLE.lower(), "[Request interrupted by user]",
+                "[Request interrupted by user for tool use]", "[Request interrupted", "<task-notification> done")
+FUZZ_AUTHORS = ("human", "human", "human", "sdk", "romp", {"peer": "s002", "host": "TESTHOST"}, {}, "system", "peer",
+                "Human", None, "absent")
+# time bases: small, zero (and -0.0), negative, a wall clock (int and fractional), just under 2**53 (where a float
+# conversion merges neighbors), past 2**62, and floats past 2**63 ("%d" prints every digit), up to f64::MAX
+FUZZ_BASES = (100, 100, 0, -50, 1781100000, 1781100000.25, 9007199254740990, 4611686018427387900, 1e20, -1e19,
+              1.7976931348623157e308)
+FUZZ_STEPS = (0, 0, 1, 1, 2, 5, 10, 0.5, 0.25, 0.7, 1.0)
+
+
+def fuzz_num(rng, x):
+    """`x`, its tag flipped now and then: an integral float inside i64 may become an int, an int a float (rounding it
+    past 2**53), a zero -0.0."""
+    r = rng.random()
+    if isinstance(x, float) and x.is_integer() and abs(x) < 2 ** 63 and r < 0.3:
+        return int(x)
+    if isinstance(x, int) and r < 0.2:
+        return float(x)
+    if x == 0 and r < 0.5:
+        return -0.0
+    return x
+
+
+def twin(x):
+    """An equal time with the other tag, where one exists."""
+    if isinstance(x, int):
+        return float(x)
+    return int(x) if x.is_integer() and abs(x) < 2 ** 63 else x
+
+
+def fuzz_text(rng):
+    r = rng.random()
+    if r < 0.07:
+        return ""
+    if r < 0.13:
+        return "".join(rng.choice(FUZZ_WS) for _ in range(rng.randint(1, 4)))
+    if r < 0.30:
+        tail = "".join(rng.choice(FUZZ_CHARS) for _ in range(rng.randint(0, 12)))
+        return rng.choice(("", " ", "\n ", "\x1c", "go on ")) + rng.choice(FUZZ_MARKERS) + rng.choice(("", " ")) + tail
+    # prose, its length often near the seam floor (80 code points; more in UTF-8 bytes)
+    n = rng.choice((rng.randint(1, 12), rng.randint(70, 90), rng.randint(76, 84), rng.randint(0, 160)))
+    s = "".join(rng.choice(FUZZ_CHARS) for _ in range(n))
+    if rng.random() < 0.25:
+        s = rng.choice(FUZZ_WS) * rng.randint(1, 3) + s + rng.choice(FUZZ_WS) * rng.randint(0, 3)
+    return s
+
+
+def fuzz_block(rng):
+    r = rng.random()
+    if r < 0.45:
+        return {"type": "text", "text": fuzz_text(rng)}
+    if r < 0.62:
+        b = {"type": "tool_use"}
+        for k, vals in (("id", ("tu-1", "tu-2", None)), ("name", ("Bash", "Edit", None))):
+            if rng.random() < 0.8:
+                b[k] = rng.choice(vals)
+        if rng.random() < 0.5:
+            b["input"] = {}
+        return b
+    if r < 0.71:
+        return {"type": "tool_result", "tool_use_id": rng.choice(("tu-1", None)), "content": "ok"}
+    if r < 0.76:
+        return {"type": "thinking", "thinking": fuzz_text(rng)}
+    if r < 0.82:
+        return {"text": fuzz_text(rng)}
+    if r < 0.86:
+        return {"type": None, "text": fuzz_text(rng)}
+    if r < 0.90:
+        return {"type": "text"}
+    return rng.choice(("tool_use", "text", 5, 2.5, None, True, [1], [], {}))
+
+
+def fuzz_message(rng, role):
+    """A message dict, or None (null), or "absent"."""
+    r = rng.random()
+    if r < 0.04:
+        return "absent"
+    if r < 0.07:
+        return None
+    if r < 0.09:
+        return {}
+    m = {"role": role}
+    r = rng.random()
+    if r < 0.12:
+        m["content"] = fuzz_text(rng)
+    elif r >= 0.15:
+        m["content"] = [fuzz_block(rng) for _ in range(rng.choice((0, 1, 1, 1, 2, 2, 3, 4)))]
+    if rng.random() < 0.5:
+        m["stop_reason"] = rng.choice(("end_turn", "tool_use", "stop_sequence", None))
+    return m
+
+
+def fuzz_atom(rng, t, serial, i):
+    kind = rng.choices(("user", "assistant", "idle", "system", "attachment", ""), (36, 40, 8, 8, 6, 2))[0]
+    a = {"type": kind}
+    r = rng.random()
+    if r < 0.07:
+        a["uuid"] = None
+    elif r < 0.40:
+        a["uuid"] = rng.choice(FUZZ_UUIDS)
+    elif r < 0.95:
+        a["uuid"] = "f%d-%d" % (serial, i)
+    a["t"] = t
+    r = rng.random()
+    if r < 0.04:
+        a["session_id"] = None
+    elif r < 0.98:
+        a["session_id"] = rng.choice(FUZZ_SIDS)
+    if kind == "user" or rng.random() < 0.05:
+        au = rng.choice(FUZZ_AUTHORS)
+        if au != "absent":
+            a["author"] = dict(au) if isinstance(au, dict) else au
+    if kind == "idle":
+        a["end"] = fuzz_num(rng, t + rng.choice(FUZZ_STEPS))
+        if rng.random() < 0.8:
+            return a
+    if kind == "assistant" and rng.random() < 0.35:
+        m = {"role": "assistant", "content": [{"type": "tool_use", "id": "tu-%d-%d" % (serial, i), "name": "Bash",
+                                               "input": {}}], "stop_reason": "tool_use"}
+    else:
+        m = fuzz_message(rng, "assistant" if kind == "assistant" else "user")
+    if m != "absent":
+        a["message"] = m
+    if kind == "assistant" and rng.random() < 0.06:
+        a["isApiError"] = rng.choice((True, False, None))
+    if rng.random() < 0.04:
+        a["origin"] = rng.choice(({"kind": "task-notification", "subkind": "scheduled-trigger"},
+                                  {"kind": "task-notification"}, "scheduled-trigger", None))
+    if rng.random() < 0.03:
+        a["lazy"] = None
+    return a
+
+
+def fuzz_turn(rng, serial):
+    n = rng.choice((0, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 10))
+    t, times = rng.choice(FUZZ_BASES), []
+    for _ in range(n):
+        times.append(fuzz_num(rng, t))
+        t = t + rng.choice(FUZZ_STEPS)
+    if n >= 2 and rng.random() < 0.08:                      # out of order
+        i, j = rng.sample(range(n), 2)
+        times[i], times[j] = times[j], times[i]
+    atoms = [fuzz_atom(rng, x, serial, i) for i, x in enumerate(times)]
+    tr = {"atoms": atoms}
+    if atoms and rng.random() < 0.7:
+        tr["t"] = atoms[0]["t"]
+    else:
+        tr["t"] = fuzz_num(rng, (times[0] if times else rng.choice(FUZZ_BASES)) - rng.choice(FUZZ_STEPS))
+    r = rng.random()
+    tr["end"] = fuzz_num(rng, t if r < 0.7 else rng.choice(times + [tr["t"]]) if r < 0.9 else rng.choice(FUZZ_BASES))
+    tr["ended"] = rng.random() < 0.5
+    tr["id"] = "fuzz-turn-%d" % serial
+    shape = rng.choices(range(8), (6, 10, 8, 6, 10, 12, 10, 38))[0]   # every trigger shape (0: absent)
+    uuids = [a["uuid"] for a in atoms if isinstance(a.get("uuid"), str)]
+    if shape == 1:
+        tr["trigger"] = None
+    elif shape == 2:
+        tr["trigger"] = {}
+    elif shape == 3:
+        tr["trigger"] = {"source": "prompt"}
+    elif shape == 4:
+        tr["trigger"] = {"uuid": None}
+    elif shape == 5:
+        tr["trigger"] = {"uuid": ""}
+    elif shape == 6:
+        tr["trigger"] = {"uuid": "zz-not-there"}
+    elif shape == 7:
+        tr["trigger"] = {"uuid": rng.choice(uuids) if uuids else "u1"}
+    if isinstance(tr.get("trigger"), dict) and rng.random() < 0.1:
+        tr["trigger"]["source"] = "prompt"
+    r = rng.random()
+    if r < 0.08:
+        tr["placedEchoes"] = None
+    elif r < 0.13:
+        tr["placedEchoes"] = []
+    elif r < 0.30:
+        pool = [a.get("uuid") for a in atoms] + ["nope", None]
+        tr["placedEchoes"] = [rng.choice(pool) for _ in range(rng.randint(1, 3))]
+    if rng.random() < 0.03:
+        tr["pre"] = rng.choice((False, 0, "", None, [], {}))
+    return tr
+
+
+def fuzz_aims(rng, km, segs):
+    """(key, time) pairs aimed at the segments, and a pool of times. For each segment a time from its atoms' times,
+    the midpoints between distinct neighbors and its span's ends; when em.split_segment cuts it there, the tail is
+    aimed at in turn (up to three levels), so a seam listing a tail's key re-splits it."""
+    em, jd = km.em, km.jd
+    aims, times = [], []
+    for s in segs:
+        times += [s["t"], s["end"]]
+        piece = s
+        for _ in range(rng.choice((1, 2, 3))):
+            ts = [a.get("t", 0) for a in piece["atoms"]]
+            times += ts
+            mids = [m for m in (x + (y - x) / 2 for x, y in zip(ts, ts[1:]) if x != y) if math.isfinite(m)]
+            cand = mids if mids and rng.random() < 0.6 else [c for c in ts + mids + [piece["t"], piece["end"]]
+                                                              if math.isfinite(c)]
+            t = fuzz_num(rng, rng.choice(cand))
+            aims.append((jd._seg_key(piece["id"]), t))
+            try:
+                sp = em.split_segment(piece, t)
+            except Exception:                       # noqa: BLE001 (no aim then; the answer records any raise)
+                sp = None
+            if not sp:
+                break
+            piece = sp[1]
+            times.append(t)
+    return aims, [x for x in times if math.isfinite(x)]
+
+
+def fuzz_seam(rng, aims, times, ids, aim=None):
+    if aim is not None:
+        key, t = aim
+    elif aims and rng.random() < 0.65:
+        key, t = rng.choice(aims)
+    else:
+        key = rng.choice(aims)[0] if aims else SID + ":deadbeef"
+        t = rng.choice(times) if times else rng.choice(FUZZ_BASES)
+    t = fuzz_num(rng, t)
+    if rng.random() < 0.1 and abs(t) < 1e300:
+        t = t + rng.choice((-0.5, 0.5, -1, 1))
+    keys = [key]
+    for _ in range(rng.choice((0, 0, 0, 1, 2))):
+        keys.append(rng.choice((SID + ":deadbeef", "", rng.choice(ids) if ids else "x:1:y",
+                                rng.choice(aims)[0] if aims else "x:y")))
+    rng.shuffle(keys)
+    s = {}
+    if rng.random() >= 0.04:
+        s["t"] = t
+    r = rng.random()
+    if r < 0.08:
+        s["top"] = None
+    elif r < 0.90:
+        s["top"] = rng.choice((TOP, SID + ":g2", "", "\u00fc:g3"))
+    r = rng.random()
+    if r < 0.08:
+        s["text"] = None
+    elif r < 0.88:
+        s["text"] = fuzz_text(rng)
+    r = rng.random()
+    if r < 0.04:
+        s["segs"] = None
+    elif r < 0.08:
+        s["segs"] = []
+    elif r < 0.94:
+        s["segs"] = keys
+    if rng.random() < 0.05:
+        s["stamp"] = 1
+    return s
+
+
+def fuzz_store(rng, km, tr):
+    r = rng.random()
+    if r < 0.05:
+        return None
+    if r < 0.08:
+        return {}
+    if r < 0.10:
+        return {"rompUuid": SID}
+    if r < 0.12:
+        return {"rompUuid": SID, "seams": None}
+    if r < 0.14:
+        return {"rompUuid": SID, "seams": []}
+    try:
+        segs = km.em.segments(km._turn_sans_placed_echoes(tr))
+    except Exception:                               # noqa: BLE001 (Python raises before apply_seams; any store will do)
+        segs = []
+    aims, times = fuzz_aims(rng, km, segs)
+    ids = [s["id"] for s in segs]
+    seams = []
+    if aims and rng.random() < 0.35:                # a chain: a seam aimed at each segment and each tail cut from it
+        seams = [fuzz_seam(rng, aims, times, ids, aim) for aim in aims]
+        rng.shuffle(seams)
+    more = rng.choice((0, 1, 1, 2, 3) if seams else (1, 1, 2, 2, 3, 4))
+    seams += [fuzz_seam(rng, aims, times, ids) for _ in range(more)]
+    if rng.random() < 0.15:                         # a tie: the same keys at an equal time, the other tag first or last
+        s0 = rng.choice(seams)
+        if "t" in s0:
+            seams.insert(rng.randrange(len(seams) + 1), dict(s0, t=twin(s0["t"]), top=SID + ":gT", text="the twin"))
+    return {"rompUuid": SID, "seams": seams}
+
+
+def fuzz_specs(rng, km, n, seed):
+    """`n` cases (name, kind, turn, store or t)."""
+    specs = []
+    for i in range(n):
+        tr = fuzz_turn(rng, i)
+        name = "fuzz seed %d case %d" % (seed, i)
+        if rng.random() < 1 / 12:
+            try:
+                aims, times = fuzz_aims(rng, km, km.em.segments(tr)[:1])
+                t = rng.choice([x for _, x in aims] + times)
+            except Exception:                       # noqa: BLE001 (em.segments raises: any t)
+                t = rng.choice(FUZZ_BASES)
+            specs.append((name, "split", tr, t))
+        else:
+            specs.append((name, "segs", tr, fuzz_store(rng, km, tr)))
+    return specs
+
+
+def rust_binary(given):
+    if given:
+        return given
+    cargo = shutil.which("cargo") or os.path.expanduser("~/.cargo/bin/cargo")
+    rust = os.path.join(os.path.dirname(os.path.dirname(HERE)), "rust")
+    subprocess.run([cargo, "build", "--release", "--offline", "-q", "-p", "romp-spike"], cwd=rust, check=True)
+    return os.path.join(rust, "target", "release", "romp-spike")
+
+
+# romp-spike's edge-set summary line (main.rs, layer2_edge)
+RUST_SUMMARY = re.compile(r"^layer2 edge set(?: \[planted: [a-z]+\])?: (\d+) cases, (\d+) loaded and compared \((\d+) "
+                          r"values, (\d+) counts\), (\d+) refused at load \(every REFUSE case\), (\d+) differences ")
+
+
+def fuzz_reach(cases):
+    """What the cases make Python do, beyond the coverage counts: raises by exception, cases that split once and more
+    than once, segments with a float t, seamOf texts null and "", and the segments a search for an empty trigger uuid
+    could misread (trigger "", and an atom after the first whose uuid is "": the search would anchor on it)."""
+    reach = {"raises": {}, "casesSplit": 0, "casesSplitTwice": 0, "floatT": 0, "seamOfTextNull": 0,
+             "seamOfTextEmpty": 0, "emptyTriggerLaterEmptyUuid": 0}
+    for c in cases:
+        e = c["expect"]
+        if isinstance(e, dict):
+            k = "%s %s" % (e["raises"], e["arg"])
+            reach["raises"][k] = reach["raises"].get(k, 0) + 1
+            continue
+        reach["casesSplit"] += c["counts"]["splits"] >= 1
+        reach["casesSplitTwice"] += c["counts"]["splits"] >= 2
+        for s in e or []:
+            reach["floatT"] += isinstance(s["t"], float)
+            reach["emptyTriggerLaterEmptyUuid"] += s["trigger"] == "" and "" in s["atoms"][1:]
+            so = s.get("seamOf")
+            if so is not None:
+                reach["seamOfTextNull"] += so["text"] is None
+                reach["seamOfTextEmpty"] += so["text"] == ""
+    return reach
+
+
+def fuzz_main(n, seed, plant, binary, out):
+    """Make `n` cases from `seed`, answer them in Python, and compare with `romp-spike layer2` (under `plant`, if
+    given). 0 when there is no difference (with a plant: when the plant is caught), 1 otherwise, 2 on an error."""
+    l1 = load_l1()
+    dw = l1.load_dw()
+    tmp = tempfile.mkdtemp(prefix="romp-spike-layer2-fuzz-")
+    try:
+        t0 = time.monotonic()
+        _root, km, _rec = l1.load_kernel(dw, tmp)
+        specs = fuzz_specs(random.Random(seed), km, n, seed)
+        cases, cov = answer_cases(km, specs)
+        doc = {"schema": EDGE_SCHEMA, "python": platform.python_version(),
+               "generatedBy": "tools/rust-spike/dump_layer2.py --fuzz %d --seed %d" % (n, seed),
+               "constants": {"SEAM_PROSE_FLOOR": km.em.SEAM_PROSE_FLOOR}, "coverage": cov, "cases": cases}
+        path = out or os.path.join(tmp, "layer2_fuzz.json")
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(json.dumps(doc, ensure_ascii=True, allow_nan=False) + "\n")
+        py_s = time.monotonic() - t0
+        reach = fuzz_reach(cases)
+        nsplit = sum(c["kind"] == "split" for c in cases)
+        print("fuzz seed %d: %d cases (%d segs, %d split) made and answered by Python in %.1f s, %.1f MB" % (
+            seed, n, n - nsplit, nsplit, py_s, os.path.getsize(path) / 1e6))
+        print("  python: coverage %s" % json.dumps(cov, sort_keys=True))
+        print("  python: reach %s" % json.dumps(reach, sort_keys=True, ensure_ascii=False))
+        p = subprocess.run([binary, "layer2", path] + (["--plant", plant] if plant else []), capture_output=True,
+                           text=True)
+        lines = p.stdout.splitlines()
+        summary = [m for m in map(RUST_SUMMARY.match, lines) if m]
+        for line in lines:
+            print("  rust: " + line)
+        if p.returncode not in (0, 1) or len(summary) != 1:
+            print("dump_layer2: romp-spike layer2 exited %d without its summary line: %s" % (
+                p.returncode, p.stderr.strip()[-2000:]), file=sys.stderr)
+            return 2
+        ncases, loaded, values, counts, refused, diffs = map(int, summary[0].groups())
+        if ncases != n or (plant is None and (loaded != n or refused != 0 or diffs != 0 or p.returncode != 0)):
+            print("fuzz seed %d: FAILED, %d differences over %d cases (%d loaded, %d refused at load)" % (
+                seed, diffs, ncases, loaded, refused))
+            return 1
+        if plant is None:
+            print("fuzz seed %d: OK, %d cases, %d values and %d counts compared, 0 differences" % (
+                seed, n, values, counts))
+            return 0
+        print("fuzz seed %d, planted %s: %s, %d differences over %d cases" % (
+            seed, plant, "caught" if diffs else "NOT CAUGHT", diffs, n))
+        return 0 if diffs else 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("dumps", nargs="*", help="dump directories (dump_world.py --out)")
     ap.add_argument("--edge-cases", metavar="OUT", help="write the synthetic edge cases to OUT")
+    ap.add_argument("--fuzz", type=int, metavar="N", help="compare N random cases with romp-spike layer2")
+    ap.add_argument("--seed", type=int, default=1, help="the --fuzz seed (default 1)")
+    ap.add_argument("--plant", choices=("end", "bytes"), help="--fuzz against romp-spike layer2 --plant NAME: the "
+                    "check passes when the plant is caught")
+    ap.add_argument("--bin", help="a built romp-spike for --fuzz (default: cargo build --release)")
+    ap.add_argument("--out", help="keep the --fuzz cases in this file (default: a temporary file, removed)")
     a = ap.parse_args(argv)
     if a.edge_cases:
         return edge_main(a.edge_cases)
+    if a.fuzz is not None:
+        if a.fuzz < 1:
+            ap.error("--fuzz N needs N >= 1")
+        return fuzz_main(a.fuzz, a.seed, a.plant, rust_binary(a.bin), a.out)
     if not a.dumps:
-        ap.error("name at least one dump directory, or --edge-cases OUT")
+        ap.error("name at least one dump directory, or --edge-cases OUT, or --fuzz N")
     l1 = load_l1()
     dw = l1.load_dw()
     first = os.path.realpath(a.dumps[0])

@@ -6,14 +6,14 @@
   "SEAM_PROSE_FLOOR": 80
  },
  "coverage": {
-  "turns": 104,
-  "segments": 153,
+  "turns": 105,
+  "segments": 154,
   "seamTails": 39,
   "keyHits": 54,
   "raises": 8,
-  "pieces": 180,
-  "splitCalls": 100,
-  "splits": 45
+  "pieces": 139,
+  "splitCalls": 96,
+  "splits": 41
  },
  "cases": [
   {
@@ -486,6 +486,75 @@
      "id": "eeeeeeee-0000-0000-0000-000000000002:100:11f6ad8e",
      "atomIdx": [
       0
+     ]
+    }
+   ],
+   "counts": {
+    "pieces": 0,
+    "splitCalls": 0,
+    "splits": 0
+   }
+  },
+  {
+   "name": "no inputs, trigger uuid empty, an atom with an empty uuid",
+   "kind": "segs",
+   "turn": {
+    "atoms": [
+     {
+      "type": "assistant",
+      "uuid": "a1",
+      "t": 100,
+      "session_id": "eeeeeeee-0000-0000-0000-000000000002",
+      "message": {
+       "role": "assistant",
+       "content": [
+        {
+         "type": "text",
+         "text": "x"
+        }
+       ],
+       "stop_reason": "end_turn"
+      }
+     },
+     {
+      "type": "assistant",
+      "uuid": "",
+      "t": 101,
+      "session_id": "eeeeeeee-0000-0000-0000-000000000002",
+      "message": {
+       "role": "assistant",
+       "content": [
+        {
+         "type": "text",
+         "text": "y"
+        }
+       ],
+       "stop_reason": "end_turn"
+      }
+     }
+    ],
+    "t": 100,
+    "end": 200,
+    "ended": true,
+    "id": "edge-turn",
+    "trigger": {
+     "uuid": ""
+    }
+   },
+   "store": null,
+   "expect": [
+    {
+     "t": 100,
+     "end": 200,
+     "trigger": "",
+     "atoms": [
+      "a1",
+      ""
+     ],
+     "id": "eeeeeeee-0000-0000-0000-000000000002:100:11f6ad8e",
+     "atomIdx": [
+      0,
+      1
      ]
     }
    ],

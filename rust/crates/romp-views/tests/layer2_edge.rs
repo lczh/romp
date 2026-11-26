@@ -1,5 +1,5 @@
 //! Layer 2 against Python's own answers on synthetic cases (tests/fixtures/layer2_edge.json, written by
-//! `python3 tools/rust-spike/dump_layer2.py --edge-cases <that path>`): kernel._segs_seam on 104 turns with stores and
+//! `python3 tools/rust-spike/dump_layer2.py --edge-cases <that path>`): kernel._segs_seam on 105 turns with stores and
 //! em.split_segment on the first segment of 5 more, built to reach the branches neither dumped world does (straddling
 //! and recursive seams, equal and int-vs-float times, absent and null seam text, the prose floor at 79/80/81 code
 //! points, placed echoes, every trigger shape, "%d" of float times, and the inputs on which Python raises).
@@ -85,7 +85,7 @@ fn every_case_answers_as_python_does() {
         }
     }
     assert!(diffs.is_empty(), "{} differences:\n{}", diffs.len(), diffs.join("\n"));
-    assert_eq!((loaded, refused), (99, 10));
+    assert_eq!((loaded, refused), (100, 10));
     assert_eq!((matched_raises, refused_raises), (5, 3), "Python's raises: matched as Raise, refused at load");
 }
 
