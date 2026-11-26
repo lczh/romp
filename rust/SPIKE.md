@@ -18,6 +18,9 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
 - Next action: S4.2, layer 2 (segmentation), scoped in "What layer 2 needs" below.
+  - In progress since 2026-11-26 as workflow run `wf_17b67763-a10` in worktree `~/romp-romp_fix-s42` (branch
+    `romp_fix-s42`), with an adversarial review. If a session dies, check that worktree's commits first, then resume
+    the run with Workflow `resumeFromRunId`.
   - Inputs: `python3 tools/rust-spike/dump_world.py --world small` (or `large`), then
     `python3 tools/rust-spike/dump_layer1.py DUMP`. Never commit a dump.
   - Checks: `romp-spike roundtrip DUMP`, `romp-spike layer1 DUMP` and
