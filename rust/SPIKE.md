@@ -19,20 +19,26 @@ the small world, a short fuzz seed. Every agent brief for this spike must say so
   the held aggregate carried across builds. A new oracle (`tools/rust-spike/dump_memo.py`) runs the REAL key in Python
   over scripted and random change sequences. Light checks, all on the small world and short seeds on this Mac: every
   session decision equals Python's (hit, or miss naming the same moved components, raise served or absent) in the
-  73-step scripted sequence (291 decisions) and in 600 random worlds of 8 steps (7,905 decisions), every memo-served and
-  fresh build byte for byte Python's, 0 differences; the six plants are each caught. Tuning: an in-tree FxHash for every
-  map of the views crate, fat LTO, one codegen unit, panic = abort; every existing comparison still 0 differences on the
-  small world. The heavy checks are ORCD job scripts in `tools/rust-spike/orcd/`. Their first smoke run on ORCD (at
-  d73c655bd) failed in a way that says nothing about the port: the cluster's copy of the code has no .git, so the dump
-  recorded its revision as null and every romp-spike step refused the snapshot at load. The second review round fixed
-  that and the rest of a fresh review ("The smoke run and the second review round" under "S6.1 memo port and tuning"):
-  the dump takes the revision from the REVISION file the runbook writes, every job output names its revision and a
-  refused or failed rerun can no longer leave an older run's outputs that verify, the mutant tasks fail on a build
-  failure, an error or a control that did not pass, a collate tool checks the pool, the cluster's Python comes from a
-  committed explicit spec whose every package is at least a week old, memory requests come from the smoke run's
-  measured peaks, and the memo's checks gained unsorted cleared lists and a 47th mutant (the slice left unsorted, caught
-  by the edge set and fuzz seed 1). Still not run anywhere: the large and large4 worlds' comparisons, the full fuzz
-  seeds, the 47-mutant sweep and S6's measurement re-run with the memo rows.
+  scripted sequences (3 cases, 79 steps, 315 decisions) and in 600 random worlds of 8 steps (8,031 decisions), every
+  memo-served and fresh build byte for byte Python's, 0 differences; the six plants are each caught. Tuning: an in-tree
+  FxHash for every map of the views crate, fat LTO, one codegen unit, panic = abort; every existing comparison still 0
+  differences on the small world. The heavy checks are ORCD job scripts in `tools/rust-spike/orcd/`. Their first smoke
+  run on ORCD (at d73c655bd) failed in a way that says nothing about the port: the cluster's copy of the code has no
+  .git, so the dump recorded its revision as null and every romp-spike step refused the snapshot at load. The second
+  review round fixed that and the rest of a fresh review ("The smoke run and the second review round" under "S6.1 memo
+  port and tuning"): the dump takes the revision from the REVISION file the runbook writes, every job output names its
+  revision and a refused or failed rerun can no longer leave an older run's outputs that verify, the mutant tasks fail
+  on a build failure, an error or a control that did not pass, a collate tool checks the pool, the cluster's Python
+  comes from a committed explicit spec whose every package is at least a week old, memory requests come from the smoke
+  run's measured peaks, and the memo's checks gained unsorted cleared lists and a 47th mutant (the slice left unsorted,
+  caught by the edge set and fuzz seed 1). The 47-mutant sweep then ran on ORCD at 6e7febc7b: 44 caught, the control
+  passed, and three missed by both checks (3, the live row's subagents in the `row` component; 22, the deps' re-take of
+  `usage`; 43, the LRU's touch on a get). None is equivalent; each was a gap, now closed: the edge set gained two steps
+  and a third case with the memo just full, which catch them with 4, 4 and 7 differences, and the fuzz two kinds,
+  recorded usage.json identities and just-full worlds, so fuzz seed 1 catches them too (52, 84 and 97); see "The mutant
+  sweep at 6e7febc7b and its three survivors" under "S6.1 memo port and tuning". The sweep must run again at this
+  revision (the fuzz's worlds changed). Not yet run on the cluster: the large and large4 worlds' comparisons, the full
+  fuzz seeds and S6's measurement re-run with the memo rows.
 - Before it: S6 done and merged into `romp_fix` from `romp_fix-s6`, and independently reproduced (deciding CPU ratio 5.37
   against the reported 5.24; memory ratio 0.249 against 0.248). The full alternated measurement ran on fresh dumps
   (8 runs per configuration, both interpreters, CPU on the small, large and large4 worlds, memory cold and after
@@ -2711,11 +2717,13 @@ derivation serves the previous entry when there is one; a departed session's ent
   _feed_key_with_deps, the real memo, fold, held aggregates and anchor table carried across builds; only the key's leaves
   are answered from the world's `keyFacts`, the way the S2 replay answers the recorded helpers. Per step it records every
   session's decision, the absent sessions, the feed's SHA-1s, the held walk's counters, the memo's entries and evictions,
-  and the same world built fresh. `--edge DUMP OUT` writes the small world's scripted sequence (the fixture
-  `romp-views/tests/fixtures/memo_edge.json`, 0.52 MB, regenerating byte for byte under another hash seed; checked by
-  `romp-spike/tests/memo_edge.rs`); `--fuzz N` draws worlds from dump_layer7's generator with random steps over every
-  input kind, each moved with and without its identity (half the worlds start with cleared ids under their sessions and
-  peers, so a `cleared` step can list one a second time); `--dump DUMP` runs a default sequence over a dump in place.
+  and the same world built fresh. `--edge DUMP OUT` writes the small world's scripted sequences (the fixture
+  `romp-views/tests/fixtures/memo_edge.json`, three cases since the mutant sweep, 0.75 MB, regenerating byte for byte
+  under another hash seed; checked by `romp-spike/tests/memo_edge.rs`); `--fuzz N` draws worlds from dump_layer7's
+  generator with random steps over every input kind, each moved with and without its identity (half the worlds start
+  with cleared ids under their sessions and peers, so a `cleared` step can list one a second time; since the mutant
+  sweep, half record usage.json's identity, and half the worlds of three sessions run with the memo just full and grow
+  one entry past it); `--dump DUMP` runs a default sequence over a dump in place.
   Where a fresh comparison is skipped, the step records the frame keys that differ (`keys` beside `frameDiffers`).
 - Measurement: `romp-spike measure cpu --memo` adds three rows (`memo`: every session a hit; `memoMiss`: the largest
   session misses on its transcript and derives over its held aggregate; `memoBuild`: the whole memo-served build);
@@ -2823,9 +2831,11 @@ they run). ORCD's x86_64 CPUs are not the Mac's M4 Max, so every ratio from ther
 the Mac's. Results go to the group pool (named in `~/manager/ENGAGING.md`, kept out of the repository), each directory
 checksummed.
 
-**What is not done.** Every cluster job at a revision that can pass (the one smoke run, at d73c655bd, could not: below):
-the large and large4 worlds' comparisons (the memo there is checked only on the small world so far), the full fuzz
-seeds, the mutant sweep and the measurement, so nothing here says what the memo or the tuning buys in CPU. The `peers`
+**What is not done.** Every cluster job at a revision that can pass (the one smoke run, at d73c655bd, could not: below),
+except the mutant sweep, which ran at 6e7febc7b and must run again at the revision that closed its three gaps ("The
+mutant sweep at 6e7febc7b and its three survivors" below): the large and large4 worlds' comparisons (the memo there is
+checked only on the small world so far), the full fuzz seeds and the measurement, so nothing here says what the memo
+or the tuning buys in CPU. The `peers`
 facts' host and remote name and the `subagents` component stay constant, since the replay has neither attached hosts nor
 subagent trees.
 
@@ -2986,6 +2996,116 @@ store's fuzz and the measurement, setup.sh outside a live job step) exits 2 with
 buildFailed (exit 1), and `collate.py mutants` flagged both; `collate.py --self-test` 22 cases, 0 wrong. Not run here:
 conda create, setup.sh past its refusal, the fuzz and measurement jobs' work, and the full workspace's tests (setup runs
 them on ORCD).
+
+**The mutant sweep at 6e7febc7b and its three survivors (2026-11-26).**
+
+*What the sweep is for.* A check that passes is evidence only if it would fail on a wrong port. The sweep makes 47
+deliberate one-edit mistakes in the port's memo (`tools/rust-spike/memo_mutants.py`), builds each under the `mutant`
+profile and runs both memo checks against it: the scripted edge set (`memo_edge.json`) and memo fuzz seed 1 (200 random
+worlds of 8 steps). A mistake neither check notices is one of two things: harmless by construction (equivalent: no input
+can make the mutated port decide, serve or count differently from Python), or a hole in the checks, where some input
+would show it and none of ours does.
+
+*The result at 6e7febc7b (on ORCD, the main session's run).* The checks caught 44 of the 47 mistakes, and the unmutated
+control passed both.
+
+| Status at 6e7febc7b | Mutants |
+|---|---|
+| caught | 44 |
+| missed | 3 (numbers 3, 22 and 43) |
+| crashed, timedOut, buildFailed, error | 0 |
+| the control | passed |
+
+None of the three is equivalent. For each, a short sequence of inputs makes the mutated port decide differently from
+Python, shown below on that mutant's own build (the `mutant` profile, in a scratch tree from `memo_mutants.py --apply`).
+Each was a gap in the checks, now closed in both the edge set and the fuzz. Rebuilt on this Mac, the three give 0
+differences on the edge set as committed at 6e7febc7b, the sweep's "missed" reproduced.
+
+*Mutant 3, "row: the subagents left out".* Python's `row` component (`_feed_row_key`) carries each live subagent's
+agentId, type and since, the fields the awaiting rows read, so a subagent appearing on a session's live row makes the
+session derive again. The mutant keys an empty list there and serves the old entry. No edge step ever touched a live
+row's subagents. The fuzz's `live-read` kind could, but about once in a thousand random steps (1 kind in 35, 1 field in
+9, 1 value in 3 that is a non-empty list, and only where it differs from the row's current list), and at seed 1 no draw
+showed it. Closed: the scripted case's last step gives s001's live row a subagent (Python misses on `row`, the mutant
+hits: 4 differences in 1 step, the decision and three held-walk counters), and a fuzz kind, `row-agents`, adds a
+subagent, moves one's since, or sets a field no card reads on one (served).
+
+*Mutant 22, "deps: usage not re-taken over the new entry".* After each derivation Python re-takes the key's `usage`
+component over the entry it has just derived (`_feed_key_with_deps`): usage.json's identity if that entry read the file
+(an entry reads it when its session is stopped on an API error, for the cap offer), else None. The mutant keeps the
+value taken over the previous entry. The two differ only when a derivation flips whether the entry reads usage.json
+while usage.json has an identity, and the difference shows one build later, when the session's key is computed over the
+new entry: Python hits, the mutant misses on `usage`. The edge set had exactly that flip (s001's API error appears), but
+its very next step moved usage.json's identity, so both sides missed on `usage` there and the mismatch was hidden. The
+fuzz's worlds record no file identities, so `usage` was None on both sides unless a `files` draw named usage.json.
+Closed: an "again" step between the two (Python serves s001, the mutant misses on `usage`: 4 differences in 1 step);
+half the fuzz worlds record usage.json's identity from the start; and a fuzz kind, `api-error`, flips a session's
+recorded API error and moves its transcript, so it derives at once and the next build, whatever it draws, is the check.
+
+*Mutant 43, "the LRU: a get is not a use".* The memo has a byte bound; past it, Python sheds the least recently served
+entry, where serving includes a hit. The mutant forgets hits, so it sheds the least recently put. Two facts hid it from
+every check. First, each build serves the alive sessions in one fixed order, so the memo either holds them all and sheds
+nothing or, once over the bound, sheds each session just before its turn (the textbook worst case of an LRU under a
+cyclic sweep), and in that state both orders shed the same entries. Second, with only two entries there is no choice to
+get wrong: the one not being put is shed. The order shows only when an entry grows past a bound the memo had just fit,
+with three or more entries, after some entry was put more recently than another was served. The edge set's bounded case
+(15,000 bytes against 17,470 of entries) is over its bound from the cold build on, and under the fuzz's fixed bounds
+(4,000 and 12,000 bytes) a growth past a bound the memo had just fit, with three entries held, was left to chance.
+Closed: a third edge case, the memo just full. Its bound is 18,000 bytes, just above the four settled entries' 17,470
+(s001 9,631, s002 4,257, s003 2,891, s004 691). Both sides size an entry as the length of its JSON; on the small world
+those are the 17,470 entry bytes the layer 6 comparison finds identical, and the unmutated port's entry and eviction
+counts equal Python's at every step of the case. After the peers settle, s001 and s002 hold the latest puts; then s001's
+display name grows by 201 characters (1,608 bytes of entry) and its put passes the bound. Python sheds s002, served in
+the last build just after s001 (which this build has served again); the mutant sheds s003, the oldest put. The generator
+stops unless Python shed s002 first, so the case cannot silently lose its point. The mutant gives 7 differences in 2
+steps (s002 a hit against Python's cold miss, 3 evictions against 4, three held counters, then the next step's
+decisions). In the fuzz, half the worlds of three sessions run with the memo just full (the bound is what the adoption
+build's entries took) and grow the middle session's display name at their first random step.
+
+*The instructive exception.* With just-full worlds and no forced growth, fuzz seed 1 caught mutant 43 in 7 steps at one
+draw and in none after an unrelated change reshuffled the draws: the growth was left to chance. The next version grew a
+random session at a random step and caught it in 1 step across seed 1's 14 just-full worlds. Most growths came after an
+earlier step had already pushed the memo over its bound (where, as above, the two orders agree) or grew a session whose
+LRU victim was also the oldest put. Growing the middle session right after the peers settle, where Python sheds the
+session after it while a put-ordered cache sheds the first one (the cold build put it first), took that to 26 steps at
+seed 1 and 6 at seed 2. A second slip, caught by counting what the steps did: the subagents kind was first named
+`live-agents`, and the generator's branch for every kind starting with `live` took it, so none of its 44 draws changed
+anything. It is `row-agents` now (27 of its 32 draws at seed 1 moved a live row's subagents, 21 of them a plain `row`
+miss).
+
+*What the generator change costs the other kinds.* Each random step draws one kind uniformly; two kinds were added (37
+in all), and one random step of each just-full world is `grow` instead of a draw, so each old kind's share fell from
+1/35 to 1/37, about 7 percent. At seed 1 (200 worlds, 1,200 random steps) the 34 old kinds other than `none` drew 34.0
+times each on average before (25 to 46) and 31.7 after (22 to 45); `none` drew 45 and 25 (beside the 400 steps every
+world starts with), and the new kinds `api-error` 38, `row-agents` 34 and `grow` 25. Per kind, before and after (a
+kind's variants folded in): board-facts 31, 37; cleared 29, 41; cleared-other 26, 29; clock 29, 26; closer 45, 28; debug
+37, 24; downtime 29, 26; facts 36, 39; fault 32, 22; files 35, 32; hide 35, 36; interrupting 38, 32; jactive 31, 41;
+jauth 26, 29; leave 36, 35; live-off 34, 39; live-read 30, 28; live-tag 30, 33; live-unread 25, 34; names 40, 27; nudge
+37, 30; peername 38, 30; recorded-stale 39, 31; rerecord 46, 25; stall 37, 32; store 39, 45; store-stale 32, 34; storeid
+37, 31; tident 34, 34; tinode 39, 28; tree 27, 33; tree-stale 35, 25; unrecord 32, 34; wait 29, 28. The swings are the
+draw's noise (about 6 either way at these counts). The bounds keep their 3:1:1 draw (the kernel's default, 4,000, 12,000
+bytes) outside the just-full worlds; at seed 1 after: 95, 41, 39 and 25 just full.
+
+*Checks run on this Mac (small world, one process at a time, scratch only).*
+- Builds: the release binary (35 s) and the three mutants under the `mutant` profile (about 18 s each).
+- The edge set, regenerated from a fresh small dump (the unchanged generator first gave the committed fixture back, byte
+  for byte apart from the dump's revision): 3 cases, 79 steps, 158 builds, 315 decisions (214 hits, 99 misses, 6
+  raises), 70 memo-served builds equal to fresh, 7 stale, 2 skips (the session order), 0 differences; byte for byte the
+  same under PYTHONHASHSEED 0 and 12345 (0.75 MB; before, 2 cases, 73 steps, 291 decisions, 0.52 MB).
+- The three mutants, on the old edge set, the new edge set and the new fuzz seed 1: mutant 3 gives 0, 4 differences in 1
+  step and 52 in 21; mutant 22 gives 0, 4 in 1 and 84 in 37; mutant 43 gives 0, 7 in 2 and 97 in 26 (seed 2: 17 in 6).
+- The unmutated port on memo fuzz seeds 1, 2 and 3 at 200 worlds with the new generator: 8,031 decisions (2,725, 2,683,
+  2,623), 0 differences; 77 skips (the session order 65, stateUnknown 12), none unexplained.
+- The six plants on the new edge set, each caught: `peers-settled` 18 differences in 4 steps (9 in 2 before; the new
+  case settles peers twice), `tag-strict` 4 in 1, `row-whole` 4 in 1, `raise-absent` 26 in 7, `no-forget` 10 in 4,
+  `stalls-all` 13 in 2.
+- Rust tests: `memo_edge`'s 2, with its expected summary line moved to the new counts.
+- Not run here: the other 44 mutants. Every step of the old edge set is still in the new one, with the same state before
+  it (the one inserted step is all hits, which change no stored key, and the rest are added at the ends), so the edge
+  set still catches each mutant it caught. The fuzz's worlds changed, though, so a mutant the sweep caught only through
+  the old seed 1 is unchecked until the sweep runs again at this revision on ORCD. If that run gives 47 of 47, a 0 from
+  the memo's checks on the large worlds (still to run) means the port serves exactly when Python serves, the condition
+  the steady-state CPU comparison rests on.
 
 ## Log
 
@@ -3335,3 +3455,16 @@ them on ORCD).
   - Checked: memo edge set 73 steps, 291 decisions, 0 differences (byte for byte under two hash seeds); memo fuzz seeds
     1 to 3 at 200 worlds, 7,905 decisions, 0 differences; the job scripts' passes and refusals on a scratch copy of the
     cluster layout.
+- 2026-11-26: S6.1's mutant sweep on ORCD (at 6e7febc7b, by the main session) and its three survivors ("The mutant
+  sweep at 6e7febc7b and its three survivors" under "S6.1 memo port and tuning"), light checks only on this Mac.
+  - Found: 44 of 47 mutants caught, the control passed; 3 (the live row's subagents), 22 (the deps' `usage` re-take)
+    and 43 (the LRU's touch on a get) missed by both checks. None is equivalent; each was a gap: no step moved a live
+    row's subagents, the one `usage` flip was followed at once by a `usage` move that hid it, and no case grew an entry
+    past a bound the memo had just fit with three entries held.
+  - Fixed: the edge set gained an "again" step after s001 starts reading usage.json, a closing step that gives s001's
+    live row a subagent, and a third case with the memo just full (bound 18,000 bytes, s001 grown past it); the fuzz
+    gained the `row-agents` and `api-error` kinds, usage.json identities in half the worlds and just-full worlds (half
+    of those with three sessions) whose first random step grows the middle session.
+  - Checked: the edge set 3 cases, 79 steps, 315 decisions, 0 differences (byte for byte under two hash seeds); the
+    three mutants caught by it (4, 4 and 7 differences) and by fuzz seed 1 (52, 84 and 97); memo fuzz seeds 1 to 3 at
+    200 worlds, 8,031 decisions, 0 differences; the six plants caught. The sweep must run again at this revision.

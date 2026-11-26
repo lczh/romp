@@ -301,8 +301,9 @@ class Runner:
         self.unknown = []
         km._HEAL_LOG.update(n=10 ** 9, h=10 ** 9)       # build_feed's once-per-rise heal note: stderr noise here
         # the adoption build (session-order.json, as dump_world's recipe), then every memo cleared, so the first step
-        # is a cold build whose frame the later ones share
+        # is a cold build whose frame the later ones share; the bytes its entries took, for a bound that just holds them
         self.build()
+        self.adopted_bytes = sum(ent[2] for ent in km._feed_memo.values())
         dw.clear_build_memos(km)
         km._node_anchor_last.clear()
 
@@ -573,6 +574,8 @@ def edge_steps(runner):
           S_(["sessions", s1, "recorded", "capSwitchOffer"], None)]),
         ("s001's transcript identity moves: s001 derives the error, its entry now reading usage.json (transcript)",
          lambda: files_op(snap, "transcript:" + s1, [0, 1781100500000000000, 3000, 0])),
+        ("again: served (s001's stored key took `usage` over the entry it just derived, which reads usage.json, not "
+         "over the previous entry, which did not: the key computed now, over that entry, equals it)", []),
         ("usage.json's identity moves: s001 derives (usage)", lambda: files_op(snap, "usage", [32, 1, 1, 1])),
         ("the capped window moves on: s001 derives (offer)",
          lambda: board_fact_op(snap, "capOpen", {"window": "seven_day", "resetsAt": now + 86400})),
@@ -586,6 +589,9 @@ def edge_steps(runner):
         ("again: still absent (the key moved nothing, but there is no entry to hit)", []),
         ("the helper is recorded again: s004 derives", None),
         ("the clock moves to a float: served, restamped", [S_(["world", "now"], float(now) + 900.5)]),
+        ("s001's live row gains a subagent (its agentId, type and since are what the awaiting rows read): s001 derives "
+         "(row)",
+         [S_(["liveMap", s1, "subagents"], [{"agentId": "a1", "type": "general-purpose", "since": now - 40}])]),
     ]
     return steps
 
@@ -671,27 +677,31 @@ def _store_back(snap, sid):
 
 
 # ───────────────────────────── random sequences ─────────────────────────────
-def fz_ops(rng, snap, trees, step, kept):
+def fz_ops(rng, snap, trees, step, kept, force=None):
     """One random step's edits over a world (each kind of input the key reads, moved with and without its identity),
-    with the helper a `rerecord-stash` step took the step before put back, whatever this step draws."""
+    with the helper a `rerecord-stash` step took the step before put back, whatever this step draws. `force` names the
+    kind instead of drawing one (a just-full world's `grow` step)."""
     back = kept.pop("back", None)
-    kind, ops = _fz_kind_ops(rng, snap, trees, step, kept)
+    kind, ops = _fz_kind_ops(rng, snap, trees, step, kept, force)
     if back is not None and back in kept.get("rec", {}):
         ops = list(ops) + [S_(["sessions", back[0], "recorded", back[1]], kept["rec"].pop(back))]
         kept["backs"] = kept.get("backs", 0) + 1
     return kind, ops
 
 
-def _fz_kind_ops(rng, snap, trees, step, kept):
-    """fz_ops's step: one kind drawn and its edits."""
+def _fz_kind_ops(rng, snap, trees, step, kept, force=None):
+    """fz_ops's step: one kind drawn (or `force`) and its edits."""
     sids = sids_of(snap)
     sid = rng.choice(sids) if sids else None
     now = snap["world"]["now"]
     kinds = ["none", "clock", "tident", "tinode", "tree", "tree-stale", "store", "store-stale", "storeid", "fault",
              "live-unread", "live-read", "live-tag", "live-off", "names", "peername", "cleared", "cleared-other", "wait",
              "jauth", "jactive", "hide", "downtime", "debug", "interrupting", "closer", "stall", "nudge", "facts",
-             "files", "board-facts", "recorded-stale", "leave", "unrecord", "rerecord"]
-    kind = rng.choice(kinds)
+             "files", "board-facts", "recorded-stale", "leave", "unrecord", "rerecord",
+             # S6.1's mutant sweep: no draw moved a live row's subagents often enough (mutant 3), and none flipped an
+             # entry's read of usage.json and then left the session alone for a build (mutant 22)
+             "row-agents", "api-error"]
+    kind = force or rng.choice(kinds)
     ops = []
     S = snap["sessions"].get(sid) if sid else None
     ver = 1781100000000000000 + step * 1000 + rng.randint(0, 999)
@@ -856,6 +866,40 @@ def _fz_kind_ops(rng, snap, trees, step, kept):
         if "apiError" in rec:
             ops = [S_(["sessions", sid, "recorded", "apiError"], rng.choice(
                 ({"status": 529, "message": "Overloaded"}, None, {"status": 401, "authErr": True})))]
+    elif kind == "api-error":
+        # the recorded api error flips (one where there was none, none where there was one) and the transcript moves,
+        # so the session derives now and its entry starts or stops reading usage.json (the cap offer); the next build,
+        # whatever it draws, then shows whether the stored key took `usage` over this entry or the one before it
+        rec = S["recorded"]
+        if "apiError" in rec:
+            ops = [S_(["sessions", sid, "recorded", "apiError"], None if rec["apiError"] else rng.choice(
+                ({"status": 529, "message": "Overloaded"}, {"status": 401, "authErr": True})))] + tident()
+    elif kind == "row-agents":
+        # the live row's subagents, whose (agentId, type, since) the `row` component keys: one added or one's since
+        # moved (s derives), or a field no card reads set on one (served)
+        row = snap["liveMap"].get(sid)
+        if row is not None:
+            agents = [dict(a) for a in row.get("subagents") or [] if isinstance(a, dict)] \
+                if isinstance(row.get("subagents"), list) else []
+            draw = rng.random()
+            if not agents or draw < 0.5:
+                agents.insert(rng.randint(0, len(agents)), {"agentId": "a%d" % step, "type": rng.choice(
+                    ("general-purpose", "explore")), "since": now - step})
+            elif draw < 0.75:
+                rng.choice(agents)["since"] = now - 1000 - step
+                kind += "-since"
+            else:
+                rng.choice(agents)["lastTool"] = "t%d" % step
+                kind += "-unread"
+            ops = [S_(["liveMap", sid, "subagents"], agents)]
+    elif kind == "grow":
+        # never drawn: one step of each just-full world (fuzz_main). The middle session's display name grows by 20 to
+        # 200 characters, so it derives (names) and its entry grows wherever the name is shown, and its put passes the
+        # bound. Python sheds the next session in alive order (the least recently served); a cache ordered by its puts
+        # alone sheds the first session, put before the last one by the cold build, unless a later put reordered them
+        i = len(sids) // 2
+        name = snap["alive"][i].get("name")
+        ops = [S_(["alive", i, "name"], (name if isinstance(name, str) else "") + "-" + "x" * rng.randint(20, 200))]
     elif kind == "leave":
         if len(sids) > 1:
             i = sids.index(sid)
@@ -923,6 +967,19 @@ def seed_cleared(rng, snap):
     ids = sorted(ids)                                   # (a set's order is the hash seed's: sorted, then shuffled)
     rng.shuffle(ids)
     snap["board"]["cleared"] = ids
+
+
+def seed_usage(rng, snap):
+    """usage.json's identity recorded from the start in half the worlds. The generator records no file identities, so
+    the key's `usage` component was None whether or not an entry read usage.json, and a stored key that took `usage`
+    over the wrong entry (S6.1's mutant 22) moved nothing; only a `files` draw naming usage.json made it matter."""
+    if rng.random() >= 0.5:
+        return
+    if not isinstance(snap.get("keyFacts"), dict):
+        snap["keyFacts"] = {}
+    if not isinstance(snap["keyFacts"].get("files"), dict):
+        snap["keyFacts"]["files"] = {}
+    snap["keyFacts"]["files"]["usage"] = [rng.randint(1, 99), 1781000000000000000, 1, 1]
 
 
 def memo_valid(snap):
@@ -1011,6 +1068,48 @@ def setup(tmp):
     return l7, l6, l5, dw, km, rec
 
 
+LRU_BOUND = 18000
+
+
+def lru_steps(r):
+    """The memo just full: which entry the byte bound sheds depends on the gets (S6.1's mutant sweep: mutant 43, a get
+    that does not move the entry to the LRU tail, survived both checks, since no case shed an entry that had been served
+    more recently than another was put). The bound, 18,000 bytes, holds the small world's four settled entries (17,470:
+    s001 9,631, s002 4,257, s003 2,891, s004 691). After the peers settle, s001 and s002 hold the latest puts and s003
+    and s004 the oldest (the cold build's), while every build serves all four in alive order. Then s001's entry grows
+    past the bound at its put: Python sheds the least recently served, s002 (served in the last build after s001, which
+    this build has just served), where a cache ordered by puts alone would shed s003. The steps check that Python
+    did."""
+    snap = r.snap
+    s1, s2 = sids_of(snap)[:2]
+    name = snap["alive"][0]["name"]
+    steps = [r.step([], "the cold build under an 18,000-byte bound: the four entries (17,470 bytes) fit"),
+             r.step([], "again: s001 and s002 derive once more (their peers settle) and are put again, after s003 and "
+                        "s004; every session is served in alive order, s001 first")]
+    e = steps[-1]["expect"]
+    if e["memo"] != {"entries": 4, "evict": 0} or [d for _s, d in e["decisions"]] != [
+            {"miss": ["peers"]}, {"miss": ["peers"]}, {"hit": True}, {"hit": True}]:
+        raise SystemExit("dump_memo: the just-full case's second build is not s001 and s002 re-put, all four held: %r"
+                         % e)
+    steps.append(r.step([S_(["alive", 0, "name"], name + "-" + "x" * 200)],
+                        "s001's display name grows by 201 characters (1,608 bytes of entry): s001 derives (names) and "
+                        "its put passes the bound, which sheds the least recently served entry: s002 (served after "
+                        "s001 in the last build, and s001 has just been served again), not s003, the least recently "
+                        "put; each later session then finds its entry shed in turn (the LRU's worst case, a cyclic "
+                        "sweep over more than fits)"))
+    e = steps[-1]["expect"]
+    if dict(e["decisions"]).get(s2) != {"miss": ["cold"]}:
+        raise SystemExit("dump_memo: the just-full case's growth did not shed s002 first: %r" % e["decisions"])
+    steps.append(r.step([S_(["alive", 0, "name"], name)],
+                        "s001's name back: s001 derives cold (the shedding reached it), s002 once more (its cold "
+                        "derivation in the last build left its peer unsettled), s003 and s004 are served, and the four "
+                        "fit again"))
+    e = steps[-1]["expect"]
+    if e["memo"] != {"entries": 4, "evict": 0} or dict(e["decisions"]).get(s1) != {"miss": ["cold"]}:
+        raise SystemExit("dump_memo: the just-full case does not settle back to four entries: %r" % e)
+    return steps
+
+
 def edge_main(dump, out):
     tmp = tempfile.mkdtemp(prefix="romp-spike-memo-edge-")
     try:
@@ -1038,7 +1137,12 @@ def edge_main(dump, out):
                   r2.step([], "again")]
         cases.append({"name": "the small world under a small byte bound", "snapshot": base[0], "trees": base[1],
                       "memoBound": 15000, "segBound": r2.seg_bound, "steps": steps2})
-        unknown = r.unknown + r2.unknown
+        # the LRU's order: a get is a use (S6.1's mutant sweep, mutant 43)
+        snap3, trees3 = copy.deepcopy(base[0]), copy.deepcopy(base[1])
+        r3 = Runner(l7, l6, dw, km, snap3, trees3, memo_bound=LRU_BOUND)
+        cases.append({"name": "the small world with the memo just full", "snapshot": base[0], "trees": base[1],
+                      "memoBound": LRU_BOUND, "segBound": r3.seg_bound, "steps": lru_steps(r3)})
+        unknown = r.unknown + r2.unknown + r3.unknown
         if unknown:
             raise SystemExit("dump_memo: the key stat files the harness does not answer: %r" % sorted(set(unknown))[:5])
         if rec["spawns"] or rec["refused_writes"] or rec["thread_starts"]:
@@ -1105,7 +1209,7 @@ def fuzz_main(n, seed, nsteps, plant, binary, out):
         l3 = l5.load_l4().load_l3()
         l2 = l3.load_l2()
         rng = random.Random(seed)
-        cases, kinds = [], {}
+        cases, kinds, bounds = [], {}, {}
         serial = 0
         while len(cases) < n:
             snap, trees = l7.fz_world7(rng, km, l6, l5, l3, l2, serial)
@@ -1114,12 +1218,26 @@ def fuzz_main(n, seed, nsteps, plant, binary, out):
             if not memo_valid(snap):
                 continue
             seed_cleared(rng, snap)
+            seed_usage(rng, snap)
             base = (copy.deepcopy(snap), copy.deepcopy(trees))
             bound = rng.choice((None, None, None, 4000, 12000))
-            r = Runner(l7, l6, dw, km, snap, trees, memo_bound=bound)
+            # the memo just full, in half the worlds of three sessions: the bound is the bytes the adoption build's
+            # entries took, and the first random step (`grow`) makes the middle session's entry grow past it. Which
+            # entry its put sheds is the LRU order's (a get is a use; S6.1's mutant 43). Only three entries can tell
+            # that order from the order of the puts (of two, the one not being put is the only one to shed), and only
+            # an entry growing past the bound shows it: every build serves the sessions in one order, so a memo either
+            # holds them all or, past the bound, sheds each in turn (the LRU's cyclic worst case), whatever the order
+            full = len(sids_of(snap)) >= 3 and rng.random() < 0.5
+            r = Runner(l7, l6, dw, km, snap, trees, memo_bound=None if full else bound)
+            if full:
+                r.memo_bound = r.adopted_bytes
+            label = "full" if full else str(bound)
+            bounds[label] = bounds.get(label, 0) + 1
+            grow_at = 2 if full else None          # the first random step, right after the peers settle
             steps, kept = [], {}
             for k in range(nsteps):
-                kind, ops = ("none", []) if k < 2 else fz_ops(rng, snap, trees, k, kept)
+                kind, ops = ("none", []) if k < 2 else fz_ops(rng, snap, trees, k, kept,
+                                                               force="grow" if k == grow_at else None)
                 kinds[kind] = kinds.get(kind, 0) + 1
                 steps.append(r.step(ops, "step %d: %s" % (k, kind)))
             if kept.get("backs"):
@@ -1136,6 +1254,7 @@ def fuzz_main(n, seed, nsteps, plant, binary, out):
                   seed, n, nsteps, t["hits"], t["misses"], t["raises"], t["freshEqual"], t["stale"],
                   time.monotonic() - t0, os.path.getsize(path) / 1e6))
         print("  step kinds: %s" % json.dumps(dict(sorted(kinds.items()))))
+        print("  memo bounds (worlds): %s" % json.dumps(dict(sorted(bounds.items()))))
         print_skips(t)
         g, rc = run_rust(rust_binary(binary), path, plant)
         if g is None:
