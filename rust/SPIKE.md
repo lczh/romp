@@ -146,7 +146,16 @@ the small world, a short fuzz seed. Every agent brief for this spike must say so
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: S6.1's cluster work is done and written up ("S6.1 results (cluster)", the figures to quote in its "The
+- Next action: none. The spike is PAUSED by lczh (2026-11-26, after the A Fellows access ended): "don't resume rust
+  work, you can run the deciding speed measurement, and the local rust commits go to github". The Mac run is done ("The
+  Mac gate run" at the end of "S6.1 results (cluster)"). By the decision rule fixed before S6, the CPU gate passes
+  clearly on the gate's platform: 6.26 (6.07 to 7.60, n=8), up from S6's 5.24 before the tuning. With the memo on both
+  sides, at production's miss rate (reported, not deciding), the port is 4.91 times cheaper per build (4.52 to 6.68), just
+  under 5. `romp_fix-memo2` is merged into `romp_fix`, and `romp_fix` is on GitHub (a branch, no PR). S7, the report, is
+  not started and waits for lczh. Its inputs: both gates' numbers (CPU above; memory failed at 0.476 on real
+  transcripts), and the stakes (the feed build took at most 0.15% of one core in production's window).
+- Next action at the cluster stage (kept as the record): S6.1's cluster work is done and written up ("S6.1 results (cluster)", the figures to quote in its "The
+ ("S6.1 results (cluster)", the figures to quote in its "The
   fair-placement measurement"; the runbook is in `tools/rust-spike/orcd/setup.sh`'s header, and the counted runs
   departed from it in one way: the jobs wrote only to scratch, and each stage was copied to the group pool from the
   login node and verified again there, after the pool's NFS mount hung on some compute nodes). (1) The cluster puts the
@@ -3465,8 +3474,54 @@ nothing at most 0.15%. The memory gate already failed on real transcripts (0.476
 porting the feed rests on a fraction of a percent of one core at production's load, and S7 should set that number beside
 the ratios. A Mac run can move the ratio; it cannot move those stakes.
 
+#### The Mac gate run (2026-11-26, lczh's go-ahead)
+
+*What it answers.* Every cluster figure above is indicative, because the gate is judged on the Mac romp runs on (arm64
+CPython 3.13.18, Apple M4 Max), whose processor and interpreter both differ from the cluster's. This run measured the
+tuned build there once, with the fair-placement layout.
+
+*What ran.* At `aec849826` (`romp_fix`, which has the measured code of `c57237149`): a release build, then a fresh
+large-world dump (miniforge CPython 3.12.11, the interpreter the port's tables match). Then `measure_drive.py --dump
+large --runs 8 --python <3.13.18 arm64> --cpu --memo --instrumented 11`, with the production window from
+`rust/notes/s6-runs.json`, as `measure.sbatch` runs it. The run took 20:50 to 20:52 UTC: 16 runs, 0 failed. The other
+sessions were running beside it (load average 5 to 7.5, 87 to 88% of memory free). The raw runs are in
+`rust/notes/s61-mac-runs.json`, and `--summarize` recomputes every figure below from them.
+
+*The result in one sentence.* On the Mac the gate passes clearly by its own rule. With the memo on both sides, the port
+is about 4.9 times cheaper per build at production's miss rate, just short of 5.
+
+| large world, arm64 3.13.18 | Python | port | ratio (median, min to max) |
+|---|---|---|---|
+| deciding: heldWarm region / held (the gate) | | | 6.26 (6.07 to 7.60), pass |
+| memo hit | 1.294 ms | 0.145 ms | 8.82 (8.72 to 9.51) |
+| one miss on the largest session | 5.313 ms | 1.163 ms | 4.32 (3.89 to 6.26) |
+| production blend (0.46 misses a build) | 3.159 ms | 0.618 ms | 4.91 (4.52 to 6.68) |
+
+*Why believe it.*
+- The checks the fair layout added all held: no full collection in any memo build, and the miss's held walk was equal on
+  both sides ([[1, 2999, 1, 0, 0]]).
+- The position pattern matched: even over odd 0.99 and 1.01 for the port's hit and miss, against Python's 0.99 and 1.07.
+- It agrees with the cluster's fair run 2 to within the CPUs' differences: blend 4.91 against 4.75, deciding 6.26
+  against 6.33, hit 8.82 against 7.18.
+
+*What leans which way.* The wrapper check flagged Python's memo rows at 1.14 (hit) and 1.14 (miss), and memoServed at
+1.12. Corrected, that excess can only lower Python's side. The excess is 0.38 ms on the hit and 0.84 ms on the miss,
+measured against the plain builds (3.14 and 6.70 ms). In ratio-of-medians terms the blend is 5.12 as measured. If the
+excess is spread evenly over the build, it becomes 4.48; if all of it falls inside the timed region, 4.15. Scaled to the
+paired median, the blend therefore lies between about 4.0 and 4.91. The file stats
+both sides would pay in production are left out, which favors the port. A Rust hit's deep copy favors Python. All the
+other leans listed under "What leans which way, now" stand.
+
+*The larger question.* The gate written before S6 passes on the Mac, and by more than before the tuning (6.26 against
+5.24). The steady state production would see, with the memo on both sides, is just under 5. Neither figure changes the
+stakes: Python's memoized build is about 3.2 ms here, and the feed's build work was at most 0.15% of one core in
+production's window. The memory gate failed on real transcripts (0.476 against one third). So the CPU case for porting
+the feed still rests on a fraction of a percent of one core.
+
 ## Log
 
+- 2026-11-26: the Mac gate run (lczh's go-ahead): deciding row 6.26 (pass), production blend 4.91; spike paused by lczh;
+  `romp_fix` pushed to GitHub.
 - 2026-11-25: spike started (lczh: "when we are on the A Fellows org, start working on the rust migration, pace
   yourself"). Toolchain installed and pinned.
 - 2026-11-25: S0 scaffold. S1 romp-json. One finding: Rust's shortest float formatting (`{:e}`) rounds an exact
