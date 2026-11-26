@@ -61411,7 +61411,9 @@ SUMMARY_ANCHOR_MEMO_BYTES = _summary_anchor_memo_bound()
 _SUMMARY_ANCHOR_MEMO = collections.OrderedDict()   # key -> ((uuid, quote), size): the order is age, a hit moves to the end
 _SUMMARY_ANCHOR_STATS = {"hit": 0, "miss": 0, "evict": 0, "fault": 0, "entries": 0, "bytes": 0, "bound": SUMMARY_ANCHOR_MEMO_BYTES}
 #                          fault: a candidate atom whose body could not be read (a LazyBodyRead, a rotated file): skipped, counted
-#                          the key: (fsid, nid, seg key, the line's hash, the turn's end): one text read per brief per segment
+#                          the key: (fsid, nid, seg key, the line's hash, the turn's end, stub_ok, the segment's and the
+#                          turn's atom uuids, hashed): one text read per brief per segment (the atoms since 2026-11-26: see
+#                          _summary_text_anchor)
 
 
 def _summary_anchor_memo_get(key):
@@ -61442,6 +61444,16 @@ def _summary_anchor_memo_report():
     """The memo's counters with its occupancy and bound: GET /perf memos.summaryAnchor (entries, bytes, bound, hit,
     miss, evict)."""
     return dict(_SUMMARY_ANCHOR_STATS, entries=len(_SUMMARY_ANCHOR_MEMO), bound=SUMMARY_ANCHOR_MEMO_BYTES)
+
+
+def _atom_uuids(atoms):
+    """The uuids of `atoms` in order, as a tuple, building no atom: a restored turn's em.LazyAtoms (and a segment's view
+    of one) answers from its index (LazyAtoms.uuids: one row decode each at the list's first ask, the tuple kept on the
+    list after, a view slicing its parent's), a plain list from its atoms. The summary anchor memo's key reads it
+    (2026-11-26)."""
+    if isinstance(atoms, em.LazyAtoms):
+        return tuple(atoms.uuids())
+    return tuple(a.get("uuid") for a in atoms or ())
 
 
 def _text_atoms(atoms):
@@ -61519,7 +61531,19 @@ def _summary_text_anchor(turn_seg, line, memo_key=None, stub_ok=False):
     turn, seg_atoms = turn_seg
     key = None
     if memo_key is not None:
-        key = tuple(memo_key) + (hash(str(line or "")), (turn or {}).get("end") or (turn or {}).get("t"), bool(stub_ok))
+        # The key names the atoms the search reads, the segment's and the turn's, by uuid in order (2026-11-26, found in
+        # review and reproduced on these functions). It used to stop at the segment's key and the turn's end, and a seam
+        # that splits the turn changes neither (the head keeps its key, the turn its end) while it moves the tail's text
+        # atoms out of the segment's candidates into the rest of the turn's: the build after a seam was served the
+        # unsplit segment's landing (its newest atom carrying the sentence, now in the tail) where a fresh search lands
+        # in the head. With both uuid sequences in the key a hit is a search over the same atoms, whatever moved them
+        # (a seam, a placed echo, a rewritten transcript); a body is the same text for the same uuid (the memo's
+        # standing premise), so a hit still saves every body read and quote locate. The uuids are read without building
+        # an atom (_atom_uuids), so a hit on a restored turn materializes nothing, as before; it does decode each row of
+        # the turn once for its uuid, at the turn's first ask, and the list keeps the tuple after (LazyAtoms.uuids; before
+        # it kept it, a restored hit decoded every row of the turn and the segment each time: 9 to 14 ms on 2,002 atoms).
+        key = tuple(memo_key) + (hash(str(line or "")), (turn or {}).get("end") or (turn or {}).get("t"), bool(stub_ok),
+                                 hash(_atom_uuids(seg_atoms)), hash(_atom_uuids((turn or {}).get("atoms"))))
         hit = _summary_anchor_memo_get(key)
         if hit is not None:
             return hit

@@ -282,5 +282,90 @@ class TheBriefClickEndToEnd(unittest.TestCase):
         self.assertIsNone(row["summaryAnchorQuote"])
 
 
+class TheSeamAfterABuild(unittest.TestCase):
+    """A seam stamped after a build never lets the landing memo serve the unsplit segment's answer (2026-11-26, found in
+    review). The memo's key stopped at the segment's key and the turn's end; a seam that splits the turn changes neither
+    (the head keeps its key, the turn its end), so the build after the seam landed the card's brief on the tail's atom
+    the unsplit search had found, while a fresh search over the head lands on the head's own. One turn, one segment:
+    the prompt, a text atom carrying the brief's opening sentence, a shell call, a text atom, a shell call, and the
+    wrap-up carrying the sentence again; the seam at +5 splits it after the second text atom. SYNTHETIC fixtures, the
+    file's private synthetic sid."""
+    G1 = SID + ":g1"
+    BRIEF = "The exporter keeps both clients now. The session asks which client the tests should target."
+
+    def setUp(self):
+        km._downtime[:] = []
+        self.td = tempfile.TemporaryDirectory()
+        td = Path(self.td.name)
+        cdir = td / "launchdir"
+        cdir.mkdir()
+        proj = td / "projects"
+        import re as _re
+        pdir = proj / _re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(cdir)))
+        pdir.mkdir(parents=True)
+        recs = [uline(T0, "land the exporter change", "u1"),
+                aline(T0 + 1, "The exporter keeps both clients now. I checked the call sites and the tests first.", "a1", "u1"),
+                tline(T0 + 2, "t1", "a1"),
+                aline(T0 + 3, "Next I will look at the glossary file and the history budget, then the exporter.", "a2", "t1"),
+                tline(T0 + 7, "t2", "a2"),
+                aline(T0 + 8, "The exporter keeps both clients now. Which client should the tests target, old or new?", "a3", "t2")]
+        for r in recs[1:-1]:
+            r["message"].pop("stop_reason", None)      # one turn: only the wrap-up ends it
+        self.tpath = pdir / (SID + ".jsonl")
+        self.tpath.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+        names = td / "names"
+        names.mkdir()
+        (names / SID).write_text("web\t%s\t#abcdef\n" % str(cdir))
+        self.saved = (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE,
+                      km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD, jd.gist_llm)
+        jd.gist_llm = lambda p: ""
+        km._autonudge_cache.clear()
+        km._GLOBAL_CLAUDE_MD = td / "no-global-claude.md"
+        jd.NAMES, jd.PROJECTS = names, proj
+        jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR = td / "captions", td / "archive", td / "goals"
+        jd.STATE = td
+        km.NAMES = names
+        km._live_map = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
+                                     "context": None, "compactPct": None, "color": None}}
+        jd.GOALDIR.mkdir(parents=True, exist_ok=True)
+        self.session = jd.parsed_session(SID, [str(self.tpath)], NOW)
+        km._SUMMARY_ANCHOR_MEMO.clear()
+
+    def tearDown(self):
+        (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE,
+         km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD, jd.gist_llm) = self.saved
+        km._autonudge_cache.clear()
+        self.td.cleanup()
+
+    def _build(self, store_extra):
+        top = node(self.G1, "Land the exporter change", trail=[self.seg0], mt=T0 + 60, blocked=True,
+                   blockWhy="a question the user must answer", blockSummary=self.BRIEF, summaryAnchor=None, briefedMt=T0 + 60,
+                   log=[{"ev_t": T0 + 60, "src": "closer", "kind": "block", "at": T0 + 60, "why": "a question the user must answer"}])
+        (jd.GOALDIR / (SID + ".json")).write_text(json.dumps(dict({
+            "rompUuid": SID, "seq": 1, "lastNode": self.G1, "nodes": {self.G1: top}, "placements": {},
+            "status": {self.G1: "blocked"}}, **store_extra)))
+        km._parse(str(self.tpath), SID, NOW)
+        return next(a for a in km.build_feed(NOW)["asks"] if a.get("itemId") == self.G1)
+
+    def test_the_build_after_a_seam_equals_a_fresh_search_over_the_split_segment(self):
+        turn = self.session["turns"][0]
+        segs = jd._segs(turn, {})
+        self.assertEqual([[a["uuid"] for a in s["atoms"]] for s in segs], [["u1", "a1", "t1", "a2", "t2", "a3"]], "one turn, one segment")
+        self.seg0 = segs[0]["id"]
+        first = self._build({})
+        self.assertEqual((first["column"], first["distillState"]), ("needs_input", "blocked"), "the brief shows and its click is wired")
+        self.assertEqual(first["summaryAnchorUuid"], "a3", "build 1: the unsplit segment's newest atom carrying the sentence")
+        seams = {"seams": [{"t": T0 + 5, "top": self.G1, "text": "Land the exporter change", "segs": [jd._seg_key(self.seg0)]}]}
+        split = jd._segs(turn, seams)
+        self.assertEqual([[a["uuid"] for a in s["atoms"]] for s in split], [["u1", "a1", "t1", "a2"], ["t2", "a3"]],
+                         "the seam splits the turn after the second text atom")
+        self.assertEqual(jd._seg_key(split[0]["id"]), jd._seg_key(self.seg0), "the head keeps the key the trail names")
+        fresh = km._summary_text_anchor((turn, split[0]["atoms"]), self.BRIEF)
+        self.assertEqual(fresh[0], "a1", "a fresh search over the head lands on the head's own atom carrying the sentence")
+        second = self._build(seams)
+        self.assertEqual((second["summaryAnchorUuid"], second["summaryAnchorQuote"]), fresh,
+                         "build 2 lands where a fresh search does, never on the memo's answer for the unsplit segment")
+
+
 if __name__ == "__main__":
     unittest.main()

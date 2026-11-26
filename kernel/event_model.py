@@ -8023,8 +8023,22 @@ class LazyAtoms(list):
         return a
 
     def uuids(self):
-        """The atoms' uuids without building them."""
-        return [self._index.uuid_of(r) for r in self._rows]
+        """The atoms' uuids without building them, as a fresh list: one row decode each (LazyIndex.uuid_of) at the first
+        call, kept on the list as a tuple after it (_uuid_tuple), as tool_ids keeps its set."""
+        return list(self._uuid_tuple())
+
+    def _uuid_tuple(self):
+        """The uuids as a tuple kept on the list after the first call (2026-11-26): the rows never change (release() resets
+        slots, not rows), and the list is shared by every parse its assembly entry serves, so the tuple outlives the call.
+        The reader is the summary anchor memo's key (the kernel's _atom_uuids), which asks on every brief landing, hit or
+        miss, and used to decode every row of the turn and of the segment each time (measured on a synthetic restored turn
+        of 2,002 atoms in one segment: 4,004 row decodes and 9 to 14 ms a hit over three runs; kept, no decode and 0.03 ms).
+        A broken row raises here, as every row decode does (_row), and nothing is kept. Two threads computing it at once
+        store equal tuples. The tuple holds the record rows' own uuid strings, a pointer a row."""
+        got = self.__dict__.get("_uuids")
+        if got is None:
+            got = self._uuids = tuple(self._index.uuid_of(r) for r in self._rows)
+        return got
 
     def user_facts(self):
         """[(slot, atom-or-facts)] for the USER rows in order, building nothing: a slot already built yields its atom, an
@@ -8191,6 +8205,10 @@ class _LazyView(LazyAtoms):
         return a
     def _unbuilt(self):
         return any(list.__getitem__(self._parent, self._off + j) is _UNMAT for j in range(len(self)))
+    def _uuid_tuple(self):
+        # the parent's kept tuple, sliced to this view's rows (2026-11-26): past the parent's first call a view decodes no
+        # row, and the summary anchor memo's key asks for the segment's uuids beside the turn's
+        return self._parent._uuid_tuple()[self._off:self._off + len(self)]
     def __getitem__(self, i):
         if isinstance(i, slice):
             start, stop, step = i.indices(len(self))

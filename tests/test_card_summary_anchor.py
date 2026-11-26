@@ -132,6 +132,80 @@ class TheTextAtom(unittest.TestCase):
         self.assertEqual(first, again)
         self.assertEqual(first[0], "t5")
 
+    def test_a_seam_after_a_build_never_lets_the_memo_serve_the_unsplit_segments_landing(self):
+        # 2026-11-26, found in review: the memo's key stopped at the segment's key and the turn's end, and a seam that
+        # splits the turn changes neither (the head keeps its key, the turn its end), so the build after the seam was
+        # served the unsplit segment's landing. Build, add a seam, build again: the second build equals a fresh search.
+        sid = "11111111-2222-3333-4444-555555555555"
+        line = "The exporter keeps both clients now. Tests run against the old one."
+        prompt = {"type": "user", "author": "human", "uuid": "u1", "t": T0, "session_id": sid,
+                  "message": {"role": "user", "content": "land the exporter change"}}
+        atoms = [prompt,
+                 text("a1", T0 + 1, "The exporter keeps both clients now. I checked the call sites and the tests first."),
+                 tool("t1", T0 + 2),
+                 text("a2", T0 + 3, "Next I will look at the glossary file and the history budget, then the exporter."),
+                 tool("t2", T0 + 7),
+                 text("a3", T0 + 8, "The exporter keeps both clients now. The tests run against the old one, as asked.")]
+        turn = {"t": T0, "end": T0 + 8, "trigger": {"uuid": "u1"}, "atoms": atoms}
+        segs = km._segs_seam(turn, {})
+        self.assertEqual([[a["uuid"] for a in s["atoms"]] for s in segs], [["u1", "a1", "t1", "a2", "t2", "a3"]])
+        sk = km._seg_key(segs[0]["id"])
+        km._SUMMARY_ANCHOR_MEMO.clear()
+        first = km._summary_text_anchor((turn, segs[0]["atoms"]), line, memo_key=(sid, "g1", sk))
+        self.assertEqual(first[0], "a3", "build 1: the unsplit segment's newest atom carrying the opening sentence")
+        store = {"seams": [{"segs": [sk], "t": T0 + 5, "top": sid + ":g1", "text": "Land the exporter change"}]}
+        split = km._segs_seam(turn, store)             # the real seam split: the head keeps its key, the tail is new
+        self.assertEqual([[a["uuid"] for a in s["atoms"]] for s in split], [["u1", "a1", "t1", "a2"], ["t2", "a3"]])
+        self.assertEqual(km._seg_key(split[0]["id"]), sk, "the head keeps the key the memo was filled under")
+        self.assertEqual(turn["end"], T0 + 8, "…and the turn keeps its end")
+        fresh = km._summary_text_anchor((turn, split[0]["atoms"]), line)
+        self.assertEqual(fresh[0], "a1", "a fresh search over the head lands on the head's own atom carrying the sentence")
+        second = km._summary_text_anchor((turn, split[0]["atoms"]), line, memo_key=(sid, "g1", sk))
+        self.assertEqual(second, fresh, "build 2 equals a fresh search, never the memo's answer for the unsplit segment")
+        hits = km._SUMMARY_ANCHOR_STATS["hit"]
+        third = km._summary_text_anchor((turn, split[0]["atoms"]), line, memo_key=(sid, "g1", sk))
+        self.assertEqual((third, km._SUMMARY_ANCHOR_STATS["hit"]), (fresh, hits + 1),
+                         "the split segment's answer is memoized in its turn: the next build is a hit")
+
+    def test_the_rest_of_the_turn_rewritten_under_the_same_end_is_searched_again(self):
+        # the other half of the key (2026-11-26): the turn's atoms outside the segment are candidates too, so a turn whose
+        # wrap-up is now another atom (a transcript rewritten in place) with its end unchanged is a miss, never the old atom;
+        # and the key names every atom of both lists in order, not only the last (a) nor as a set (b)
+        sid = "11111111-2222-3333-4444-555555555555"
+        seg = [tool("a1", T0), think("th", T0 + 1)]
+        wrap = "The wrap-up here is the reply the user reads, long enough to count as prose by the walk's own floor."
+        before = {"t": T0, "end": T0 + 60, "atoms": seg + [text("t7", T0 + 50, wrap)]}
+        after = {"t": T0, "end": T0 + 60, "atoms": seg + [text("t8", T0 + 50, wrap)]}
+        km._SUMMARY_ANCHOR_MEMO.clear()
+        self.assertEqual(km._summary_text_anchor((before, seg), "Nothing that matches.", memo_key=(sid, "g1", "k1")), ("t7", None))
+        fresh = km._summary_text_anchor((after, seg), "Nothing that matches.")
+        self.assertEqual(fresh, ("t8", None))
+        self.assertEqual(km._summary_text_anchor((after, seg), "Nothing that matches.", memo_key=(sid, "g1", "k1")), fresh,
+                         "the same segment and end over other atoms: a fresh search's answer")
+        # (a) a MIDDLE text atom rewritten under a new uuid, the last atom and the end unchanged (review round two): a key
+        # that named only each list's last uuid would serve the old middle atom
+        line = "The exporter keeps both clients now. Tests run against the old one."
+        carry = "The exporter keeps both clients now. I checked the call sites and the tests first."
+        mid_before = {"t": T0, "end": T0 + 60, "atoms": seg + [text("m1", T0 + 40, carry), text("t7", T0 + 50, wrap)]}
+        mid_after = {"t": T0, "end": T0 + 60, "atoms": seg + [text("m2", T0 + 40, carry), text("t7", T0 + 50, wrap)]}
+        self.assertEqual(km._summary_text_anchor((mid_before, seg), line, memo_key=(sid, "g1", "k2"))[0], "m1")
+        fresh = km._summary_text_anchor((mid_after, seg), line)
+        self.assertEqual(fresh[0], "m2", "a fresh search lands on the rewritten middle atom, which carries the opening sentence")
+        self.assertEqual(km._summary_text_anchor((mid_after, seg), line, memo_key=(sid, "g1", "k2")), fresh,
+                         "a middle atom rewritten, the last atom and the end the same: a fresh search's answer")
+        # (b) two text atoms of the segment trading places under the same uuids (review round two): the newest substantive
+        # atom is now the other one, so a key over the uuids as a set, not in order, would serve the old order's landing
+        x = "The first of two long replies in this segment, written for the user and past the walk's own prose floor."
+        y = "The second of two long replies in this segment, also written for the user and past the same prose floor."
+        xy = [tool("a1", T0), text("x", T0 + 10, x), text("y", T0 + 20, y)]
+        yx = [tool("a1", T0), text("y", T0 + 10, y), text("x", T0 + 20, x)]
+        xy_turn, yx_turn = {"t": T0, "end": T0 + 60, "atoms": xy}, {"t": T0, "end": T0 + 60, "atoms": yx}
+        self.assertEqual(km._summary_text_anchor((xy_turn, xy), "Nothing that matches.", memo_key=(sid, "g1", "k3")), ("y", None))
+        fresh = km._summary_text_anchor((yx_turn, yx), "Nothing that matches.")
+        self.assertEqual(fresh, ("x", None))
+        self.assertEqual(km._summary_text_anchor((yx_turn, yx), "Nothing that matches.", memo_key=(sid, "g1", "k3")), fresh,
+                         "the same atoms in another order: a fresh search's answer")
+
 
 # The states the verifier executed plus the one producible pair they left out, one row each: (name, distillState, column, completed, blocked). The webview
 # test ui/webview/distiller-line.test.ts carries the SAME rows for distillInputs; TheLineRuleTable pins both sides.
@@ -224,6 +298,12 @@ class TheMemoIsBoundedByBytes(unittest.TestCase):
         km.SUMMARY_ANCHOR_MEMO_BYTES = self._bound
         km._SUMMARY_ANCHOR_MEMO.clear()
 
+    @staticmethod
+    def _heads():
+        """Each key's first six terms: (fsid, nid, seg key, the line's hash, the turn's end, stub_ok). The two candidate
+        lists' hashes follow them (2026-11-26) and are the same for every call here, which searches one turn."""
+        return [k[:6] for k in km._SUMMARY_ANCHOR_MEMO]
+
     def test_the_bound_is_a_fraction_of_memory_with_an_override_and_no_count_literal(self):
         from unittest import mock
         self.assertEqual(km._summary_anchor_memo_bound(), km._mem_total_bytes() // 256)
@@ -246,7 +326,7 @@ class TheMemoIsBoundedByBytes(unittest.TestCase):
         km._summary_text_anchor((turn, seg), BRIEF, memo_key=(sid, "g2", "k2"))      # B: a miss, stored; A is the colder
         self.assertEqual(km._SUMMARY_ANCHOR_STATS["evict"], 1, "over the bound: one eviction, the oldest")
         self.assertEqual(len(km._SUMMARY_ANCHOR_MEMO), 1)
-        self.assertIn((sid, "g2", "k2", hash(BRIEF), T0 + 30, False), km._SUMMARY_ANCHOR_MEMO, "the newest survives, the coldest went")
+        self.assertIn((sid, "g2", "k2", hash(BRIEF), T0 + 30, False), self._heads(), "the newest survives, the coldest went")
         km.SUMMARY_ANCHOR_MEMO_BYTES = 10 ** 6
         km._summary_text_anchor((turn, seg), BRIEF, memo_key=(sid, "g3", "k3"))      # C stored beside B
         before = km._SUMMARY_ANCHOR_STATS["hit"]
@@ -254,7 +334,7 @@ class TheMemoIsBoundedByBytes(unittest.TestCase):
         self.assertEqual(km._SUMMARY_ANCHOR_STATS["hit"], before + 1)
         km.SUMMARY_ANCHOR_MEMO_BYTES = 1
         km._summary_text_anchor((turn, seg), BRIEF, memo_key=(sid, "g4", "k4"))      # D: sheds the coldest, C, never the hit B
-        keys = list(km._SUMMARY_ANCHOR_MEMO)
+        keys = self._heads()
         self.assertNotIn((sid, "g3", "k3", hash(BRIEF), T0 + 30, False), keys, "the colder entry went")
         self.assertIn((sid, "g4", "k4", hash(BRIEF), T0 + 30, False), keys)
         rep = km._summary_anchor_memo_report()
