@@ -1221,12 +1221,13 @@ def fuzz_main(n, seed, nsteps, plant, binary, out):
             seed_usage(rng, snap)
             base = (copy.deepcopy(snap), copy.deepcopy(trees))
             bound = rng.choice((None, None, None, 4000, 12000))
-            # the memo just full, in half the worlds of three sessions: the bound is the bytes the adoption build's
-            # entries took, and the first random step (`grow`) makes the middle session's entry grow past it. Which
-            # entry its put sheds is the LRU order's (a get is a use; S6.1's mutant 43). Only three entries can tell
-            # that order from the order of the puts (of two, the one not being put is the only one to shed), and only
-            # an entry growing past the bound shows it: every build serves the sessions in one order, so a memo either
-            # holds them all or, past the bound, sheds each in turn (the LRU's cyclic worst case), whatever the order
+            # the memo just full, in half the worlds of three sessions (the most fz_world makes, so `>= 3` is exactly
+            # three): the bound is the bytes the adoption build's entries took, and the first random step (`grow`)
+            # makes the middle session's entry grow past it. Which entry its put sheds is the LRU order's (a get is a
+            # use; S6.1's mutant 43). Only three entries can tell that order from the order of the puts (of two, the
+            # one not being put is the only one to shed), and only an entry growing past the bound shows it: every
+            # build serves the sessions in one order, so a memo either holds them all or, past the bound, sheds each
+            # in turn (the LRU's cyclic worst case), whatever the order
             full = len(sids_of(snap)) >= 3 and rng.random() < 0.5
             r = Runner(l7, l6, dw, km, snap, trees, memo_bound=None if full else bound)
             if full:

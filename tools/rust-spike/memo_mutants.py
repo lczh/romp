@@ -155,7 +155,12 @@ def apply(n, tree):
     dst = os.path.join(tree, "rust")
     if os.path.exists(dst):
         shutil.rmtree(dst)
-    shutil.copytree(os.path.join(REPO, "rust"), dst, ignore=shutil.ignore_patterns("target", "vendor"))
+    # shutil.copy, not copytree's default copy2: every copied file gets a fresh mtime. copy2 keeps the sources' times,
+    # and cargo identifies a path package relative to its workspace root, so a CARGO_TARGET_DIR reused across --apply
+    # trees saw the control's (or an unmutated tree's) files as older than the last build and silently kept the
+    # previous mutant's binary ("Finished in 0.01s"). The sweep gives each tree its own target, so it never hit this.
+    shutil.copytree(os.path.join(REPO, "rust"), dst, ignore=shutil.ignore_patterns("target", "vendor"),
+                    copy_function=shutil.copy)
     if n == len(MUTANTS):
         return "control"
     name, rel, search, rep = MUTANTS[n]

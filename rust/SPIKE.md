@@ -2722,8 +2722,9 @@ derivation serves the previous entry when there is one; a departed session's ent
   under another hash seed; checked by `romp-spike/tests/memo_edge.rs`); `--fuzz N` draws worlds from dump_layer7's
   generator with random steps over every input kind, each moved with and without its identity (half the worlds start
   with cleared ids under their sessions and peers, so a `cleared` step can list one a second time; since the mutant
-  sweep, half record usage.json's identity, and half the worlds of three sessions run with the memo just full and grow
-  one entry past it); `--dump DUMP` runs a default sequence over a dump in place.
+  sweep, half record usage.json's identity, and half the worlds of three sessions (the most the generator makes; the
+  code's test is three or more) run with the memo just full and grow one entry past it); `--dump DUMP` runs a default
+  sequence over a dump in place.
   Where a fresh comparison is skipped, the step records the frame keys that differ (`keys` beside `frameDiffers`).
 - Measurement: `romp-spike measure cpu --memo` adds three rows (`memo`: every session a hit; `memoMiss`: the largest
   session misses on its transcript and derives over its held aggregate; `memoBuild`: the whole memo-served build);
@@ -3028,7 +3029,15 @@ row's subagents. The fuzz's `live-read` kind could, but about once in a thousand
 9, 1 value in 3 that is a non-empty list, and only where it differs from the row's current list), and at seed 1 no draw
 showed it. Closed: the scripted case's last step gives s001's live row a subagent (Python misses on `row`, the mutant
 hits: 4 differences in 1 step, the decision and three held-walk counters), and a fuzz kind, `row-agents`, adds a
-subagent, moves one's since, or sets a field no card reads on one (served).
+subagent, moves one's since, or sets a field no card reads on one (served). Its reach is narrower than that list. The
+generated worlds start with no subagent on any live row (0 at seeds 1, 2 and 3), and a row without one always takes
+the add branch, so the other two run only after an earlier `row-agents` draw gave the same session a subagent in the
+same world. Counted from the step kinds at 200 worlds: seed 1 drew the kind 34 times, all on the add branch (or on a
+session with no live row); seed 2 36 times, one moving a since; seed 3 42 times, one moving a since and one served. So
+the fuzz checks the direction mutant 3 needs (a subagent added, Python misses on `row`) well, but a subagent's `since`
+(2 draws in 112) and the too-strict direction, where a field no card reads must still be served (1 draw, at seed 3),
+barely; the edge set's step adds a subagent and does neither. Giving some worlds' live rows a subagent from the start
+would reach both, at the price of new worlds and new fuzz counts everywhere; not done here.
 
 *Mutant 22, "deps: usage not re-taken over the new entry".* After each derivation Python re-takes the key's `usage`
 component over the entry it has just derived (`_feed_key_with_deps`): usage.json's identity if that entry read the file
@@ -3059,8 +3068,9 @@ display name grows by 201 characters (1,608 bytes of entry) and its put passes t
 the last build just after s001 (which this build has served again); the mutant sheds s003, the oldest put. The generator
 stops unless Python shed s002 first, so the case cannot silently lose its point. The mutant gives 7 differences in 2
 steps (s002 a hit against Python's cold miss, 3 evictions against 4, three held counters, then the next step's
-decisions). In the fuzz, half the worlds of three sessions run with the memo just full (the bound is what the adoption
-build's entries took) and grow the middle session's display name at their first random step.
+decisions). In the fuzz, half the worlds of three sessions (the generator makes one to three; the code's test is three
+or more) run with the memo just full (the bound is what the adoption build's entries took) and grow the middle
+session's display name at their first random step.
 
 *The instructive exception.* With just-full worlds and no forced growth, fuzz seed 1 caught mutant 43 in 7 steps at one
 draw and in none after an unrelated change reshuffled the draws: the growth was left to chance. The next version grew a
@@ -3070,13 +3080,15 @@ LRU victim was also the oldest put. Growing the middle session right after the p
 session after it while a put-ordered cache sheds the first one (the cold build put it first), took that to 26 steps at
 seed 1 and 6 at seed 2. A second slip, caught by counting what the steps did: the subagents kind was first named
 `live-agents`, and the generator's branch for every kind starting with `live` took it, so none of its 44 draws changed
-anything. It is `row-agents` now (27 of its 32 draws at seed 1 moved a live row's subagents, 21 of them a plain `row`
-miss).
+anything. It is `row-agents` now: 26 of its 34 draws at seed 1 moved a live row's subagents, 19 of them a plain `row`
+miss (21 with `row` among the labels), and the other 8 drew a session with no live row, so they changed nothing.
 
-*What the generator change costs the other kinds.* Each random step draws one kind uniformly; two kinds were added (37
-in all), and one random step of each just-full world is `grow` instead of a draw, so each old kind's share fell from
-1/35 to 1/37, about 7 percent. At seed 1 (200 worlds, 1,200 random steps) the 34 old kinds other than `none` drew 34.0
-times each on average before (25 to 46) and 31.7 after (22 to 45); `none` drew 45 and 25 (beside the 400 steps every
+*What the generator change costs the other kinds.* Each random step draws one kind uniformly. Two kinds were added (37
+in all), so each old kind's share of a draw fell from 1/35 to 1/37, 5.4 percent. And one random step of each just-full
+world is `grow` instead of a draw, so fewer steps are drawn at all: at seed 1 (200 worlds, 1,200 random steps, 25 of
+them `grow` after the change) an old kind's expected count fell from 34.3 (1,200 draws over 35 kinds) to 31.8 (1,175
+over 37), 7.4 percent in all. The 34 old kinds other than `none` drew 34.0 times each on average before (25 to 46) and
+31.7 after (22 to 45), which fits that combined figure; `none` drew 45 and 25 (beside the 400 steps every
 world starts with), and the new kinds `api-error` 38, `row-agents` 34 and `grow` 25. Per kind, before and after (a
 kind's variants folded in): board-facts 31, 37; cleared 29, 41; cleared-other 26, 29; clock 29, 26; closer 45, 28; debug
 37, 24; downtime 29, 26; facts 36, 39; fault 32, 22; files 35, 32; hide 35, 36; interrupting 38, 32; jactive 31, 41;
@@ -3106,6 +3118,17 @@ bytes) outside the just-full worlds; at seed 1 after: 95, 41, 39 and 25 just ful
   the old seed 1 is unchecked until the sweep runs again at this revision on ORCD. If that run gives 47 of 47, a 0 from
   the memo's checks on the large worlds (still to run) means the port serves exactly when Python serves, the condition
   the steady-state CPU comparison rests on.
+
+*A trap for reproducing a mutant locally (found by the skeptic's review, closed).* `memo_mutants.py --apply` copied
+rust/ with copytree's default copy, which keeps each file's modification time, and cargo names a path package by its
+place under the workspace root, so a CARGO_TARGET_DIR shared across `--apply` trees skipped the rebuild whenever a
+tree's files were older than the last build. The reviewer's control build reused mutant 43's binary ("Finished in
+0.01s") and gave 7 differences until the sources were touched. A mutant tree always rebuilt (its edited file is new);
+the control, or any switch back to unmutated code, did not. The sweep was not affected: `mutants.sbatch` gives each
+tree its own target (`CARGO_TARGET_DIR="$T/target"`), and the ORCD control passed. `apply` now copies with
+`shutil.copy`, so every copied file is new. Checked on this Mac with the control alone, one shared target: re-applied
+after a build, it recompiles the four path crates (romp-json, romp-transcript, romp-views, romp-spike); copied the old
+way, the same rebuild finishes in 0.01 s with nothing compiled.
 
 ## Log
 
@@ -3468,3 +3491,16 @@ bytes) outside the just-full worlds; at seed 1 after: 95, 41, 39 and 25 just ful
   - Checked: the edge set 3 cases, 79 steps, 315 decisions, 0 differences (byte for byte under two hash seeds); the
     three mutants caught by it (4, 4 and 7 differences) and by fuzz seed 1 (52, 84 and 97); memo fuzz seeds 1 to 3 at
     200 worlds, 8,031 decisions, 0 differences; the six plants caught. The sweep must run again at this revision.
+- 2026-11-26: the skeptic's review of the sweep section, light checks only on this Mac.
+  - Corrected: `row-agents` at seed 1 drew 34 times (not 32), 26 of them moving a live row's subagents (not 27), 19 a
+    plain `row` miss (not 21; 21 with `row` among the labels); the other 8 drew a session with no live row. The old
+    figures predated the forced `grow` step, which reorders the draws. The cost paragraph now splits its 7.4 percent
+    into the share (1/35 to 1/37, 5.4 percent) and the 25 `grow` steps that replace draws.
+  - Stated: `row-agents` reaches its since and served branches only after an earlier draw on the same session (worlds
+    start with no live-row subagents): 2 since draws and 1 served in 112 across seeds 1 to 3. Not changed: the
+    generator, which would redraw every world.
+  - Fixed: `memo_mutants.py --apply` copies with fresh modification times, so a target directory shared across applied
+    trees can no longer keep the previous mutant's binary (the sweep, one target per tree, was not affected).
+  - Checked: fuzz seeds 1 to 3 at 200 worlds regenerated in Python (the step kinds and decisions above); `--list`, 47
+    of 47 apply; the control applied twice into one scratch target rebuilds its four path crates, where the old copy
+    finishes in 0.01 s.
