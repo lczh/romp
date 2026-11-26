@@ -36,8 +36,11 @@ with no server. Both implementations run on one synthetic state, and the feed JS
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: S4.5, layer 5 (landing, delegation and provisional), scoped in "What layer 5 needs" below. S4.4 is merged. That section also carries a fact layer 6 needs (the body's call order for
-  _node_anchor_uuids).
+- Next action: S4.5, layer 5 (landing, delegation and provisional), scoped in "What layer 5 needs" below. S4.4 is
+  merged. That section also carries a fact layer 6 needs (the body's call order for _node_anchor_uuids).
+  - In progress since 2026-11-26 as workflow run `wf_52ee425c-33c` in worktree `~/romp-romp_fix-s45` (branch
+    `romp_fix-s45`). If a session dies, check that worktree's commits first, then resume the run with Workflow
+    `resumeFromRunId`.
   - Inputs: `python3 tools/rust-spike/dump_world.py --world small` (or `large`), then
     `python3 tools/rust-spike/dump_layer1.py DUMP`, `python3 tools/rust-spike/dump_layer2.py DUMP`,
     `python3 tools/rust-spike/dump_layer3.py DUMP` and `python3 tools/rust-spike/dump_layer4.py DUMP`. Never commit a
