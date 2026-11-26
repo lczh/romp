@@ -2960,7 +2960,9 @@ round trip is identical; a malformed value refused; in the worktree, a disagreei
   before, seed 1 printed 107 against 105).
 - The `rerecord` kind did something in 1 step of 39; with nothing stashed it now stashes a helper with the transcript
   moved (the session's derivation raises and its previous cards are served) and puts it back at the next step: at seed
-  1, 20 stashes and 18 returns.
+  1 (200 worlds), 41 stash steps and 35 returns at the next step, with 5 more `rerecord` draws putting a stashed helper
+  back later (the verifier's count on the committed bytes; the implementer's first report said 20 and 18, which was
+  wrong).
 - When the memo build raised, the fresh comparison was skipped, though a raising build never frames. The oracle now
   gives the snapshot the fresh build's frame in that case and compares the fresh bytes: 13 such steps over seeds 1 to 3
   (2, 10 and 1), 0 differences. That removes the third skip cause listed above (a memo build that raised where the

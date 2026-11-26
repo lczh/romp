@@ -9,9 +9,10 @@
 #   REV=$(git -C A rev-parse HEAD)
 #   cd A/rust && ~/.cargo/bin/cargo vendor --offline --locked --versioned-dirs /tmp/romp-fix-vendor
 #   rsync -a --delete /tmp/romp-fix-vendor/ CLUSTER:orcd/scratch/agents/romp_fix/vendor/
-#   git -C A archive --format=tar "$REV" | ssh CLUSTER 'set -e; cd orcd/scratch/agents/romp_fix; rm -rf romp.new;
-#       mkdir romp.new; tar -x -f - -C romp.new; rm -rf romp; mv romp.new romp'
-#   echo "$REV" | ssh CLUSTER 'cat > orcd/scratch/agents/romp_fix/REVISION'
+#   git -C A archive --format=tar "$REV" | ssh CLUSTER "set -e; cd orcd/scratch/agents/romp_fix; rm -f REVISION;
+#       rm -rf romp.new; mkdir romp.new; tar -x -f - -C romp.new; rm -rf romp; mv romp.new romp; echo $REV > REVISION"
+#   (one command, REVISION removed first and written last: if the copy fails there is no REVISION and every job
+#   refuses, so new code can never run under an old revision; 2026-11-26, the verifier's finding)
 #   echo <the pool's agent-runs/romp_fix, ENGAGING.md> | ssh CLUSTER 'cat > orcd/scratch/agents/romp_fix/RESULTS'
 #   rm -rf /tmp/romp-fix-vendor
 # Then, on the cluster. Every srun and sbatch below runs from the results' logs directory: each job script's --output is

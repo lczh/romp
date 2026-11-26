@@ -1167,6 +1167,13 @@ def dump(world, out, keep_world=False, replay=True):
     if given is None and not os.path.exists(os.path.join(REPO, ".git")):
         raise DumpError("no revision to record: %s is a copy without .git and %s is not set (on the cluster, "
                         "orcd/common.sh exports it from the REVISION file beside the code)" % (REPO, REVISION_ENV))
+    # 2026-11-26: refuse a checkout whose HEAD disagrees with ROMP_SPIKE_REVISION here, before prepare_out writes
+    # anything (repo_head refuses it again at snapshot time, after the world is built, which left a partial output).
+    if given is not None and os.path.exists(os.path.join(REPO, ".git")):
+        r = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"], capture_output=True, text=True)
+        head = r.stdout.strip() if r.returncode == 0 else ""
+        if head and head[:12] != given[:12]:
+            raise DumpError("the checkout's HEAD is %s but %s names %s" % (head[:12], REVISION_ENV, given))
     t_start = time.time()
     out = prepare_out(out)
     os.makedirs(os.path.join(out, "work"))
