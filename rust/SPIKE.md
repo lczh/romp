@@ -51,6 +51,10 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 - Next action: S4.6, layer 6 (the body and its closures), scoped in "What layer 6 needs" below, which carries the
   body's call order for _node_anchor_uuids forward from S4.4 and the summary-anchor memo's seam staleness from S4.5's
   review. S4.5 is merged.
+  - In progress since 2026-11-26 as workflow run `wf_9a97ea7b-5eb` in worktree `~/romp-romp_fix-s46` (branch
+    `romp_fix-s46`). The same run fixes the memo staleness in romp itself on `romp_fix-memo` (from main, a separate
+    bug PR). If a session dies, check those worktrees' commits first, then resume the run with Workflow
+    `resumeFromRunId`.
   - Inputs: `python3 tools/rust-spike/dump_world.py --world small` (or `large`), then
     `python3 tools/rust-spike/dump_layer1.py DUMP`, `python3 tools/rust-spike/dump_layer2.py DUMP`,
     `python3 tools/rust-spike/dump_layer3.py DUMP`, `python3 tools/rust-spike/dump_layer4.py DUMP` and
