@@ -73,6 +73,13 @@ record! {
         context: serde_json::Value = "context",
         compact_pct: Option<Num> = "compactPct",
         color: Option<String> = "color",
+        /// The stored login the launch carried (kernel._login_refusal_label, layer 4); Python reads `str(x or "")`,
+        /// so anything but a string or null is refused.
+        auth_login: Option<String> = "authLogin",
+        /// The login the CLI's init said it used.
+        auth_login_live: Option<String> = "authLoginLive",
+        /// That login's display label.
+        auth_label: Option<String> = "authLabel",
     }
 }
 
@@ -105,7 +112,8 @@ record! {
 record! {
     /// What the per-card build reads about one alive session, besides its tree.
     pub struct SessionFacts {
-        names: Vec<Option<String>> = "names",
+        /// The names-registry entry's tab fields (kernel._names_parts), null when the registry has none.
+        names: Option<Vec<String>> = "names",
         flags: serde_json::Value = "flags",
         leaf_ok: bool = "leafOk",
         store: Option<Store> = "store",
@@ -117,7 +125,7 @@ record! {
 
 record! {
     pub struct PeerFacts {
-        names: Vec<Option<String>> = "names",
+        names: Option<Vec<String>> = "names",
         flags: serde_json::Value = "flags",
         store: Option<Store> = "store",
     }
@@ -136,7 +144,8 @@ record! {
         interrupted_by: serde_json::Value = "interruptedBy",
         /// A tuple: (the newest answered time, {peer key: time}); times keep their int/float tag.
         peer_answered: (Num, OMap<Num>) = "peerAnswered",
-        heal_session_tops: serde_json::Value = "healSessionTops",
+        /// kernel._heal_session_tops: node id to `[new parent or null, born record]` (a JSON round trip of its tuple).
+        heal_session_tops: OMap<(Option<String>, Born)> = "healSessionTops",
         awaiting_task_descs: serde_json::Value = "awaitingTaskDescs",
         cap_switch_offer: serde_json::Value = "capSwitchOffer",
         warm_wanted: serde_json::Value = "warmWanted",
@@ -184,8 +193,37 @@ record! {
         settled_done: bool = "settledDone",
         handoff: Option<Handoff> = "handoff",
         origin: Option<NodeOrigin> = "origin",
+        /// The agent's own to-do item this node mirrors (`(nd.get("agentTask") or {}).get("status")`): any falsy
+        /// value or a dict; a truthy non-dict is refused (`validate`), as Python's `.get` would raise on it.
+        agent_task: serde_json::Value = "agentTask",
+        /// The judge's awaiting stamp (layer 4, _goal_awaiting_stamp_full): its why, anchor, kind and peer keys.
+        awaiting_why: Option<String> = "awaitingWhy",
+        awaiting_at: Option<Num> = "awaitingAt",
+        awaiting_kind: Option<String> = "awaitingKind",
+        awaiting_peers: Option<Vec<String>> = "awaitingPeers",
+        /// A rolled-down done flag (read for its truthiness only).
+        rolled_up: serde_json::Value = "rolledUp",
+        /// A step the session started on its own (T319). Python reads it only when it is a dict, so null is kept and
+        /// any other non-dict is refused.
+        born: Option<Born> = "born",
+        /// jd.review_boundary's reopen boundary and summary watermark.
+        delta_since: Option<Num> = "deltaSince",
+        distilled_mt: Option<Num> = "distilledMt",
+        /// The distiller's cited anchor (_node_anchor_uuids' cold fallback).
+        summary_anchor: Option<String> = "summaryAnchor",
     }
     required: [id]
+}
+
+record! {
+    /// A born record: on a node (`born`) or in a heal answer (`healSessionTops`). `why` and `parentText` are read
+    /// through `str(x or "")`, so anything but a string or null is refused.
+    pub struct Born {
+        why: Option<String> = "why",
+        parent_text: Option<String> = "parentText",
+        /// The feed shows no card for it (read for its truthiness only).
+        hidden: serde_json::Value = "hidden",
+    }
 }
 
 record! {
@@ -197,6 +235,10 @@ record! {
         why: Option<String> = "why",
         seg: Option<String> = "seg",
         at: Option<Num> = "at",
+        /// A migration's reconstructed row (_parked_rows skips it; truthiness only).
+        synth: serde_json::Value = "synth",
+        /// A lift row retracts a wait (kernel._stamp_written_at skips it; truthiness only).
+        lift: serde_json::Value = "lift",
     }
 }
 
@@ -232,16 +274,20 @@ record! {
 /// Keys the per-card code reads on a node (an ast scan grouped by receiver: `nd`, `nodes[x]`, `nodes[nid]`, `root`)
 /// that `Node` does not type yet. No node in either world carries one; the layer that ports its reader types it.
 pub const NODE_UNPORTED: &[&str] = &[
-    "agentTask", "askAnchor", "awaitingAt", "awaitingKind", "awaitingPeers", "awaitingWhy", "background",
-    "blockCheckT", "born", "briefParts", "deltaSince", "distilledMt", "failLog", "followupAt", "followupPending",
-    "relayCarried", "rolledUp", "serving", "stallSummary", "summaryAnchor", "summaryAnchors", "summaryParts",
-    "summaryQuote", "umbrella", "userAsk", "warns",
+    "askAnchor", "background", "blockCheckT", "briefParts", "failLog", "followupAt", "followupPending", "relayCarried",
+    "serving", "stallSummary", "summaryAnchors", "summaryParts", "summaryQuote", "umbrella", "userAsk", "warns",
 ];
 /// The same for a handoff (`nd['handoff']`, `nodes[x]['handoff']`) and an origin (`o`).
 pub const HANDOFF_UNPORTED: &[&str] = &["tracked", "peerHost"];
 pub const ORIGIN_UNPORTED: &[&str] = &["tracked", "peerHost"];
 /// The same for a log row (`e`, `r`).
-pub const LOG_UNPORTED: &[&str] = &["a", "q", "login", "synth", "fsid"];
+pub const LOG_UNPORTED: &[&str] = &["a", "q", "login", "fsid"];
+
+/// The longest parent chain a store may hold (nodes, counting the node itself). _agent_open_set and _open_leaves
+/// recurse once per level, and Python raises RecursionError near 1,000 levels (the exact depth moves with the stack
+/// at the call), so a deeper store is refused at load. Layer 4 walks iteratively and would answer at any depth; the
+/// refusal keeps the port to inputs on which Python answers.
+pub const MAX_NODE_DEPTH: usize = 500;
 
 impl Snapshot {
     /// `now`, the build clock.
@@ -272,7 +318,7 @@ impl Snapshot {
 }
 
 /// Refuse a snapshot the port would read differently from Python: another schema, an alive row without facts, or a
-/// store whose records carry a key the per-card code reads but the typed structs do not carry.
+/// store the port refuses (`validate_store`).
 pub fn validate(snap: &Snapshot) -> Result<(), String> {
     if snap.schema.as_deref() != Some(SCHEMA) {
         return Err(format!("schema is {:?}, this loader reads {SCHEMA:?}", snap.schema));
@@ -285,26 +331,75 @@ pub fn validate(snap: &Snapshot) -> Result<(), String> {
         }
     }
     for (path, _sid, st) in snap.stores() {
-        for (nid, nd) in st.nodes.iter().flat_map(OMap::iter) {
-            if let Some(k) = nd.unported_key(NODE_UNPORTED) {
-                return Err(format!("{path}.store.nodes.{nid}: key {k:?} is read by the per-card code but not typed"));
+        validate_store(&format!("{path}.store"), st)?;
+    }
+    Ok(())
+}
+
+/// Refuse a store the port would read differently from Python: a node the port refuses (`validate_node`), or a parent
+/// chain longer than MAX_NODE_DEPTH (Python's recursive walks raise near 1,000 levels).
+pub fn validate_store(path: &str, st: &Store) -> Result<(), String> {
+    let Some(nodes) = &st.nodes else { return Ok(()) };
+    for (nid, nd) in nodes.iter() {
+        validate_node(&format!("{path}.nodes.{nid}"), nd)?;
+    }
+    if let Some((nid, depth)) = deepest_chain(nodes).filter(|&(_, d)| d > MAX_NODE_DEPTH) {
+        return Err(format!("{path}.nodes.{nid}: a parent chain of {depth} nodes, past the {MAX_NODE_DEPTH} the port \
+                            admits (Python's recursive walks raise near 1,000)"));
+    }
+    Ok(())
+}
+
+/// The node with the longest chain of distinct ancestors (following `parentId` until a missing node or a repeat),
+/// counting the node itself: the deepest recursion _agent_open_set or _open_leaves can reach in this store. The count
+/// stops at MAX_NODE_DEPTH + 1.
+pub fn deepest_chain(nodes: &OMap<Node>) -> Option<(&str, usize)> {
+    let index: std::collections::HashMap<&str, &Node> = nodes.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    let mut best: Option<(&str, usize)> = None;
+    for (nid, nd) in nodes.iter() {
+        let mut seen = std::collections::HashSet::from([nid.as_str()]);
+        let mut cur = nd;
+        while seen.len() <= MAX_NODE_DEPTH {
+            let Some(p) = cur.parent_id.as_ref().and_then(|p| p.as_deref()) else { break };
+            let Some(next) = index.get(p) else { break };
+            if !seen.insert(p) {
+                break;
             }
-            if let Some(Some(h)) = &nd.handoff
-                && let Some(k) = h.unported_key(HANDOFF_UNPORTED)
-            {
-                return Err(format!("{path}.store.nodes.{nid}.handoff: key {k:?} is read but not typed"));
-            }
-            if let Some(Some(o)) = &nd.origin
-                && let Some(k) = o.unported_key(ORIGIN_UNPORTED)
-            {
-                return Err(format!("{path}.store.nodes.{nid}.origin: key {k:?} is read but not typed"));
-            }
-            for (i, r) in nd.log.iter().flatten().enumerate() {
-                if let Some(k) = r.unported_key(LOG_UNPORTED) {
-                    return Err(format!("{path}.store.nodes.{nid}.log[{i}]: key {k:?} is read but not typed"));
-                }
-            }
+            cur = next;
         }
+        if best.is_none_or(|(_, d)| seen.len() > d) {
+            best = Some((nid.as_str(), seen.len()));
+        }
+    }
+    best
+}
+
+/// Refuse a node the port would read differently from Python: a key the per-card code reads that the port does not
+/// type, on the node, its handoff, its origin or a log row, or an `agentTask` that is truthy but not a dict.
+pub fn validate_node(path: &str, nd: &Node) -> Result<(), String> {
+    if let Some(k) = nd.unported_key(NODE_UNPORTED) {
+        return Err(format!("{path}: key {k:?} is read by the per-card code but not typed"));
+    }
+    if let Some(Some(h)) = &nd.handoff
+        && let Some(k) = h.unported_key(HANDOFF_UNPORTED)
+    {
+        return Err(format!("{path}.handoff: key {k:?} is read but not typed"));
+    }
+    if let Some(Some(o)) = &nd.origin
+        && let Some(k) = o.unported_key(ORIGIN_UNPORTED)
+    {
+        return Err(format!("{path}.origin: key {k:?} is read but not typed"));
+    }
+    for (i, r) in nd.log.iter().flatten().enumerate() {
+        if let Some(k) = r.unported_key(LOG_UNPORTED) {
+            return Err(format!("{path}.log[{i}]: key {k:?} is read but not typed"));
+        }
+    }
+    if let Some(a) = &nd.agent_task
+        && crate::record::py_truthy(a)
+        && !a.is_object()
+    {
+        return Err(format!("{path}.agentTask: a truthy non-dict ({a}): Python's `.get(\"status\")` raises on it"));
     }
     Ok(())
 }
@@ -331,6 +426,17 @@ mod tests {
     }
 
     #[test]
+    fn an_integer_past_i64_is_refused() {
+        // serde_json would read it as the float 1e+20, where Python's json keeps the int
+        let big = SNAP.replace(r#""mt": 5.0"#, r#""mt": 100000000000000000000"#);
+        let e = crate::load::snapshot_from_slice(big.as_bytes()).unwrap_err();
+        assert_eq!(e, "sessions.s-1.store.nodes.s-1:g1.mt: an integer past i64, which Python reads as an int and \
+                       serde_json as a float");
+        let edge = SNAP.replace(r#""mt": 5.0"#, r#""mt": 9223372036854775807"#);
+        assert!(crate::load::snapshot_from_slice(edge.as_bytes()).is_ok(), "i64's top loads");
+    }
+
+    #[test]
     fn another_schema_is_refused() {
         let other = SNAP.replace("romp-spike-snapshot/1", "romp-spike-snapshot/2");
         let e = crate::load::snapshot_from_slice(other.as_bytes()).unwrap_err();
@@ -339,12 +445,54 @@ mod tests {
 
     #[test]
     fn a_node_key_the_build_reads_but_the_port_does_not_type_is_refused() {
-        let born = SNAP.replace(r#""why": "x", "log""#, r#""why": "x", "born": {"why": "y"}, "log""#);
-        let e = crate::load::snapshot_from_slice(born.as_bytes()).unwrap_err();
-        assert_eq!(e, "sessions.s-1.store.nodes.s-1:g1: key \"born\" is read by the per-card code but not typed");
-        let row = SNAP.replace(r#""kind": "done", "seg""#, r#""kind": "done", "synth": true, "seg""#);
+        let warns = SNAP.replace(r#""why": "x", "log""#, r#""why": "x", "warns": ["y"], "log""#);
+        let e = crate::load::snapshot_from_slice(warns.as_bytes()).unwrap_err();
+        assert_eq!(e, "sessions.s-1.store.nodes.s-1:g1: key \"warns\" is read by the per-card code but not typed");
+        let row = SNAP.replace(r#""kind": "done", "seg""#, r#""kind": "done", "login": "x", "seg""#);
         let e = crate::load::snapshot_from_slice(row.as_bytes()).unwrap_err();
-        assert_eq!(e, "sessions.s-1.store.nodes.s-1:g1.log[0]: key \"synth\" is read but not typed");
+        assert_eq!(e, "sessions.s-1.store.nodes.s-1:g1.log[0]: key \"login\" is read but not typed");
+        let task = SNAP.replace(r#""why": "x", "log""#, r#""why": "x", "agentTask": "open", "log""#);
+        let e = crate::load::snapshot_from_slice(task.as_bytes()).unwrap_err();
+        assert_eq!(e, "sessions.s-1.store.nodes.s-1:g1.agentTask: a truthy non-dict (\"open\"): Python's \
+                       `.get(\"status\")` raises on it");
+        let falsy = SNAP.replace(r#""why": "x", "log""#, r#""why": "x", "agentTask": false, "born": null, "log""#);
+        assert!(crate::load::snapshot_from_slice(falsy.as_bytes()).is_ok(), "a falsy agentTask and a null born load");
+        let born = SNAP.replace(r#""why": "x", "log""#, r#""why": "x", "born": "y", "log""#);
+        let e = crate::load::snapshot_from_slice(born.as_bytes()).unwrap_err();
+        assert!(e.contains("Node.born: invalid type: string \"y\", expected a JSON object (Born)"), "{e}");
+    }
+
+    #[test]
+    fn a_parent_chain_past_the_depth_limit_is_refused() {
+        let chain = |n: usize| {
+            let nodes: Vec<String> = (0..n)
+                .map(|i| {
+                    let parent = if i == 0 { "null".to_string() } else { format!("\"g{}\"", i - 1) };
+                    format!(r#""g{i}": {{"id": "g{i}", "parentId": {parent}}}"#)
+                })
+                .collect();
+            SNAP.replace(r#""placements": {"s-1:5:abcd1234": "s-1:g1"}"#,
+                         &format!(r#""nodes2": null, "placements": {{}}"#))
+                .replacen(r#""nodes": {"s-1:g1": "#, &format!(r#""nodes": {{{}, "x": "#, nodes.join(", ")), 1)
+        };
+        assert!(crate::load::snapshot_from_slice(chain(MAX_NODE_DEPTH).as_bytes()).is_ok());
+        let e = crate::load::snapshot_from_slice(chain(MAX_NODE_DEPTH + 1).as_bytes()).unwrap_err();
+        assert_eq!(e, format!("sessions.s-1.store.nodes.g{MAX_NODE_DEPTH}: a parent chain of {} nodes, past the \
+                               {MAX_NODE_DEPTH} the port admits (Python's recursive walks raise near 1,000)",
+                              MAX_NODE_DEPTH + 1));
+        // a cycle counts its distinct members only: one of 500 loads, one of 501 is refused (Python's _open_leaves
+        // recurses once around it, and answers until near 1,000)
+        let cyc = SNAP.replace(r#""parentId": null"#, r#""parentId": "s-1:g1""#);
+        assert!(crate::load::snapshot_from_slice(cyc.as_bytes()).is_ok());
+        let ring = |n: usize| {
+            let nodes: Vec<String> =
+                (0..n).map(|i| format!(r#""y{i}": {{"id": "y{i}", "parentId": "y{}"}}"#, (i + n - 1) % n)).collect();
+            let m: OMap<Node> = serde_json::from_str(&format!("{{{}}}", nodes.join(", "))).unwrap();
+            validate_store("st", &Store { nodes: Some(m), ..Store::default() })
+        };
+        assert_eq!(ring(MAX_NODE_DEPTH), Ok(()));
+        let e = ring(MAX_NODE_DEPTH + 1).unwrap_err();
+        assert!(e.contains(&format!("a parent chain of {} nodes", MAX_NODE_DEPTH + 1)), "{e}");
     }
 
     #[test]

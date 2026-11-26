@@ -6,10 +6,12 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
-- Step: S3, S4.1, S4.2 and S4.3 done, merged into `romp_fix` from `romp_fix-s3`, `romp_fix-s4a`, `romp_fix-s42` and
-  `romp_fix-s43`, each with its review's fixes. S4.3's review (ship, no must-fix) found one edge-set gap, now filled
-  and shown to catch its mutant. S4.2's two follow-ups (the empty-trigger pin, `dump_layer2.py --fuzz`) were independently verified: 65,000 more
-  random cases on fresh seeds with 0 differences, and 12 planted mutants all caught.
+- Step: S3 and S4.1 to S4.4 done, merged into `romp_fix` from `romp_fix-s3`, `romp_fix-s4a`, `romp_fix-s42`,
+  `romp_fix-s43` and `romp_fix-s44`, each with its review's fixes. S4.4's review (ship, no must-fix) is under "The
+  review round" in "S4.4 as built"; its 11 edge-set gaps are filled, each shown to catch its mutant. S4.3's review
+  (ship, no must-fix) found one edge-set gap, now filled and shown to catch its mutant. S4.2's two follow-ups (the
+  empty-trigger pin, `dump_layer2.py --fuzz`) were independently verified: 65,000 more random cases on fresh seeds with
+  0 differences, and 12 planted mutants all caught.
   - S3: romp-transcript reads both dumps' transcripts with every summary line identical to Python's reader, records
     compared in full, and matches Python's cache read for read on 46 lockstep steps of the identity contract and on
     1,200 random ones (`tools/rust-spike/check_store.py --fuzz 6`). See "S3 as built" below.
@@ -25,22 +27,28 @@ with no server. Both implementations run on one synthetic state, and the feed JS
     both worlds (1,801 values small, 695,672 large), on 129 Python-made edge cases (6,501 values; 7 more are refused at
     load, as built to be) and on 60,000 random sessions and position sets (8,059,862 values, `dump_layer3.py --fuzz`).
     4 planted mistakes and 21 source mutants are each caught by the edge set and by one fuzz seed. See "S4.3 as built".
+  - S4.4: the store helpers (29 functions, the body's children build and its subtree walk) match Python's own answers
+    with zero differences on both worlds (864 values small, 6,406 large, and every one of the 87 and 597 calls a replay
+    build makes), on 225 Python-made edge cases (25,011 values; 15 more are refused at load, as built to be) and on
+    60,000 random worlds and calls (30,625,221 values, `dump_layer4.py --fuzz`). 5 planted mistakes and 78 source
+    mutants are each caught by the edge set; fuzz seed 1 catches all but two (see "S4.4 as built").
   - S2 done before them (byte-identical oracle dumps across seeds and roots, "S2 as built"); S1 before that
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: S4.4, layer 4 (the store helpers), scoped in "What layer 4 needs" below. S4.3 is reviewed (ship) and merged.
-  - In progress since 2026-11-26 as workflow run `wf_51e4ccc1-6ef` in worktree `~/romp-romp_fix-s44` (branch
-    `romp_fix-s44`). If a session dies, check that worktree's commits first, then resume the run with Workflow
-    `resumeFromRunId`.
+- Next action: S4.5, layer 5 (landing, delegation and provisional), scoped in "What layer 5 needs" below. S4.4 is merged. That section also carries a fact layer 6 needs (the body's call order for
+  _node_anchor_uuids).
   - Inputs: `python3 tools/rust-spike/dump_world.py --world small` (or `large`), then
-    `python3 tools/rust-spike/dump_layer1.py DUMP`, `python3 tools/rust-spike/dump_layer2.py DUMP` and
-    `python3 tools/rust-spike/dump_layer3.py DUMP`. Never commit a dump.
+    `python3 tools/rust-spike/dump_layer1.py DUMP`, `python3 tools/rust-spike/dump_layer2.py DUMP`,
+    `python3 tools/rust-spike/dump_layer3.py DUMP` and `python3 tools/rust-spike/dump_layer4.py DUMP`. Never commit a
+    dump.
   - Checks: `romp-spike roundtrip DUMP`, `romp-spike layer1 DUMP`, `romp-spike layer2 DUMP`, `romp-spike layer3 DUMP`,
-    `romp-spike layer2 rust/crates/romp-views/tests/fixtures/layer2_edge.json`,
+    `romp-spike layer4 DUMP`, `romp-spike layer2 rust/crates/romp-views/tests/fixtures/layer2_edge.json`,
     `romp-spike layer3 rust/crates/romp-views/tests/fixtures/layer3_edge.json`,
-    `python3 tools/rust-spike/dump_layer2.py --fuzz 10000 --seed S` and
-    `python3 tools/rust-spike/dump_layer3.py --fuzz 10000 --seed S` (seeds 1 to 6), and
+    `romp-spike layer4 rust/crates/romp-views/tests/fixtures/layer4_edge.json`,
+    `python3 tools/rust-spike/dump_layer2.py --fuzz 10000 --seed S`,
+    `python3 tools/rust-spike/dump_layer3.py --fuzz 10000 --seed S` and
+    `python3 tools/rust-spike/dump_layer4.py --fuzz 10000 --seed S` (seeds 1 to 6), and
     `python3 tools/rust-spike/check_store.py --dump DIR --fuzz 6` (`--dump` repeatable). Build with
     `~/.cargo/bin/cargo build --offline --release -p romp-spike`; the binary is in `rust/target/release/`.
   - Re-run check_store after any change to romp-transcript or to Python's reader. S6 should read "What the store
@@ -74,7 +82,7 @@ kernel, where the memory gain does not depend on interpreter speed.
 | `rust/crates/romp-transcript` | the transcript store: raw bytes plus a per-line index, the Python cache's identity contract (inode, size, mtime, CRC), positioned reads |
 | `rust/crates/romp-views` | the feed's per-card build only (the spike's slice of the views crate) |
 | `rust/crates/romp-spike` | the standalone binary: load a snapshot and transcripts, build the feed, print canonical JSON and timings |
-| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py`, `dump_layer2.py`, `dump_layer3.py`), the measurement |
+| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py` to `dump_layer4.py`), the measurement |
 
 ## Steps
 
@@ -606,41 +614,361 @@ What this feeds: layer 4 (the store helpers) reads these maps directly. _node_an
 `seg_turn`, and the body's working card reads `who_working` and the open turn's progress. A wrong key order or tag here
 would surface there as a card linking to the wrong message.
 
-## What layer 4 needs (the store helpers)
+## S4.4 as built (2026-11-26)
 
-Section 2 item 4: _agent_open_set, _parked_rows, _focus_open_top with jd._top_of, _goal_awaiting_stamp_full,
-_open_leaves, _all_outstanding_delegated; _handoff_card_fields, _handoff_peer_identities, _peer_identity (registry rung
-only), _awaiting_item and _awaiting_peer_items; _newest_block_ev_t, jd._block_ev_t, jd._block_since, jd._done_since,
-jd.review_boundary; _session_started_face, _node_log_rows, _node_anchor_uuids with jd.junk_quote, _landing_inputs,
-_login_refusal_label, _name_color, _name_of. Found while scoping it from the current source and the large world's
-`coverage/port.json`:
-- Unlisted functions and constants they call: _peer_stamp_superseded (from _goal_awaiting_stamp_full, reading
-  `recorded.peerAnswered`, a tuple or a legacy scalar), _title_shaped and _HANDOFF_LABEL_RE (from
-  _handoff_card_fields), jd._JUNK_QUOTES (junk_quote), _AWAIT_ITEM_KINDS (an assert in _awaiting_item), _UUIDISH_RE,
-  and _names_parts (a snapshot lookup behind _name_of and _name_color). _peer_identity's rungs past the registry
-  (_host_for_sid, _remote_name_of, _postal_peer_names) read state outside the snapshot. Port the registry rung and the
-  composite and stub fallbacks, and refuse or record the rest.
-- Node keys to type: the loader refuses them today (`NODE_UNPORTED`), and these readers need them typed. They are
-  agentTask (`.status`), awaitingWhy, awaitingAt, awaitingKind, awaitingPeers, rolledUp, born (`parentText`, `why`),
-  deltaSince, distilledMt and summaryAnchor, plus `synth` on log rows (_parked_rows skips synthesized rows).
-- State across calls: _node_anchor_uuids writes `_node_anchor_last[nid]` on a warm resolve and serves it when a later
-  lookup misses. The table is keyed by node id alone and lives for the kernel run. So a cold lookup serves an earlier
-  build's warm one. Within one build, a session's answer can depend on an earlier session's wherever two ids collide;
-  its docstring says ids are bare (g1), while both worlds' ids carry the sid prefix. The port needs the table as state
-  walked in the alive order, and the oracle must clear it (a fresh process, or `_node_anchor_last.clear()`), as
-  dump_world's cold-oracle note says. It also takes layer 3's `seg_trig` and `seg_uuid`.
-- Numbers and order: _block_ev_t and _done_since take `max` over `ev_t or at` (the first of equal values, and the tag
-  rides through), with `mt or t or 0` fallbacks. _goal_awaiting_stamp_full takes `max` over tuples (at, why, kind or "",
-  peers), so ties break on the strings. _awaiting_item writes `int(since)`. _parked_rows compares `(t or 0) > t0` and
-  returns a dict in the order of `children.values()`. _handoff_peer_identities sorts by name, stably (equal names keep
-  first-seen order). _open_leaves keeps document order. _agent_open_set is a set, read by membership only.
-- Recursion: _agent_open_set and _open_leaves recurse in Python, past about 1,000 levels a RecursionError. The port
-  must not overflow its stack on a deep tree (iterate, or refuse past a depth, and say which).
-- Branches the worlds miss, each needing Python-made edge cases. From `coverage/port.json`, these never run in either
-  world: _goal_awaiting_stamp_full's stamps (5 of 18 lines missed: no node carries awaitingWhy), _peer_identity past the
-  registry (5 of 23 lines run), _handoff_card_fields' handoff-root card (4 of 17 run), _session_started_face's `born`,
-  _login_refusal_label's auth error, _node_anchor_uuids' cold road (the held anchor, summaryAnchor), review_boundary's
-  distilledMt advance, and _agent_open_set's open agentTask.
+**The problem.** Between the anchor walk and the card literal, the per-card body asks the goal store about thirty
+small questions. Which nodes does the agent's own to-do list still owe? Which open rows did younger siblings' handoffs
+pass over? Which open goal does the session's focus sit under? Is a goal waiting on someone (the judge's stamp), on
+whom, and did that peer already answer? When was its block asked and its outcome landed? Are all its open leaves
+handed to peers, and what should a delegated card be titled and whom should its badge name? Where do a node's title and
+work links land? Each answer is a few lines of Python. Each leans on a Python habit a port gets wrong in a way no
+ordinary store shows: `max` keeping the first of equal values (and with it a 5 or a 5.0), `x or y` skipping a zero or
+an empty string, a dict's insertion order, `int()` of a float, the regex `$`, Unicode `lower()`, and one table that
+carries a node's anchors from one session's lookup to the next. Neither world has an awaiting stamp, a parked row, an
+agent to-do item, a born step, a heal, a review advance, a cold anchor lookup, an auth error or a peer the registry
+does not know, so the worlds alone prove little here.
+
+`layer4.rs` ports the 25 functions section 2 lists and the four unlisted ones they call (_peer_stamp_superseded,
+_stamp_written_at, _title_shaped, _names_parts), with _HANDOFF_LABEL_RE, _UUIDISH_RE, _AWAIT_ITEM_KINDS and
+jd._JUNK_QUOTES, line for line. It also ports the body's own `children` build (the healed parents, the hidden set, a
+born step whose parent is gone becoming a root) and its `_subtree` walk, since the helpers take them as input. What the
+notes flagged, as built:
+- The awaiting stamp is the `max` over `(awaitingAt or 0, why, kind or "", peers)`, so equal anchors break ties on the
+  why, then the kind, then the peer list, and a full tie keeps the first stamp the stack walk meets, with its tag.
+  `kind or ""` makes a missing kind and an empty one tie.
+- `int(since)` truncates toward zero at any size: 1e20 is a 21-digit int (romp-json's `BigInt`), -0.5 is 0, and a
+  falsy since (0, 0.0, -0.0) is None.
+- The `or` fallbacks: _block_ev_t takes `ev_t or at` and drops a falsy result; _done_since takes `ev_t or at or 0` and
+  keeps it, so a done row with no time answers 0, not the node's mt. `mt or t or 0`, `awaitingAt or 0`,
+  `promptUuid or seg_trig[...]` (an empty uuid falls through) and `prompt or held[0]` are each written as Python's `or`.
+  When every operand is falsy, `or` yields the last one, so `mt or t or 0` and a done row's `ev_t or at or 0` answer
+  the literal int 0, never the node's 0.0 or -0.0; and _parked_rows' `(t or 0) > t0` reads a sibling with no t as 0,
+  younger than a node whose t is negative.
+- `is None` against truthiness: an own `born: {}` is not None, so _session_started_face never reads the heal's
+  record, and being falsy it answers no face. _node_anchor_uuids never writes or reads the table for an empty node id
+  (`if nid`), while an empty work anchor is warm (`is not None`).
+- Repeats, splits and `\s`: the stamp's peers keep their repeats (`[U1, U1, "peer:" + U1]` is three identities), where
+  _handoff_peer_identities deduplicates. The handoff label's `host:name` splits at its last colon (`rpartition`), the
+  postal log's pairing at its first (`partition`). The title's sentence cut takes any Unicode `\s` after the stop
+  (U+001C, U+0085, U+00A0, U+3000), as a Python str regex does.
+- _agent_open_set runs over the body's healed children, not the nodes' own parents: an open to-do the heal re-parents
+  marks its new parent, and one on a hidden top marks nothing.
+- Order: the children map keeps its keys in first-seen order, _parked_rows answers in that order, _open_leaves in
+  document order (pre-order, the open kids taken before any recursion), _handoff_peer_identities sorted by name, stably.
+  _agent_open_set is a set, compared sorted.
+- Absent and null: an awaited row writes `agentId`, `detail` and `stoppable` only when truthy; _node_log_rows answers
+  None for no rows, not []; a recorded peer-answered that is absent means Python never asked, and then the port asks
+  nothing about the stamp.
+- State across calls: `AnchorTable` is _node_anchor_last. A warm work anchor is remembered by the node's `id` field,
+  and a later cold lookup of the same id serves it, from whichever session it came. It is carried in the alive order
+  across a dump and across a world's sessions; the oracle clears the kernel's table first. The feed passes no sid, so
+  _node_anchor_rev is not ported. Which nodes write the table, and in what order, is not this layer's: the body calls
+  _node_anchor_uuids only inside its `flatten`, so the port's per-node calls in store order are a test harness, not
+  the body's sequence (see "Carried forward for layer 6" under "What layer 5 needs").
+- Recursion: every walk is iterative. _agent_open_set and _open_leaves recurse in Python and raise RecursionError near
+  1,000 levels, so the loader refuses a parent chain past `MAX_NODE_DEPTH` (500 nodes, counting a cycle's distinct
+  members), and `body_children` refuses a healed forest past it. _goal_awaiting_stamp_full and the body's `_subtree`
+  have no seen-set and loop forever from a node inside a parentId cycle; the body calls them on card tops only, which no
+  cycle reaches, and here they return `Err(Loops)` at the first repeated node. The oracle checks the same walk before
+  calling and records `{"loops": true}`.
+- _peer_identity's whole ladder is ported. The rungs past the registry read the attached hosts' snapshot
+  (kernel._remotes) and the postal log's pairing, which the port takes as recorded inputs (`PeerWorld`); in a dump's
+  replay both are empty, and dump_layer4.py checks that. A row is found by its sids, its name is then looked up under
+  the row its `host` field names, which may be another row.
+- Three readings the edge set pins with a mutant each: `_UUIDISH_RE` ends in `$`, which in Python also matches before
+  one trailing newline, so `"<uuid>\n"` takes the uuid rungs; jd.junk_quote lowercases with Unicode `lower()`, and the
+  Kelvin sign (U+212A) is the only code point outside ASCII whose lowercase is all ASCII ("o" then a Kelvin sign is
+  the stub "ok"); _HANDOFF_LABEL_RE's first group is lazy and spans lines (`re.S`).
+- _login_refusal_label raises AttributeError on a truthy api-error answer that is not a dict; the port returns that
+  exception (`Err(Raise)`) with Python's message.
+
+Loader changes (layers 1 to 3 re-run, zero differences): nodes now type agentTask, awaitingWhy, awaitingAt,
+awaitingKind, awaitingPeers, rolledUp, born, deltaSince, distilledMt and summaryAnchor; log rows synth and lift (the
+lift key, read by _stamp_written_at, was missing from the unported list because the ast scan did not cover that
+unlisted function); live rows authLogin, authLoginLive and authLabel; the recorded healSessionTops is typed as
+`[parent or null, born record]` pairs; a names entry may be null. `snapshot::validate` is split into `validate_store`
+and `validate_node` so the edge set loads stores through the same checks. Refused at load where Python answers, none in
+either world: an agentTask that is a truthy non-dict (Python raises), a born that is not a dict or null (Python ignores
+it), awaitingPeers that is not a list of strings (Python iterates a string's characters), an awaitingWhy or a live row's
+login that is not a string, a heal answer that is not a pair, a null per-peer answer time, and a chain past the limit.
+The review round added one more: an integer literal past i64, anywhere in the snapshot or in an edge or fuzz case's
+inputs. Python's `json` reads one as an int, while serde_json reads one past u64 as a float, and `Num` took the float
+(it already refused 2**63 to 2**64 - 1, which serde_json hands it as a u64). The port then answered an mt of 10**20
+with blockSince `1e+20` where Python has the int, named an api error of 10**20 a 'float' in the AttributeError's text,
+and gave an awaited row's since of 2**64 + 1 back as 2**64. The check decodes the bytes again with romp-transcript's
+decoder, which reads numbers as Python does (`load::refuse_big_ints`); romp-spike also checks the layer 1 to 3 answer
+files and the layer 2 and 3 edge files whole, so an answer past i64 there cannot be misread either. Trees are not
+checked: the second decode would triple their load (150 ms to 450 ms on the large world's 79.6 MB), and no dumped tree
+holds such an integer (both worlds scanned).
+
+**The oracle.** `tools/rust-spike/dump_layer4.py DUMP` loads the real kernel as the earlier dumpers do, installs the
+dump's names registry as the replay scopes it, empty peer facts and a cleared _node_anchor_last, and per alive session
+calls the real helpers on what the body hands them: the store, the recorded heal and peer-answered answers (the tuple
+the live helper returns), the live row, the recorded api error, and layer 3's seg_uuid and seg_trig from the real
+_feed_seg_walk. The body's `children` comes from kernel._feed_session_entry's own source: its `_hidden` and `children`
+statements are compiled as a function, so the oracle builds the input with the kernel's lines. Per node in store order
+it records the twenty per-node answers (the stamp, its peers and rows, the subtree's newest block time, the open
+leaves, delegation, the handoff card, the four times, the review boundary, the started face, the log rows, the anchors,
+the junk test, and the 12 landing inputs for every state and column the body passes). Every sid the dump names gets
+_name_of, _name_color and _peer_identity. It writes `DUMP/layer4.json`, and `romp-spike layer4 DUMP` builds the same
+answers from the typed structs and compares them value by value, as layer 3's comparison does. Python's answers are
+read with romp-transcript's decoder, because serde_json reads an integer past u64 as a float.
+
+The build check: dump_layer4.py also runs one replay build of the dump (dump_world's harness) with the real helpers
+wrapped, and compares every call the per-card body makes, with its real arguments, against the oracle's answer for the
+same session and node (the children the body built included). A helper's own nested calls are not the body's and are
+skipped.
+
+**Result on the worlds: zero differences.**
+- Small: 4 sessions, 10 nodes, 6 names, 864 values. Large: 38 sessions, 78 nodes, 40 names, 6,406 values (29 ms).
+- Build check: small 87 calls (91 comparisons with the children), large 597 (635), 0 unmatched, 0 mismatches.
+- Why that is not enough. The worlds reach none of the stamps, parked rows, agent to-dos, born steps, heals, review
+  advances, cold anchors, auth errors or registry misses, and their only handoff label is resolved by the registry.
+
+**The edge set.** `dump_layer4.py --edge-cases` writes `rust/crates/romp-views/tests/fixtures/layer4_edge.json`
+(synthetic, 0.46 MB; it regenerates byte for byte under another hash seed). Its 225 cases:
+- 137 worlds of one to four sessions sharing an anchor table, with the registry and peer facts where the case names
+  peers: heals that nest a top, hide one, or name an empty parent; born steps whose parent is gone; agent to-dos under
+  flat-done umbrellas and every falsy agentTask; open leaves in document order and all-delegated tops; parentId cycles
+  (the stamp walk loops, the cycle-safe readers answer) and orphans; parked rows (younger handoffs, equal times, synth
+  rows, a sibling inside a cycle, the children map's order); focus tops over every rollup status, a missing focus, a
+  cycle and the empty key; stamps tied on the anchor in both tags and broken on why, kind and peers, rolledUp, empty
+  whys, falsy anchors, peer answers that supersede and stamps written after them, lift rows; block and done rows with
+  ev_t, at, both, neither and zeros; every review-boundary branch; started faces from the node and from the heal; log
+  rows past the cap of 8 with and without anchors; warm and cold anchors, an empty work anchor, junk quotes and the
+  same id in two sessions and twice in one store; 23 junk quotes; 20 handoff cards over every peer and label shape;
+  17 login-label inputs, five of which raise; the identity ladder over 35 query shapes with and without peer facts;
+  a parent chain and a healed forest at the depth limit (their answers kept as a SHA-1 of Python's json.dumps);
+- 88 direct calls: 21 awaited rows (every kind, three bad ones, since of every sign and size, both ends of i64, three
+  integers past it), 30 titles, 11 supersede tests (tuple and scalar answers), 5 stamp walks without `children` (one in
+  a cycle), 21 landing inputs.
+- 20 of these came in the review round (9 worlds, 11 direct calls), each aimed at a mutant the 205 missed: see "The
+  review round" below.
+
+Result: 210 cases load and match on every value (25,011), 0 differences. The other 15 are refused at load, and they
+are exactly the cases named REFUSE: Python raises on 2 (an AttributeError on an agentTask string, a RecursionError on
+a chain of 1,000) and answers the other 13 (five of them integers past i64). One past the depth limit (a chain, a
+healed forest, a cycle of 501) is refused where Python still answers; the Rust unit tests pin those three, kept out of
+the fixture for its size. Python's line trace over the edge set ran 273 of the 278 lines of the 29 functions and the
+body's children lines. The 5 it did not run cannot run in the per-card build: _node_anchor_uuids' revision bump needs
+a sid, which the feed never passes, and _names_parts' registry-file read needs no names scope, which the replay always
+sets.
+
+**The randomized check.** `python3 tools/rust-spike/dump_layer4.py --fuzz N --seed S` draws worlds of one to three
+sessions over the shared registry and peer facts (node ids that repeat across sessions or differ from their keys;
+parents in chains, orphans and two- or three-node cycles; int and float times with ties, zeros, -0.0 and absents; log
+rows of every kind with every time present, zero, null or absent, synth and lift flags; stamps, a third of them the
+previous stamp again with its anchor's tag flipped; peer answers aimed at the stamps' peers; handoffs whose peers take
+every identity shape and texts around the label; mangled junk quotes; heals, hidden tops and born steps; live rows and
+api errors of every shape), and, one case in five, a direct call. The review round added a negative node t (-5) and
+U7, a peer the postal log pairs with a name holding a colon. Python answers each with the real functions,
+`romp-spike layer4` compares, and any difference or refusal fails the run. The same seed makes the same file byte for byte
+(checked under another hash seed), so a failure replays.
+- Result, seeds 1 to 6 at 10,000 cases each (about 15 s apiece): 60,000 cases (47,971 worlds with 83,900 sessions and
+  347,312 nodes; 12,029 direct calls), 30,625,221 values, **0 differences**, 0 refused. Python raised on 559 cases, each
+  an AssertionError on the awaited-row kind "task" (the generator's one raising input), matched as the same
+  exception.
+- What they reached: 80,604 stamps and 25,203 stamp walks that loop; 5,490 parked rows; 18,330 agent-open ids; 8,178
+  hidden tops; 61,832 started faces; 58,571 review boundaries set; 73,687 subtrees whose newest block time is unknown;
+  40,149 handoff badges (18,140 named by the label); 74,213 registry misses, 28,278 remote and postal names, 10,461
+  composites; 21,057 login labels that raise. Python's line trace on every seed: the same 273 of 278 lines.
+
+**Planted mistakes, each caught.** The first five are romp-spike's `--plant` options (`dump_layer4.py --fuzz ...
+--plant NAME` passes only when the plant is caught). The other 78 are edits to the source, each built, run on all four
+inputs and reverted by a scratch script (not committed): the first round's 56, the review's 18 (R1 to R18, the
+reviewer's own edits reused verbatim), three order mutants added in the review round (X1 to X3), and the input-side
+refusal of an integer past i64 taken out (B1, in `EdgeCase::load_checked`). The table is the review round's run, on the
+final bytes, the 225-case edge set and the regenerated fuzz seed 1. Each cell is differences, then the sessions or
+cases they fell in.
+
+| Mistake | Small | Large | Edge set (225) | Fuzz, seed 1 (10,000) |
+|---|---|---|---|---|
+| `--plant max-last` (the last of equal stamps kept) | 0 | 0 | 1 in 1 | 380 in 293 |
+| `--plant int-round` (an awaited row's since rounded) | 0 | 0 | 5 in 5 | 205 in 205 |
+| `--plant uuid-strict` (no trailing newline in the uuid shape) | 0 | 0 | 4 in 2 | 2,329 in 780 |
+| `--plant table-off` (no warm anchors remembered) | 0 | 0 | 12 in 3 | 2,517 in 1,214 |
+| `--plant parked-sorted` (parked rows in id order) | 0 | 0 | 9 in 2 | 32 in 11 |
+| block_ev_t's max keeps the last of equal times | 0 | 0 | 6 in 1 | 296 in 126 |
+| block_ev_t keeps a falsy time | 0 | 0 | 2 in 1 | 1,323 in 565 |
+| block_ev_t reads ev_t only (no `or at`) | 0 | 0 | 8 in 3 | 6,312 in 2,270 |
+| a timeless done row is skipped (falls to mt) | 0 | 0 | 1 in 1 | 873 in 811 |
+| block_since falls to mt or 0 (no t) | 0 | 0 | 30 in 7 | 14,415 in 5,744 |
+| the stamp's max compares the anchor only | 0 | 0 | 5 in 4 | 338 in 96 |
+| the stamp's max ignores the peer lists | 0 | 0 | 1 in 1 | 13 in 6 |
+| a kindless stamp sorts after every kind (no `kind or ""`) | 0 | 0 | 26 in 9 | 3,584 in 1,770 |
+| rolledUp stamps count | 0 | 0 | 3 in 1 | 1,008 in 475 |
+| a job stamp can be superseded | 0 | 0 | 3 in 3 | 1,643 in 763 |
+| a stamp written at the answer's time is superseded (<=) | 0 | 0 | 3 in 1 | 718 in 290 |
+| lift rows count as writes | 0 | 0 | 1 in 1 | 7 in 4 |
+| the pair map is ignored (any answer supersedes) | 0 | 0 | 15 in 4 | 2,584 in 628 |
+| a falsy since is int(0), not None | 0 | 0 | 3 in 3 | 81 in 81 |
+| an absent agentId is written as null | 4 in 1 | 4 in 1 | 81 in 42 | 7,536 in 3,523 |
+| an awaited row's label is not stripped | 0 | 0 | 1 in 1 | 45 in 45 |
+| a nameless peer row has no "a peer" label | 0 | 0 | 3 in 2 | 229 in 141 |
+| a title collapses whitespace without a newline | 0 | 0 | 6 in 6 | 971 in 910 |
+| a title's first sentence may end before the 13th code point | 0 | 0 | 4 in 4 | 46 in 46 |
+| a clamped title trims with Rust's trim_end | 0 | 0 | 2 in 2 | 2 in 2 |
+| the handoff label's first group is greedy | 0 | 0 | 3 in 1 | 1,315 in 526 |
+| the label renames a registry peer | 0 | 0 | 3 in 2 | 781 in 578 |
+| a label without a host clears the peer host | 0 | 0 | 1 in 1 | 686 in 645 |
+| a composite's uuid tail is not cut to 8 | 0 | 0 | 18 in 3 | 1,231 in 778 |
+| an empty postal tail names nothing (not the stub) | 0 | 0 | 2 in 1 | 2,644 in 1,511 |
+| the remote name is read from the owning row, not by its host field | 0 | 0 | 1 in 1 | 3,054 in 946 |
+| handoff peers are not sorted | 8 in 1 | 8 in 1 | 14 in 1 | 116 in 9 |
+| handoff peers are not deduplicated | 0 | 0 | 2 in 1 | 2 in 1 |
+| junk quotes lowercase ASCII only | 0 | 0 | 3 in 3 | 2,560 in 1,759 |
+| junk quotes keep a trailing ellipsis | 0 | 0 | 2 in 2 | 2,238 in 1,556 |
+| a slash command with a space is junk | 0 | 0 | 2 in 2 | 1,216 in 903 |
+| an empty work anchor reads cold (truthiness, not `is not None`) | 0 | 0 | 1 in 1 | 955 in 537 |
+| a cold lookup's remembered prompt overrides its own | 0 | 0 | 1 in 1 | 209 in 194 |
+| an empty promptUuid does not fall through (Option::or) | 0 | 0 | 1 in 1 | 7,324 in 4,177 |
+| a junk quote keeps the prompt anchor | 0 | 0 | 5 in 2 | 6,109 in 3,693 |
+| no log rows answer [] (not None) | 6 in 3 | 40 in 37 | 283 in 114 | 22,883 in 6,553 |
+| the oldest eight log rows, not the newest | 0 | 0 | 24 in 1 | 224,548 in 4,112 |
+| the state decides before a working column | 33 in 3 | 237 in 37 | 987 in 127 | 209,280 in 7,370 |
+| the login label skips the used-login check | 0 | 0 | 1 in 1 | 294 in 288 |
+| a falsy non-dict api error raises | 0 | 0 | 1 in 1 | 1,392 in 1,306 |
+| an empty parentText does not fall back to the parent's text | 0 | 0 | 2 in 1 | 749 in 690 |
+| the heal's born beats the node's own | 0 | 0 | 3 in 3 | 966 in 653 |
+| the review boundary advances on an equal deltaSince (>=) | 0 | 0 | 1 in 1 | 32 in 31 |
+| a blank summary counts for the review boundary | 0 | 0 | 1 in 1 | 279 in 270 |
+| _agent_open_set stops at the first open child | 0 | 0 | 1 in 1 | 152 in 73 |
+| synthesized rows count as history in _parked_rows | 0 | 0 | 1 in 1 | 21 in 21 |
+| an equal-time sibling leapfrogs (>=) | 0 | 0 | 3 in 3 | 407 in 394 |
+| open leaves do not pierce a done marker | 0 | 0 | 5 in 2 | 1,494 in 574 |
+| no leaves reads as all delegated | 3 in 2 | 37 in 36 | 14 in 7 | 18,857 in 6,252 |
+| a cleared root is a focus top | 0 | 0 | 4 in 1 | 5,045 in 2,107 |
+| a born orphan is not made a root | 0 | 0 | 3 in 3 | 1,008 in 634 |
+| an empty healed parent counts | 0 | 0 | 1 in 1 | 948 in 466 |
+| a hidden top keeps its place | 0 | 0 | 3 in 2 | 2,602 in 1,223 |
+| an unknown block time is skipped, not None | 0 | 0 | 6 in 3 | 12,416 in 4,633 |
+| a registry color need not start with # | 0 | 0 | 2 in 1 | 1,579 in 801 |
+| an empty registry name is a name | 0 | 0 | 26 in 2 | 2,178 in 856 |
+| stamp tie-break: kind before why (R1) | 0 | 0 | 11 in 2 | 240 in 54 |
+| pair-aware answer: the first named peer, not the max (R2) | 0 | 0 | 9 in 1 | 245 in 65 |
+| stamp write time reads ev_t before at (R3) | 0 | 0 | 1 in 1 | 139 in 53 |
+| stamp write time not floored at awaitingAt (R4) | 0 | 0 | 3 in 1 | 1,637 in 561 |
+| stamp peers deduplicated (Python keeps repeats) (R5) | 0 | 0 | 2 in 1 | 116 in 28 |
+| _agent_open_set over the nodes' own parents (heal ignored) (R6) | 0 | 0 | 2 in 1 | 265 in 255 |
+| an empty own born falls to the heal's record (truthiness, not `is None`) (R7) | 0 | 0 | 1 in 1 | 156 in 153 |
+| anchor table keyed by an empty node id too (no `if nid`) (R8) | 0 | 0 | 4 in 1 | 13 in 10 |
+| cold lookup: summaryAnchor before the remembered anchor (R9) | 0 | 0 | 2 in 2 | 268 in 176 |
+| title sentence cut: ASCII whitespace lookahead only (R10) | 0 | 0 | 5 in 5 | 63 in 63 |
+| label rename splits host at the first colon (not rpartition) (R11) | 0 | 0 | 2 in 1 | 1,104 in 530 |
+| postal pairing split at the last colon (not partition) (R12) | 0 | 0 | 2 in 1 | 2,230 in 757 |
+| block_since keeps a falsy t's float tag (`mt or t or 0` without the literal 0) (R13) | 0 | 0 | 3 in 1 | 1,826 in 1,573 |
+| review boundary's reopen reads `ev_t or at` (R14) | 0 | 0 | 1 in 1 | 3 in 3 |
+| open leaves: agent-open pierces cleared too (R15) | 0 | 0 | 2 in 1 | 568 in 237 |
+| login label: an empty authLabel kept (no `or "login"`) (R16) | 0 | 0 | 1 in 1 | 80 in 80 |
+| parked: a sibling with no t never counts (no `or 0`) (R17) | 0 | 0 | 1 in 1 | 23 in 23 |
+| done_since keeps a falsy at's float tag (`ev_t or at or 0` without the literal 0) (R18) | 0 | 0 | 3 in 1 | 206 in 197 |
+| open leaves sorted by id (not document order) (X1) | 0 | 0 | 13 in 2 | 628 in 255 |
+| equal-named handoff identities ordered by sid (not first seen) (X2) | 0 | 0 | 4 in 1 | 16 in 4 |
+| the children map iterated in key order (not first seen) (X3) | 0 | 0 | 5 in 1 | 0 |
+| no input-side refusal of an integer past i64 (B1) | 0 | 0 | 4 in 4 | 0 (none drawn) |
+
+The worlds catch 5 of the 83: the null `agentId` and the unsorted handoff peers on s001's delegating goal (two
+handoffs, s003 and s002), and three on shapes nearly every store has: the empty log answered as [], the state read
+before a working column, and a top with no open leaves read as delegated. Everything else rests on the edge set and the
+fuzz. The edge set catches every row. Fuzz seed 1 catches every row but two: X3 (it reorders only _parked_rows'
+output across parents, and the fuzz rarely parks rows under two parents whose keys are out of order) and B1 (the fuzz
+draws no integer past i64, since any refusal fails a fuzz run; the edge set's REFUSE cases hold it, and taking out the
+snapshot-side check fails the unit test `snapshot::tests::an_integer_past_i64_is_refused`).
+
+The first round of this table was weaker, and each check found what the other missed:
+- The edge set missed 4 of the 56 source mutants, which the fuzz caught: a falsy block time kept (no node had only falsy
+  block times), Rust's `trim_end` at the title clamp (no clamp cut landed on U+001C..U+001F), a greedy first label group
+  (no label had two ": "), and an empty work anchor read as cold (the difference shows only in a later cold lookup of the
+  same id). A case was added for each.
+- The fuzz missed the `trim_end` mutant too, and caught `--plant max-last` in 1 case of 10,000; the edge set's own
+  full-tie case first missed that plant, because its first and last stamps were both ints. The case now meets 5 first and
+  5.0 last, and the fuzz repeats a third of its stamps with the anchor's tag flipped.
+- The review then found 11 more mutants the edge set missed (below), two of which the fuzz missed as well.
+
+**The review round.** The review had no must-fix. Its should-fix items, all applied:
+- Nine semantics the notes flag were caught only by the fuzz, and two by nothing (R12, R17). Each now has an edge case,
+  and each mutant fails the new edge set on exactly that case (the old set's 205 cases give 0 on every one):
+
+| Mutant (the review's number) | Edge set, 205 | Edge set, 225 | The case that catches it |
+|---|---|---|---|
+| _stamp_written_at reads `ev_t or at`, not `at or ev_t` (R3) | 0 | 1 in 1 | `superseded 45`: awaitingAt 40, an awaiting row with ev_t 50 and at 30, a scalar answer 45 (Python: 45) |
+| the stamp's peers deduplicated (R5) | 0 | 2 in 1 | awaitingPeers `[U1, U1, "peer:" + U1]` on a peer stamp (three identities) |
+| _agent_open_set over the nodes' own parents (R6) | 0 | 2 in 1 | an open to-do the heal re-parents under a, another on a hidden top (Python: a, b) |
+| an own `born: {}` falls through to the heal's record (R7) | 0 | 1 in 1 | `born: {}` with a heal entry for the same node (Python: no face) |
+| the anchor table written and read for id "" (R8) | 0 | 4 in 1 | a warm node with id "", then two cold ones with id "" in a later session |
+| the title cut's lookahead takes ASCII whitespace only (R10) | 0 | 5 in 5 | five titles whose stop at index 16 is followed by U+001C, U+00A0, U+3000, U+000B or U+0085 |
+| the label's host:name split at the first colon (R11) | 0 | 2 in 1 | `↪ delegated to a:b:c: work` on a registry miss (Python: peer c, host a:b) |
+| the postal pairing split at the last colon (R12) | 0 | 2 in 1 | U7 paired with `h7:delta:x` in POSTAL, asked in the identity ladder (Python: delta:x on h7) |
+| `mt or t or 0` keeps a falsy t's float tag (R13) | 0 | 3 in 1 | mt 0 with t 0.0, and with t -0.0, and t 0.0 alone (Python: the int 0) |
+| `(t or 0) > t0` skips a sibling with no t (R17) | 0 | 1 in 1 | p, a with t -5, b a handoff with no t (Python: a parked once) |
+| a done row's `ev_t or at or 0` keeps a falsy at's tag (R18) | 0 | 3 in 1 | done rows with at 0.0 or -0.0 and ev_t absent, 0 or None (Python: the int 0) |
+| no input-side refusal of an integer past i64 (B1) | 0 | 4 in 4 | four of the five integers past i64 load (2**63 is still refused by `Num` itself) |
+
+- R12 and R17 also passed the old fuzz: POSTAL held no name with a colon, and no node t was negative. U7 joined POSTAL,
+  the identity queries and the fuzz's peers, and -5 joined the fuzz's node times; seed 1 now catches them (2,230 and 23
+  differences).
+- The loader read an integer of 2**64 or more as a float (pre-existing, reachable through layer 4); it is now refused
+  on the input side (see the loader paragraph above). Not done: trees are not checked, for the load time.
+- SPIKE.md now carries the body's call order for _node_anchor_uuids forward to layer 6 ("What layer 5 needs"), and the
+  nits are fixed (jd._seg_command_worked; layer4.rs's header now lists only readings the edge set pins with a mutant).
+
+**Findings beyond the port.**
+- dump_world's replay answered the recorded `_peer_answered` with the JSON round trip's list. _peer_stamp_superseded
+  branches on `isinstance(answered, tuple)`, so the list took the legacy scalar path, and with any stamp that has an
+  anchor compared a number with a list: `_goal_awaiting_stamp_full(nodes, top, None, answered_at=[0, {}])` raises
+  TypeError where the tuple answers `(40, 'w', None, ())`. Neither world has a stamp, so no dump was wrong. The replay
+  now hands back a tuple; both worlds were dumped again and every file but `run.json` is byte-identical (23 and 159),
+  with the replay checks passing.
+- The comparisons of the earlier layers read Python's answers through serde_json, which turns an integer past u64 into
+  a float. No earlier answer holds one (layer 2's times past 2**63 are floats), but layer 4's `int(since)` does,
+  so `romp-spike layer4` reads Python's answers with romp-transcript's decoder (the first edge run showed `1e+20` against
+  the port's 21 digits).
+
+## What layer 5 needs (landing, delegation and provisional)
+
+Section 2 item 5: _summary_text_anchor with _text_atoms, _opening_sentence (3 regexes) and jd._locate_quote;
+_dictated_prompt_uuid with jd._human_prompt_record, and _pure_delegation_top; _provisional_card with _seg_placed,
+_seg_caption, _seg_prompt, _split_reminders and jd._seg_human, _seg_command, _seg_slash_shaped (BARE_SLASH_RE),
+_seg_followup (FOLLOWUP_RE) and _seg_system. Found while scoping it from the current source (the line numbers in
+section 2 still hold at this HEAD) and the large world's `coverage/port.json`:
+- Unlisted functions and constants they call: _summary_outrun (the body's cited tier: `int(distilledMt or 0)`,
+  `briefedMt`, `followupAt`), jd._seg_command_worked, _live_replanned and _live_cleared_under (from _provisional_card),
+  em.postal_pairs and jd.NUDGE_MARKER_RE (from _human_prompt_record's attachment arm), and em.is_interrupt_record
+  (layer 1). _provisional_card reads the session's recorded captions (`_captions(fsid)`, in the snapshot) and the
+  store's placements.
+- Node keys to type: `askAnchor` and `userAsk` (_pure_delegation_top's latch and chain evidence), `followupAt` and
+  `briefedMt` (_summary_outrun); the loader refuses the first three today (`NODE_UNPORTED`). `briefedMt` is not in that
+  list, because the ast scan behind it missed _summary_outrun; it loads untyped now, so type it and check the list again.
+- Text semantics: jd._locate_quote tries an exact `find`, then a regex of the quote's words joined by `\s+` with
+  `re.I`. Python's `re.I` folds case one code point at a time with its own table, which matches the Kelvin sign (U+212A)
+  with k and the long s (U+017F) with s; a port's case-insensitive match must use that table, not a lowercase
+  comparison. `_opening_sentence` splits paragraphs with `re.split(r"\n\s*\n", ...)` and cuts at `[.!?](?=\s|$)` past
+  12 code points; `str(span)[:300]` and `sent[:200]` count code points. _provisional_card strips comments with
+  `re.sub(r"<!--.*?-->", "", ..., flags=re.S)` (lazy, across lines) and reads `held.get("t", lt["t"])`, where absent
+  and null differ.
+- State across calls: _summary_text_anchor memoizes into _SUMMARY_ANCHOR_MEMO, keyed with `hash(str(line))`, which
+  moves with PYTHONHASHSEED. It is a cache (a hit returns what a miss computes), so the port leaves it out as layer 3
+  left out the held aggregate, and the oracle must clear it and count its faults (_SUMMARY_ANCHOR_STATS) as layer 3's
+  oracle did. _pure_delegation_top's `memo` (children and the prompt index, once per derivation) is the same kind of
+  cache. _dictated_prompt_uuid indexes the first record under each uuid.
+- Inputs: _dictated_prompt_uuid and _provisional_card read the parse through `_parse_cached` and `_parse`, the
+  unmerged parse, where the dump holds the merged tree (S2's note); both worlds have no live atoms, so they agree.
+- Carried forward for layer 6 (found in S4.4's review): the body calls _node_anchor_uuids inside `flatten` (kernel.py,
+  the `_pa, _wa = _node_anchor_uuids(nd, seg_trig, seg_uuid)` line, about 56228), not over the store. It runs once per
+  flattened node: a card top, then its children sorted by `_fsubmax` (the newest `mt`, else `t`, over the subtree)
+  descending, stably, each recursively before the next. The tops flattened are `children[None]` of the body's children
+  minus cleared tops (rollup status `cleared`, or in the build's cleared set) and pure-delegation tops (unless a live
+  floor keys on them). Hidden nodes, parentId-cycle members and orphans that are not born (their missing parent key
+  never hangs under None) are never flattened, so they never write or read the table. Layer 4's oracle and
+  `session_json` call it per node in store order, which agrees with the body only while no two flattened nodes share
+  an id. Since `AnchorTable` lives for the kernel run, the order decides which of two same-id nodes' anchors a later
+  cold lookup serves, within one build and across builds; and a session whose entry is served from the feed memo
+  (a `_feed_session_key` hit) runs no body, so it writes nothing that build. Layer 6 must make these calls from its
+  own flatten, in this order.
+- Branches the worlds miss, from `coverage/port.json` (large): _summary_text_anchor 29 of 42 lines (the turn-wide
+  search, the substantive and stub fallbacks, the memo hit), _locate_quote's case-insensitive arm, _split_reminders 3 of
+  24 (no reminder in either world), _human_prompt_record's interrupt and attachment arms, _provisional_card 30 of 46,
+  _pure_delegation_top's userAsk, latch and origin arms, _seg_placed's and _seg_caption's drift fallbacks.
 
 ## Log
 
@@ -745,3 +1073,35 @@ _login_refusal_label, _name_color, _name_of. Found while scoping it from the cur
   differences. The docs no longer present the raw-content tool count, the plain-prompt split or its `or 0` as pinned
   traps: they agree with the simpler readings on every shape the loader admits. layer3.rs states the one-map design's
   dependency (nothing raises between `pos[k]` and `seg_best[k]`).
+- 2026-11-26: S4.4, layer 4 (the store helpers), on fresh dumps (`dump_layer4.py`, `romp-spike layer4`).
+  - Worlds: small 4 sessions, 10 nodes, 6 names, 864 values; large 38 sessions, 78 nodes, 40 names, 6,406 values; 0
+    differences. The build check compared every helper call the replay's per-card body makes (87 and 597), 0 mismatches.
+  - Edge set: 205 cases; 195 load and match on 23,302 values, 0 differences; 10 refused at load (every REFUSE case),
+    Python raising on 2 of them. Python ran 273 of the 278 lines of the 29 functions; the 5 left cannot run in the feed.
+  - `dump_layer4.py --fuzz`: seeds 1 to 6 at 10,000 cases, 30,602,877 values, 0 differences, 0 refused.
+  - Planted: 5 `--plant` options and 56 source mutants, every one caught by the edge set and by fuzz seed 1; the worlds
+    catch 5 of the 61.
+    The first round's edge set missed 4 source mutants and the full-tie plant; the fuzz missed 1; each was closed with a
+    case or a generator change, and the table was run again.
+  - Findings: dump_world's replay handed _peer_stamp_superseded a list where the live helper returns a tuple (a
+    TypeError on any anchored stamp; fixed, both dumps byte-identical after); Python's `$` and `lower()` readings
+    pinned; Python's big ints in answer files are read with romp-transcript's decoder.
+  - Loader types for layer 4 added; the round trip and layers 1 to 3 still match on both worlds (6,370 and 2,499,514
+    layer-1 values, 336 and 135,016 layer-2 values, 1,801 and 695,672 layer-3 values). Rust tests: 126 pass.
+- 2026-11-26: S4.4 review follow-ups (no must-fix), on fresh dumps.
+  - Edge set: 225 cases (20 added); 210 load and match on 25,011 values, 0 differences; 15 refused at load (every
+    REFUSE case). Each of the 11 mutants the review showed the edge set missing (R3, R5, R6, R7, R8, R10, R11, R12, R13,
+    R17, R18) gives 0 on the old 205 cases and fails the new set on exactly its added case.
+  - `dump_layer4.py --fuzz`: U7 (a postal name with a colon) and a negative node t added; seeds 1 to 6 at 10,000 cases,
+    30,625,221 values, 0 differences, 0 refused. R12 and R17, which no check caught before, now fail seed 1 (2,230 and
+    23 differences).
+  - Mutant table rerun on the final bytes: 5 plants and 78 source mutants (the first round's 56, the review's 18, 3
+    order mutants, the big-int refusal removed), every one caught by the edge set; fuzz seed 1 misses 2 (X3, B1); the
+    worlds catch 5.
+  - Loader: an integer literal past i64 in the snapshot or an edge or fuzz case's input is refused (serde_json read one
+    past u64 as a float); romp-spike checks the layer 1 to 3 answer files and the layer 2 and 3 edge files whole.
+    Trees are not checked (it would triple their load). Re-run: the round trip and layers 1 to 4 match on both worlds
+    (6,370 and 2,499,514 layer-1 values, 336 and 135,016 layer-2, 1,801 and 695,672 layer-3, 864 and 6,406 layer-4),
+    the layer 2 and 3 edge sets and one fuzz seed of each (97,398 values and 30,000 counts; 1,345,684 values), 0
+    differences.
+  - SPIKE.md carries the body's flatten order for _node_anchor_uuids forward to layer 6. Rust tests: 131 pass.
