@@ -2593,6 +2593,27 @@ fetch each record by a positioned read, which would pass at any plausible expans
   staged fallback ("The question the spike answers"): the store first, behind the Python kernel, redesigned to hold only
   its index if real transcripts confirm the miss. The recommendation is S7's to make, after the real-transcript number.
 
+### The real-transcript memory run (2026-11-26, lczh's OK)
+
+lczh approved one local run on a read-only copy of real transcripts, a single process at a time, nothing committed but the
+numbers. All of the Mac's Claude Code transcripts total about 708 MB, which would have had Python hold about 3 GB. So the
+run used a random sample of whole files: 420 files, 82.0 MB, picked with a fixed seed, files over 30 MB skipped, and
+renamed `t0000.jsonl` and so on in the copy. Three runs on the arm64 CPython 3.13.18 romp runs, with 6 rounds of
+appends to the 4 largest files. Both sides counted the same records (16,303) in every round. The copy and the scratch
+output were deleted afterwards.
+
+| Footprint growth on the real sample | Cold | After appends | Bytes per file byte |
+|---|---|---|---|
+| Python, arm64 3.13 | 182.4 MB | 196.6 MB | 2.22 (traced: 1.97) |
+| Store, whole-line blocks (the decided policy) | 86.3 MB | 93.6 MB | 1.05 |
+| **Store over Python** | **0.473** | **0.476** | |
+
+**The memory gate fails on real transcripts, at 0.48 against one third.** The synthetic world's 0.25 came from its
+transcripts being unusually costly for Python to hold (4.5 bytes per file byte). Real transcripts cost Python only about
+2.2, below the 2.85 to 3.1 the earlier projection assumed. A store that keeps the raw bytes can never be under a third
+of a cache that holds only twice the file. The index-only design S3 projected (about 0.11 bytes per file byte, so
+roughly 0.05 of Python) is the one that could pass. It re-reads a record's bytes on request with a positioned read.
+
 ## Log
 
 - 2026-11-25: spike started (lczh: "when we are on the A Fellows org, start working on the rust migration, pace
