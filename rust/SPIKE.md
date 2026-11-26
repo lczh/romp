@@ -22,7 +22,7 @@ with no server. Both implementations run on one synthetic state, and the feed JS
     `dump_layer2.py --fuzz`). See "S4.2 as built" below.
   - S4.3: the tree facts and the anchor walk (_session_working, _open_turn_progress, the anchor maps, the plain-prompt
     time, `seg_turn`, and the four anchor functions per segment) match Python's own answers with zero differences on
-    both worlds (1,801 values small, 695,672 large), on 128 Python-made edge cases (6,444 values; 7 more are refused at
+    both worlds (1,801 values small, 695,672 large), on 129 Python-made edge cases (6,501 values; 7 more are refused at
     load, as built to be) and on 60,000 random sessions and position sets (8,059,862 values, `dump_layer3.py --fuzz`).
     4 planted mistakes and 21 source mutants are each caught by the edge set and by one fuzz seed. See "S4.3 as built".
   - S2 done before them (byte-identical oracle dumps across seeds and roots, "S2 as built"); S1 before that
@@ -474,8 +474,10 @@ aggregate (_FEED_SEG_HELD and its keys) is left out, so the walk folds every tur
 - `max(best, x)` keeps the first of equal values, so the plain-prompt time is 5 after 5 then 5.0, and 5.0 after 5.0
   then 5. `a.get("t") or turn.get("t") or 0` skips a zero time. `_feed_seg_plain_t`'s two steps (closed turns, then
   the open one) are kept as written.
-- _open_turn_progress counts tool_use blocks over `(message or {}).get("content") or []`, not em._content: a bare
-  string content counts nothing.
+- _open_turn_progress counts tool_use blocks over `(message or {}).get("content") or []`, as Python does, not through
+  em._content. The review found the two readings agree on every shape the loader admits (a bare-string content,
+  non-dict blocks, `{}` and null): kept for fidelity, not a pinned trap. The same holds for the closed/open split of
+  `_feed_seg_plain_t` and its trailing `or 0`.
 - `x or y` over uuids treats "" as false: a reply whose uuid is "" falls to the settle, then to _seg_jump.
 - With no trigger uuid, _last_plain_user_turn_t's anchor search looks for an atom whose uuid equals None. An idle span
   (uuid null) matches before `atoms[0]` is tried, so the prompt before it is not the anchor.
@@ -512,7 +514,7 @@ every leaf is compared as romp-json writes it, so an int/float tag counts.
   common path is the 80-code-point floor, at the boundary atom.
 
 **The edge set.** `dump_layer3.py --edge-cases` writes `rust/crates/romp-views/tests/fixtures/layer3_edge.json`
-(synthetic, 0.31 MB; it regenerates byte for byte under another hash seed). Its 135 cases:
+(synthetic, 0.31 MB; it regenerates byte for byte under another hash seed). Its 136 cases:
 - 112 sessions: empty and ended turns, idle tails, trailing command atoms (truthy and falsy), downtime before, at and
   after the last activity (an int start against a float end, a zero end), the progress count over every content
   shape, echo turns, `_echo_text`, romp-goal-id prompts (in a list and in a bare string), every trigger shape, zero,
@@ -524,7 +526,7 @@ every leaf is compared as romp-json writes it, so an int/float tag counts.
   raising turn (a fault on every get), a turn index past the end, no turns;
 - 12 direct _suspended_after reads, including `t` null, 0 and -0.0.
 
-Result: 128 cases load and match on every value (6,444), 0 differences. The other 7 are refused at load, and they are
+Result: 129 cases load and match on every value (6,501), 0 differences. The other 7 are refused at load, and they are
 exactly the cases named REFUSE. Python raises on 3 of them: an AttributeError on a string message (em._stop_reason, in
 _seg_anchors), a ValueError on a downtime entry of three values, a TypeError on a null start. On the other 4 Python
 answers: a content that is a dict, a restored pre-cut turn with stored prose counts, a trigger that is a string, and a
@@ -735,3 +737,9 @@ _login_refusal_label, _name_color, _name_of. Found while scoping it from the cur
     closed with a case or a generator change.
   - `board.downtime` typed as number pairs; the round trip and layers 1 and 2 still match on both worlds (6,370 and
     2,499,514 layer-1 values, 336 and 135,016 layer-2 values). Rust tests: 102 pass.
+- 2026-11-26: S4.3 review follow-ups. Verdict ship, no must-fix. Added the edge case the review found missing: two
+  substantive atoms in one segment, then a short one. A port that cited only the segment's last substantive atom passed
+  the worlds and the old edge set; only the fuzz caught it. The edge set is now 136 cases, 129 loaded, 6,501 values, 0
+  differences. The docs no longer present the raw-content tool count, the plain-prompt split or its `or 0` as pinned
+  traps: they agree with the simpler readings on every shape the loader admits. layer3.rs states the one-map design's
+  dependency (nothing raises between `pos[k]` and `seg_best[k]`).

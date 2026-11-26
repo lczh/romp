@@ -454,6 +454,10 @@ def edge_cases(km, l2):
     add("cite: substantive atoms across turns, duplicates once",
         tree(closed([u("u1", 100), asst("a1", 101, sub80)]), closed([u("u2", 200), asst("a1", 201, pad(90)),
                                                                       asst("a3", 202, pad(85))])))
+    # the S4.3 review's gap: two distinct substantive atoms in ONE segment, then a short one. Python cites both a1 and
+    # a2; a port that cited only the segment's last substantive atom passed every other case (only the fuzz caught it)
+    add("cite: two substantive atoms in one segment, then a short one",
+        tree(closed([u("u1", 100), asst("a1", 101, pad(85)), asst("a2", 102, pad(90)), asst("a3", 103, "short")])))
 
     # _feed_seg_fold: repeated keys, raises, seams, echoes
     add("the same prompt in two turns: the later overwrites in the first place",

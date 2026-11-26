@@ -7,13 +7,18 @@
 //! --edge-cases) and the randomized check (--fuzz):
 //! - The fold's maps are Python dicts: a later segment with the same key (jd._seg_key, `rompuuid:hash`, so two prompts
 //!   with the same text in two turns share one) overwrites the earlier one's value but keeps its place. The four maps
-//!   are always written together, so `SegMaps` holds one insertion-ordered map (`PyDict`) of all four values.
+//!   are always written together, so `SegMaps` holds one insertion-ordered map (`PyDict`) of all four values. That
+//!   relies on nothing raising between Python's `pos[k] = (ti, si)` and `seg_best[k] = ...` inside one segment, which
+//!   holds on every tree the loader admits (the only known raiser there, a string message, an AttributeError in
+//!   em._stop_reason, is refused at load). A loader that admitted such a shape would need four separate maps.
 //! - A segmentation raise (layer 2's `Err(Raise)`) ends the walk with the maps as far as the fold got and `ok` false; it
 //!   is never a panic. _FeedSegTurns.get answers its default when segmentation raises, and counts a fault.
 //! - `max(best, x)` keeps the first of equal values (5 before 5.0), so the plain-prompt time's int/float tag depends on
 //!   the order of the turns; `a.get("t") or turn.get("t") or 0` skips a zero time.
-//! - _open_turn_progress counts tool uses over `(message or {}).get("content") or []`, not em._content: a bare-string
-//!   content iterates characters, none of them a dict.
+//! - _open_turn_progress counts tool uses over `(message or {}).get("content") or []`, as Python does, not through
+//!   em._content. Not a pinned trap: the S4.3 review found that counting through em._content gives the same answer on
+//!   every shape the loader admits (a bare-string content, non-dict blocks, `{}` and null included). It is kept for
+//!   fidelity. The same holds for `_feed_seg_plain_t`'s closed/open split and its trailing `or 0`.
 //! - `x or y` over uuids: "" is falsy, so an empty reply uuid falls through to the settle, then to _seg_jump.
 //! - With no trigger, _last_plain_user_turn_t's anchor search looks for `uuid == None`, which an idle atom (uuid null)
 //!   or an atom without a uuid matches before `atoms[0]` is tried.

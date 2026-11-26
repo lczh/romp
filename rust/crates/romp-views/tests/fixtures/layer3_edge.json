@@ -6,10 +6,10 @@
   "CITE_MIN_CHARS": 80
  },
  "coverage": {
-  "sessions": 105,
-  "turns": 147,
-  "segments": 151,
-  "keys": 113,
+  "sessions": 106,
+  "turns": 148,
+  "segments": 152,
+  "keys": 114,
   "overwrites": 35,
   "working": 20,
   "suspended": 4,
@@ -17,11 +17,11 @@
   "walkNotOk": 6,
   "raisingTurns": 6,
   "jumpFallback": 31,
-  "substantive": 9,
-  "cite": 8,
+  "substantive": 10,
+  "cite": 10,
   "plainFloat": 6,
   "faults": 5,
-  "segTurnHits": 122,
+  "segTurnHits": 123,
   "segTurnsCases": 11
  },
  "cases": [
@@ -12837,6 +12837,168 @@
        "a3",
        true,
        200
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "name": "cite: two substantive atoms in one segment, then a short one",
+   "kind": "session",
+   "tree": {
+    "turns": [
+     {
+      "atoms": [
+       {
+        "type": "user",
+        "uuid": "u1",
+        "t": 100,
+        "session_id": "eeeeeeee-0000-0000-0000-000000000002",
+        "author": "human",
+        "message": {
+         "role": "user",
+         "content": [
+          {
+           "type": "text",
+           "text": "please fix it"
+          }
+         ]
+        }
+       },
+       {
+        "type": "assistant",
+        "uuid": "a1",
+        "t": 101,
+        "session_id": "eeeeeeee-0000-0000-0000-000000000002",
+        "message": {
+         "role": "assistant",
+         "content": [
+          {
+           "type": "text",
+           "text": "Wrapped up: the na\u00efve \u2192 index is fixed \ud83d\ude00 Wrapped up: the na\u00efve \u2192 index is fixed \ud83d\ude00 Wra"
+          }
+         ],
+         "stop_reason": "end_turn"
+        }
+       },
+       {
+        "type": "assistant",
+        "uuid": "a2",
+        "t": 102,
+        "session_id": "eeeeeeee-0000-0000-0000-000000000002",
+        "message": {
+         "role": "assistant",
+         "content": [
+          {
+           "type": "text",
+           "text": "Wrapped up: the na\u00efve \u2192 index is fixed \ud83d\ude00 Wrapped up: the na\u00efve \u2192 index is fixed \ud83d\ude00 Wrapped."
+          }
+         ],
+         "stop_reason": "end_turn"
+        }
+       },
+       {
+        "type": "assistant",
+        "uuid": "a3",
+        "t": 103,
+        "session_id": "eeeeeeee-0000-0000-0000-000000000002",
+        "message": {
+         "role": "assistant",
+         "content": [
+          {
+           "type": "text",
+           "text": "short"
+          }
+         ],
+         "stop_reason": "end_turn"
+        }
+       }
+      ],
+      "t": 100,
+      "end": 200,
+      "ended": true,
+      "id": "edge-turn",
+      "trigger": {
+       "uuid": "u1"
+      }
+     }
+    ]
+   },
+   "store": null,
+   "downtime": [],
+   "expect": {
+    "working": false,
+    "suspended": false,
+    "progress": null,
+    "walkOk": true,
+    "segUuid": [
+     [
+      "eeeeeeee-0000-0000-0000-000000000002:af8f4d67",
+      "a3"
+     ]
+    ],
+    "segTrig": [
+     [
+      "eeeeeeee-0000-0000-0000-000000000002:af8f4d67",
+      "u1"
+     ]
+    ],
+    "segBest": [
+     [
+      "eeeeeeee-0000-0000-0000-000000000002:af8f4d67",
+      [
+       "a2",
+       true,
+       100
+      ]
+     ]
+    ],
+    "pos": [
+     [
+      "eeeeeeee-0000-0000-0000-000000000002:af8f4d67",
+      [
+       0,
+       0
+      ]
+     ]
+    ],
+    "cite": [
+     "a1",
+     "a2"
+    ],
+    "plainT": 100,
+    "segTurn": [
+     [
+      "eeeeeeee-0000-0000-0000-000000000002:af8f4d67",
+      true,
+      [
+       0,
+       [
+        0,
+        1,
+        2,
+        3
+       ]
+      ]
+     ],
+     [
+      "absent-key",
+      false,
+      null
+     ]
+    ],
+    "faults": 0,
+    "turns": [
+     [
+      [
+       "eeeeeeee-0000-0000-0000-000000000002:af8f4d67",
+       "a1",
+       "a3",
+       "a3",
+       "u1",
+       "a2",
+       true,
+       100
       ]
      ]
     ]
