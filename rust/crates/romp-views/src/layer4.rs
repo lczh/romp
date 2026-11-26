@@ -52,7 +52,7 @@
 //! _login_refusal_label raises AttributeError on a truthy api-error answer that is not a dict; that is `Err(Raise)`.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{FxMap as HashMap, FxSet as HashSet};
 
 use romp_json::Value as Out;
 
@@ -357,7 +357,7 @@ pub struct Loops;
 
 /// The body's `_subtree(root)`: every id at or under `root`, pre-order by a stack (the last child first).
 pub fn subtree(c: &Children, root: &str) -> Result<Vec<String>, Loops> {
-    let (mut stack, mut acc, mut seen) = (vec![root.to_string()], Vec::new(), HashSet::new());
+    let (mut stack, mut acc, mut seen) = (vec![root.to_string()], Vec::new(), HashSet::default());
     while let Some(x) = stack.pop() {
         if !seen.insert(x.clone()) {
             return Err(Loops);
@@ -381,7 +381,7 @@ fn agent_open_own(nd: Option<&Node>) -> bool {
 /// kernel._agent_open_set(nodes, children): every id that is, or has a descendant that is, an agentTask-open node,
 /// walked from the roots (`children[None]`), every child visited. Iterative post-order.
 pub fn agent_open_set(ns: &Ns<'_>, c: &Children) -> HashSet<String> {
-    let mut open = HashSet::new();
+    let mut open = HashSet::default();
     for top in c.get(None) {
         let mut stack: Vec<(&str, &[String], usize, bool)> =
             vec![(top.as_str(), c.get(Some(top)), 0, agent_open_own(ns.get(top)))];
@@ -412,14 +412,14 @@ pub fn parked_rows(ns: &Ns<'_>, c: &Children) -> Vec<(String, usize)> {
 }
 
 fn parked_with(ns: &Ns<'_>, c: &Children, plant: Option<Plant>) -> Vec<(String, usize)> {
-    let mut hmemo: HashMap<String, bool> = HashMap::new();
-    let mut rmemo: HashMap<String, bool> = HashMap::new();
+    let mut hmemo: HashMap<String, bool> = HashMap::default();
+    let mut rmemo: HashMap<String, bool> = HashMap::default();
     fn sub_has(ns: &Ns<'_>, c: &Children, x: &str, memo: &mut HashMap<String, bool>, hit: &dyn Fn(&Node) -> bool)
         -> bool {
         if let Some(&f) = memo.get(x) {
             return f;
         }
-        let (mut seen, mut stack, mut found) = (HashSet::new(), vec![x.to_string()], false);
+        let (mut seen, mut stack, mut found) = (HashSet::default(), vec![x.to_string()], false);
         while let Some(y) = stack.pop() {
             if !seen.insert(y.clone()) {
                 continue;
@@ -473,7 +473,7 @@ fn parked_with(ns: &Ns<'_>, c: &Children, plant: Option<Plant>) -> Vec<(String, 
 /// jd._top_of(nodes, nid): the top-level ancestor, cycle-safe (a repeat stops the climb where it is).
 pub fn top_of(ns: &Ns<'_>, nid: Option<&str>) -> Option<String> {
     let mut top = nid.map(str::to_string);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     loop {
         let parent = top.as_deref().and_then(|t| ns.get(t)).and_then(parent_id);
         let Some(p) = parent else { break };
@@ -525,7 +525,7 @@ pub fn open_leaves(ns: &Ns<'_>, top: &str) -> Vec<String> {
         }
     }
     let mut leaves = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: HashSet<&str> = HashSet::default();
     let mut stack: Vec<(Vec<&str>, usize)> = Vec::new();
     visit(top, &c, &open, &mut seen, &mut stack, &mut leaves);
     while let Some(fr) = stack.last_mut() {
@@ -650,7 +650,7 @@ fn stamp_with(
         }
     };
     let mut best: Option<Cand<'_>> = None;
-    let (mut stack, mut seen) = (vec![top.to_string()], HashSet::new());
+    let (mut stack, mut seen) = (vec![top.to_string()], HashSet::default());
     while let Some(x) = stack.pop() {
         let Some(nd) = ns.get(&x) else { continue };
         if !seen.insert(x.clone()) {
@@ -747,7 +747,7 @@ pub struct Names(pub HashMap<String, Vec<String>>);
 
 impl Names {
     pub fn from_snapshot(snap: &Snapshot) -> Names {
-        let mut m = HashMap::new();
+        let mut m = HashMap::default();
         for (sid, p) in snap.peers.iter().flat_map(OMap::iter) {
             if let Some(Some(n)) = &p.names {
                 m.insert(sid.clone(), n.clone());
@@ -1423,7 +1423,7 @@ pub fn names_json(ctx: &Ctx<'_>, queries: &[Option<String>]) -> Out {
 /// node its handoff peer, origin peer and awaitingPeers, then ABSENT_SID and "".
 pub fn dump_queries(snap: &Snapshot) -> Vec<Option<String>> {
     let mut out: Vec<Option<String>> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::default();
     let mut add = |x: &str| {
         if seen.insert(x.to_string()) {
             out.push(Some(x.to_string()));
@@ -1778,7 +1778,7 @@ mod tests {
 
     #[test]
     fn the_identity_ladder() {
-        let names = Names(HashMap::from([("s1".to_string(), vec!["one".into(), "/w".into(), "#123456".into()])]));
+        let names = Names(HashMap::from_iter([("s1".to_string(), vec!["one".into(), "/w".into(), "#123456".into()])]));
         let mut world = PeerWorld::default();
         let u = "11111111-2222-3333-4444-000000000009";
         world.remotes = serde_json::from_str(&format!(r#"{{"h1": {{"host": "h1", "sids": ["{u}"], "names": {{}}}}}}"#))
@@ -1839,8 +1839,8 @@ mod tests {
         let nd = |trail: &str| {
             node(&format!(r#"{{"id": "g1", "trail": [{trail}], "quote": "fix it", "summaryAnchor": "sa"}}"#))
         };
-        let work = SegMap(HashMap::from([("s:h1".to_string(), Some("w1".to_string()))]));
-        let trig = SegMap(HashMap::from([("s:h1".to_string(), Some("p1".to_string()))]));
+        let work = SegMap(HashMap::from_iter([("s:h1".to_string(), Some("w1".to_string()))]));
+        let trig = SegMap(HashMap::from_iter([("s:h1".to_string(), Some("p1".to_string()))]));
         let empty = SegMap::default();
         let mut table = AnchorTable::default();
         let both = (Some("p1".to_string()), Some("w1".to_string()));
@@ -1930,7 +1930,7 @@ mod tests {
         assert_eq!(open_leaves(&ns, "t"), ["x", "y"]);
         assert!(!all_outstanding_delegated(&ns, "t"));
         let aopen = agent_open_set(&ns, &Children::from_parents(&ns));
-        assert_eq!(aopen, HashSet::from(["t".to_string(), "x".to_string()]));
+        assert_eq!(aopen, HashSet::from_iter(["t".to_string(), "x".to_string()]));
     }
 
     #[test]
@@ -1944,7 +1944,7 @@ mod tests {
 
     #[test]
     fn an_empty_id_is_never_remembered_and_an_empty_born_hides_the_heal() {
-        let work = SegMap(HashMap::from([("s:h1".to_string(), Some("w1".to_string()))]));
+        let work = SegMap(HashMap::from_iter([("s:h1".to_string(), Some("w1".to_string()))]));
         let empty = SegMap::default();
         let mut table = AnchorTable::default();
         let warm = node(r#"{"id": "", "trail": ["s:1:h1"]}"#);

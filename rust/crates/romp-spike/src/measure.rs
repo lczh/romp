@@ -1,6 +1,6 @@
 //! S6's measurement, the Rust side (rust/SPIKE.md, "S6 method"). Two modes, each printing one JSON line on stdout:
 //!
-//!     romp-spike measure cpu DUMP [--builds K]
+//!     romp-spike measure cpu DUMP [--builds K] [--memo]
 //!     romp-spike measure mem DIR PAYLOAD [--appends K] [--growth blocks|double] [--relief]
 //!
 //! `cpu` loads the dump (timed), builds the feed once (the cold build, the first in the process) and checks its
@@ -20,6 +20,23 @@
 //!             aggregate stored): Python's emptyMemo;
 //!   entries   `Build::new` plus `entries` (S6's first harness: the derivation without the fold);
 //!   buildNew  `Build::new` alone (the maps a build reads across sessions; outside `region`, reported apart).
+//! With `--memo` (S6.1, memo.rs), three more rows in a phase of their own after the rounds above, as measure.py's
+//! run_memo_rows follows its plain rows: a memo, held table and anchor table made when the phase starts, warmed by
+//! three builds (cold; the second build that settles the sessions whose entries name peers; one served whole, checked
+//! against the oracle and required to be all hits), then K rounds of the memo rows alone, even rounds in MEMO_PHASE's
+//! order and odd rounds reversed (Python's rule for its two memo rows); no row above runs between them:
+//!   memoBuild the whole build_feed with the memo, every session a hit;
+//!   memo      `fold_on` with the memo, every session a hit: each session's key computed and compared, its entry copied
+//!             and folded (Python's memoKeyed row, measure.py --memo: the real key over the same recorded facts);
+//!   memoMiss  the same with the largest session's stored key made to differ in its `transcript` component before the
+//!             clock: that session misses, derives over its held aggregate, re-takes its deps and is put again, every
+//!             other session hits (Python's memoKeyedMiss, which moves the transcript's recorded identity instead).
+//! Without memoBuild the phase's sequence is Python's (memo, memoMiss | memoMiss, memo | ...); memoBuild, an all-hit
+//! build like the memo row, sits only between two all-hit builds, so memo and memoMiss follow what their Python rows
+//! follow: an all-hit build in even rounds, a miss build in odd rounds.
+//! Each memo build keeps its hits and misses; after the rounds a memo build is checked against the oracle again.
+//! Every build from the first round on carries `seq`, its place in the order the process ran them (the memo phase's
+//! oracle builds too, each with its `what`), so the driver checks from the output what each memo build followed.
 //! What a timed call returns is dropped after the clock stops, as Python's harness keeps its result past its clock.
 //! Every held and heldCold build keeps the held walk's counters it moved (segWalks, segHeld, segWalkTurns, ...), which
 //! the driver checks against Python's heldWarm and emptyMemo builds: equal counters show the held path really ran.
@@ -51,6 +68,7 @@ use serde_json::{Value as J, json};
 
 use romp_transcript::{Growth, ReadKind, Store};
 use romp_views::layer3::SegHeld;
+use romp_views::memo::{self, FeedMemo};
 use romp_views::{layer6, layer7, load};
 
 mod sys {
@@ -283,7 +301,7 @@ const USAGE: &str = "usage: romp-spike measure cpu DUMP [--builds K]\n       rom
 pub fn cmd(args: &[String]) -> std::process::ExitCode {
     let mut pos = Vec::new();
     let (mut builds, mut appends) = (11usize, 6usize);
-    let (mut growth, mut relief) = (Growth::default(), false);
+    let (mut growth, mut relief, mut memo_rows) = (Growth::default(), false, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let num = |v: Option<&String>| v.and_then(|s| s.parse::<usize>().ok());
@@ -301,12 +319,13 @@ pub fn cmd(args: &[String]) -> std::process::ExitCode {
                 None => return usage(),
             },
             "--relief" => relief = true,
+            "--memo" => memo_rows = true,
             s if s.starts_with("--") => return usage(),
             _ => pos.push(a.as_str()),
         }
     }
     let out = match pos.as_slice() {
-        ["cpu", dump] => cpu(Path::new(dump), builds),
+        ["cpu", dump] => cpu(Path::new(dump), builds, memo_rows),
         ["mem", dir, payload] => mem_cmd(Path::new(dir), Path::new(payload), appends, growth, relief),
         _ => return usage(),
     };
@@ -346,8 +365,26 @@ fn oracle_check(dir: &Path, feed: &layer7::Feed, what: &str) -> Result<J, String
               "canonBytes": canon.len(), "wireBytes": wire.len(), "equalsOracle": equal}))
 }
 
-/// The rows of a round, in the order each round times them.
+/// The rows of a round, in the order each even round times them (odd rounds reverse it).
 const ROWS: [&str; 7] = ["warm", "region", "bound", "held", "heldCold", "entries", "buildNew"];
+/// `--memo`'s rows, timed in a phase of their own after ROWS' rounds: this order in even rounds, reversed in odd ones
+/// (measure.py run_memo_rows: memoKeyed, memoKeyedMiss, reversed in odd rounds). `rowOrder` lists them after ROWS.
+const MEMO_PHASE: [&str; 3] = ["memoBuild", "memo", "memoMiss"];
+
+/// The indices of `n` rows in the order round `round` times them: listed in even rounds, reversed in odd ones, so no
+/// row always follows the same one (measure.py's run_rows alternates ROWS with ROWS_ODD, another order, not the
+/// reverse; its run_memo_rows reverses MEMO_ROWS in odd rounds, as here).
+fn round_order(n: usize, round: usize) -> Vec<usize> {
+    if round % 2 == 1 { (0..n).rev().collect() } else { (0..n).collect() }
+}
+
+/// The memo's decisions in its last build, as a span's `memo` member.
+fn memo_counts(m: &FeedMemo) -> J {
+    let hits = m.decisions.iter().filter(|d| d.hit == Some(true)).count();
+    let misses = m.decisions.iter().filter(|d| d.hit == Some(false)).count();
+    let raises = m.decisions.iter().filter(|d| d.raised.is_some()).count();
+    json!({"hits": hits, "misses": misses, "raises": raises, "entries": m.len(), "bytes": m.bytes()})
+}
 
 /// kernel.FEED_SEG_HELD_BYTES: ROMP_FEED_SEG_HELD_BYTES when it names a positive integer, else a hundred-twenty-eighth
 /// of the machine's memory (hw.memsize on macOS; 8 GB when unknown, as kernel._mem_total_bytes falls back).
@@ -382,7 +419,7 @@ fn seg_delta(a: &romp_views::layer3::SegStats, b: &romp_views::layer3::SegStats)
     J::Object(m)
 }
 
-fn cpu(dir: &Path, builds: usize) -> Result<(bool, J), String> {
+fn cpu(dir: &Path, builds: usize, memo_rows: bool) -> Result<(bool, J), String> {
     let calibration = calibrate(100);
     let mem0 = mem();
     let m = mark();
@@ -432,14 +469,26 @@ fn cpu(dir: &Path, builds: usize) -> Result<(bool, J), String> {
         held_checks.push(c);
     }
 
+    // S6.1's memo rows run in a phase of their own after the rows' rounds (below). The shapes the memo's key would read
+    // differently from Python's, or panic on, are refused first, as `romp-spike memo` refuses them (keyFacts the S2 dumps
+    // do not carry; a hand-made one could), so a refusal costs no rounds.
+    if memo_rows {
+        memo::validate(snap).map_err(|e| format!("snapshot.json (memo): {e}"))?;
+    }
+
+    // every build from the first round on carries `seq`, its place in the order this process ran them (the memo phase's
+    // oracle builds included), so the driver reads each build's predecessor from the output
+    let mut seq: u64 = 0;
+    let mut next_seq = || {
+        seq += 1;
+        json!(seq - 1)
+    };
     let mut rows: Vec<Vec<J>> = vec![Vec::with_capacity(builds); ROWS.len()];
     for round in 0..builds {
         // odd rounds run the rows in reverse, so no row always follows the same one (nothing a row needs depends on
         // another row: the held table is the held row's alone)
-        let order: Vec<usize> = if round % 2 == 1 { (0..ROWS.len()).rev().collect() } else { (0..ROWS.len()).collect() };
-        for ri in order {
-            let row = &ROWS[ri];
-            let s = match *row {
+        for ri in round_order(ROWS.len(), round) {
+            let mut s = match ROWS[ri] {
                 "warm" => {
                     let m = mark();
                     let f = layer7::build_feed(snap, &dump.trees, None).map_err(|r| format!("build_feed raised {}", r.exc))?;
@@ -505,20 +554,100 @@ fn cpu(dir: &Path, builds: usize) -> Result<(bool, J), String> {
                     s
                 }
             };
+            s["seq"] = next_seq();
             rows[ri].push(s);
         }
     }
+
+    // S6.1's memo phase, after every row above has run, as measure.py's run_memo_rows runs after run_rows: a memo, held
+    // table and anchor table made here, warmed by three builds (cold, the peers settle, served whole; the third must be
+    // all hits and equal the oracle), then K rounds of MEMO_PHASE alone, odd rounds reversed, as Python alternates
+    // memoKeyed and memoKeyedMiss; the driver drops each row's first build, as it drops Python's
+    let big: String = dump
+        .trees
+        .iter()
+        .max_by_key(|(sid, t)| (t.as_ref().map_or(0, |t| t.turns.as_ref().map_or(0, Vec::len)), std::cmp::Reverse(sid.clone())))
+        .map(|(sid, _)| sid.clone())
+        .unwrap_or_default();
+    let mut memo_checks = Vec::new();
+    let mut memo_timed: Vec<Vec<J>> = Vec::new();
+    if memo_rows {
+        let memo = RefCell::new(FeedMemo::new(memsize().filter(|m| *m > 0).unwrap_or(8 << 30) as usize / 64));
+        let memo_held = RefCell::new(SegHeld::new(bound));
+        for what in ["memo (cold)", "memo (peers settle)", "memo (served)"] {
+            let b = layer6::Build::new(snap, &dump.trees, None).with_held(&memo_held).with_memo(&memo);
+            let f = layer7::build_feed_on(&b, None).map_err(|r| format!("the memo build raised {}", r.exc))?;
+            drop(b);
+            let mut c = oracle_check(dir, &f, what)?;
+            c["memo"] = memo_counts(&memo.borrow());
+            c["what"] = json!(what);
+            c["seq"] = next_seq();
+            memo_checks.push(c);
+        }
+        if memo.borrow().decisions.iter().any(|d| d.hit != Some(true)) {
+            return Err("the third memo build is not served whole: nothing is timed".into());
+        }
+        memo_timed = vec![Vec::with_capacity(builds); MEMO_PHASE.len()];
+        for round in 0..builds {
+            for ri in round_order(MEMO_PHASE.len(), round) {
+                let row = MEMO_PHASE[ri];
+                let mut s = match row {
+                    "memo" | "memoMiss" => {
+                        if row == "memoMiss" && !memo.borrow_mut().invalidate(&big, "transcript") {
+                            return Err(format!("the memo holds no entry for {big}"));
+                        }
+                        let s0 = memo_held.borrow().stats;
+                        let b = layer6::Build::new(snap, &dump.trees, None).with_held(&memo_held).with_memo(&memo);
+                        let m = mark();
+                        let f = layer7::fold_on(&b, None).map_err(|r| format!("fold_on raised {}", r.exc))?;
+                        let mut s = span(m);
+                        black_box(f.cards());
+                        drop(f);
+                        drop(b);
+                        s["memo"] = memo_counts(&memo.borrow());
+                        s["seg"] = seg_delta(&s0, &memo_held.borrow().stats);
+                        s
+                    }
+                    _ => {
+                        // memoBuild
+                        let b = layer6::Build::new(snap, &dump.trees, None).with_held(&memo_held).with_memo(&memo);
+                        let m = mark();
+                        let f = layer7::build_feed_on(&b, None).map_err(|r| format!("build_feed raised {}", r.exc))?;
+                        let mut s = span(m);
+                        black_box(&f);
+                        drop(f);
+                        drop(b);
+                        s["memo"] = memo_counts(&memo.borrow());
+                        s
+                    }
+                };
+                s["seq"] = next_seq();
+                memo_timed[ri].push(s);
+            }
+        }
+        let b = layer6::Build::new(snap, &dump.trees, None).with_held(&memo_held).with_memo(&memo);
+        let f = layer7::build_feed_on(&b, None).map_err(|r| format!("the memo build raised {}", r.exc))?;
+        drop(b);
+        let mut c = oracle_check(dir, &f, "memo (after the rounds)")?;
+        c["memo"] = memo_counts(&memo.borrow());
+        c["what"] = json!("memo (after the rounds)");
+        c["seq"] = next_seq();
+        memo_checks.push(c);
+    }
     let mem_end = mem();
     let calibration_end = calibrate(100);
+    let row_names: Vec<&str> = ROWS.iter().chain(if memo_rows { &MEMO_PHASE[..] } else { &[] }).copied().collect();
     let mut row_doc = serde_json::Map::new();
-    for (ri, row) in ROWS.iter().enumerate() {
-        row_doc.insert((*row).to_string(), J::Array(std::mem::take(&mut rows[ri])));
+    for (row, timed) in row_names.iter().zip(rows.into_iter().chain(memo_timed)) {
+        row_doc.insert((*row).to_string(), J::Array(timed));
     }
     let doc = json!({
-        "side": "rust", "mode": "cpu", "schema": "romp-spike-measure-rust/2",
+        "side": "rust", "mode": "cpu", "schema": "romp-spike-measure-rust/3",
         "world": world_of(snap), "builds": builds, "clocks": clocks(), "calibration": calibration,
         "calibrationEnd": calibration_end, "load": load_span, "validate": validate_span, "cold": cold,
-        "rowOrder": ROWS, "rows": row_doc,
+        "rowOrder": row_names, "rows": row_doc,
+        "memo": {"rows": memo_rows, "missSession": big, "checks": memo_checks,
+                 "phaseOrder": if memo_rows { json!(MEMO_PHASE) } else { J::Null }},
         "bound": {"closedParts": closed.len(), "closedSegments": closed_turns, "foldAhead": closed_span,
                   "feed": bound_shape},
         "held": {"segBound": bound, "checks": held_checks, "entries": held.borrow().len(),
@@ -532,7 +661,9 @@ fn cpu(dir: &Path, builds: usize) -> Result<(bool, J), String> {
 /// How this binary was built: the choices that hold the port back are named in the S6 method's unfairness list.
 fn build_profile() -> J {
     json!({"debugAssertions": cfg!(debug_assertions), "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
-           "allocator": "system", "lto": "false (thin-local only)", "codegenUnits": 16, "targetCpu": "default"})
+           "allocator": "system", "lto": "fat (rust/Cargo.toml's release profile, S6.1)", "codegenUnits": 1,
+           "panic": if cfg!(panic = "abort") { "abort" } else { "unwind" }, "targetCpu": "default",
+           "hasher": "FxHash, in-tree (romp-views fxhash.rs, S6.1)"})
 }
 
 fn world_of(snap: &romp_views::snapshot::Snapshot) -> J {
@@ -639,7 +770,7 @@ fn mem_cmd(dir: &Path, payload: &Path, appends: usize, growth: Growth, relief: b
                                             "filesAppended": files_appended})));
     }
     let doc = json!({
-        "side": "rust", "mode": "mem", "schema": "romp-spike-measure-rust/2", "files": names.len(),
+        "side": "rust", "mode": "mem", "schema": "romp-spike-measure-rust/3", "files": names.len(),
         "fileBytes": file_bytes, "appendedBytes": appended_total, "appends": appends, "growth": growth.name(),
         "relief": relief, "clocks": clocks(), "before": before, "cold": cold, "rounds": rounds, "problems": problems,
         "build": build_profile(),
@@ -656,6 +787,35 @@ mod tests {
         assert_eq!(std::mem::size_of::<sys::Timespec>(), 16);
         assert_eq!(std::mem::size_of::<sys::Timeval>(), 16);
         assert_eq!(std::mem::size_of::<sys::Rusage>(), 144);
+    }
+
+    /// The memo phase's sequence is Python's (measure.py run_memo_rows: memoKeyed, memoKeyedMiss, reversed in odd
+    /// rounds) with memoBuild left out, and memoBuild never parts a memo row from what its Python row follows: memo and
+    /// memoMiss follow an all-hit build in even rounds and a miss build in odd rounds, as memoKeyed and memoKeyedMiss do.
+    #[test]
+    fn the_memo_phase_mirrors_pythons_alternation() {
+        let python = ["memo", "memoMiss"]; // memoKeyed, memoKeyedMiss
+        let seq = |rows: &[&'static str]| -> Vec<(usize, &'static str)> {
+            (0..11).flat_map(|r| round_order(rows.len(), r).into_iter().map(move |i| (r, rows[i]))).collect()
+        };
+        let ours = seq(&MEMO_PHASE);
+        let theirs = seq(&python);
+        let without: Vec<_> = ours.iter().copied().filter(|(_, row)| *row != "memoBuild").collect();
+        assert_eq!(without, theirs);
+        let miss = |row: &str| row == "memoMiss";
+        for (k, &(round, row)) in ours.iter().enumerate().skip(1) {
+            if row == "memoBuild" {
+                assert!(!miss(ours[k - 1].1), "memoBuild after a miss in round {round}");
+                assert!(!miss(ours.get(k + 1).map_or("memo", |x| x.1)), "memoBuild before a miss in round {round}");
+                continue;
+            }
+            let j = theirs.iter().position(|x| *x == (round, row)).unwrap();
+            if j > 0 {
+                assert_eq!(miss(ours[k - 1].1), miss(theirs[j - 1].1), "{row}'s predecessor in round {round}");
+                assert_eq!(miss(ours[k - 1].1), round % 2 == 1, "{row} in round {round}");
+            }
+        }
+        assert_eq!(round_order(ROWS.len(), 1), (0..ROWS.len()).rev().collect::<Vec<_>>());
     }
 
     #[test]

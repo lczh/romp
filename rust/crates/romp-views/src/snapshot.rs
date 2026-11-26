@@ -22,6 +22,11 @@ record! {
         peers: OMap<PeerFacts> = "peers",
         frame_keys: Vec<String> = "frameKeys",
         frame: OMap<serde_json::Value> = "frame",
+        /// The memo key's board-wide recorded facts (memo.rs, S6.1): the file identities the key stats (`files`,
+        /// by kind and name), the key on hand (`auth`) and the capped usage window (`capOpen`). Absent: none
+        /// recorded, every identity null. The memo's key reads it, and every derivation reads the transcript's
+        /// identity (its inode is the leaf head); `validate` checks that one's shape at load, `memo::validate` the rest.
+        key_facts: serde_json::Value = "keyFacts",
     }
     required: [schema, world, alive, live_map, board, sessions, peers, frame_keys, frame]
 }
@@ -131,6 +136,10 @@ record! {
         /// that reaches the read anyway must fail loudly (layer 5's provisional card).
         captions: Option<OMap<CaptionRow>> = "captions",
         recorded: Recorded = "recorded",
+        /// The memo key's per-session recorded facts (memo.rs, S6.1): the in-memory revisions and records the key
+        /// reads besides files (`cut`, `live`, `watch`, `postal`, `reg`, `anchors`, `userWrite`, `snapDone`, `hold`,
+        /// `replayWrote`). Absent: Python's values for a session nothing has touched.
+        key_facts: serde_json::Value = "keyFacts",
     }
     required: [recorded]
 }
@@ -387,8 +396,8 @@ impl Snapshot {
     }
 }
 
-/// Refuse a snapshot the port would read differently from Python: another schema, an alive row without facts, or a
-/// store the port refuses (`validate_store`).
+/// Refuse a snapshot the port would read differently from Python: another schema, an alive row without facts, a
+/// store the port refuses (`validate_store`), or a recorded transcript identity of another shape.
 pub fn validate(snap: &Snapshot) -> Result<(), String> {
     if snap.schema.as_deref() != Some(SCHEMA) {
         return Err(format!("schema is {:?}, this loader reads {SCHEMA:?}", snap.schema));
@@ -402,6 +411,19 @@ pub fn validate(snap: &Snapshot) -> Result<(), String> {
     }
     for (path, _sid, st) in snap.stores() {
         validate_store(&format!("{path}.store"), st)?;
+    }
+    // A recorded transcript identity is read by every command, not only `memo`: the body's leaf gate and the held walk's
+    // head take its inode through memo::leaf_inode, which expects this shape. So it is refused here, at load (S6.1's
+    // review: layer6, feed and the edge sets ran no memo::validate and would have panicked).
+    if let Some(files) = snap.key_facts.as_ref().and_then(|v| v.get("files")).and_then(serde_json::Value::as_object) {
+        for (name, v) in files {
+            if name.starts_with("transcript:")
+                && !v.is_null()
+                && !v.as_array().and_then(|a| a.first()).is_some_and(|x| x.as_i64().is_some())
+            {
+                return Err(format!("keyFacts.files.{name}: a transcript identity is null or a list led by an int inode"));
+            }
+        }
     }
     Ok(())
 }
@@ -580,5 +602,18 @@ mod tests {
         let orphan = SNAP.replace(r#""sessions": {"s-1": "#, r#""sessions": {"s-9": "#);
         let e = crate::load::snapshot_from_slice(orphan.as_bytes()).unwrap_err();
         assert_eq!(e, "alive session s-1 has no entry in sessions");
+    }
+
+    #[test]
+    fn a_transcript_identity_of_another_shape_is_refused_at_load() {
+        // every command reads it (the leaf head's inode), so the loader refuses it, not only the memo's validate
+        let with = |v: &str| SNAP.replace(r#""frame": {}}"#, &format!(r#""frame": {{}}, "keyFacts": {{"files": {v}}}}}"#));
+        for ok in [r#"{"transcript:s-1": null}"#, r#"{"transcript:s-1": [7, 1, 2, 0]}"#, r#"{"states:s-1": "x"}"#] {
+            assert!(crate::load::snapshot_from_slice(with(ok).as_bytes()).is_ok(), "{ok}");
+        }
+        for bad in [r#"{"transcript:s-1": "x"}"#, r#"{"transcript:s-1": []}"#, r#"{"transcript:s-1": [7.5, 1]}"#] {
+            let e = crate::load::snapshot_from_slice(with(bad).as_bytes()).unwrap_err();
+            assert_eq!(e, "keyFacts.files.transcript:s-1: a transcript identity is null or a list led by an int inode");
+        }
     }
 }

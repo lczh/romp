@@ -8,6 +8,7 @@
 //! `pystr::upper`: Python's `str.upper()`, from a generated table in `pystr_tables`), and layer 7, the loop, the fold and the
 //! cross-session pass (`layer7`: the whole feed frame).
 
+pub mod fxhash;
 #[macro_use]
 pub mod record;
 pub mod layer1;
@@ -17,6 +18,7 @@ pub mod layer4;
 pub mod layer5;
 pub mod layer6;
 pub mod layer7;
+pub mod memo;
 pub mod load;
 pub mod pyre;
 pub mod pyre_tables;

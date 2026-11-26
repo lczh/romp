@@ -32,7 +32,7 @@
 //! content is a list or a string.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{FxMap as HashMap, FxSet as HashSet};
 
 use romp_json::Value as Out;
 
@@ -118,7 +118,7 @@ pub struct PyDict<V> {
 
 impl<V> Default for PyDict<V> {
     fn default() -> Self {
-        PyDict { entries: Vec::new(), index: HashMap::new() }
+        PyDict { entries: Vec::new(), index: HashMap::default() }
     }
 }
 
@@ -451,7 +451,7 @@ pub struct FeedSegTurns<'a> {
 
 impl<'a> FeedSegTurns<'a> {
     pub fn new(turns: &'a [Turn], store: Option<&'a Store>) -> Self {
-        FeedSegTurns { turns, store, segs: HashMap::new(), faults: 0 }
+        FeedSegTurns { turns, store, segs: HashMap::default(), faults: 0 }
     }
 
     /// `get(k)` where the positions map holds `pos` under `k` (None: `k` is absent). The segment at the ordinal when it
@@ -505,7 +505,7 @@ pub struct FeedSegWalk<'a> {
 #[derive(Debug)]
 pub struct Hold<'a> {
     fsid: String,
-    head: Option<&'a str>,
+    head: Option<Head<'a>>,
     fp: Vec<SeamFp<'a>>,
     keys: Vec<HoldKey<'a>>,
     /// `w.closed`: the maps over the closed turns, when the walk folded closed turns and has keys to hold them under.
@@ -705,11 +705,16 @@ impl SegStats {
     }
 }
 
+/// The leaf a held aggregate is valid under: the transcript's path and inode, as the key's stat took them
+/// (`ctx["leaf_head"]`, `(str(path), transcript[0][0])`). The S2 replay hands `(path, 0)`; the memo's key takes the inode
+/// from the snapshot's recorded identity (memo.rs), so a rewrite under a new inode resets the aggregate as in Python.
+pub type Head<'a> = (&'a str, i64);
+
 /// One held entry: (head, seams, keys, maps, plain_t, bytes, build) as kernel._FEED_SEG_HELD keeps it, with `tick` for
 /// the OrderedDict's least-recently-used order (bumped where Python moves the entry to the newest end).
 #[derive(Debug)]
 struct HeldEntry<'a> {
-    head: &'a str,
+    head: Head<'a>,
     fp: Vec<SeamFp<'a>>,
     keys: Vec<HoldKey<'a>>,
     maps: SegMaps<'a>,
@@ -738,7 +743,7 @@ pub struct SegHeld<'a> {
 impl<'a> SegHeld<'a> {
     /// An empty table under the byte bound (kernel.FEED_SEG_HELD_BYTES).
     pub fn new(bound: u64) -> Self {
-        SegHeld { entries: HashMap::new(), build: 0, tick: 0, bound, stats: SegStats::default() }
+        SegHeld { entries: HashMap::default(), build: 0, tick: 0, bound, stats: SegStats::default() }
     }
 
     pub fn len(&self) -> usize {
@@ -778,7 +783,7 @@ impl<'a> SegHeld<'a> {
     pub fn walk(
         &mut self,
         fsid: &str,
-        head: Option<&'a str>,
+        head: Option<Head<'a>>,
         turns: Option<&'a [Turn]>,
         store: Option<&'a Store>,
     ) -> FeedSegWalk<'a> {
@@ -1297,7 +1302,7 @@ mod tests {
         let mut held = SegHeld::new(1 << 30);
         for (build, (start, held_turns, walked)) in [(0usize, 0u64, 3u64), (2, 2, 4)].into_iter().enumerate() {
             held.build_begin();
-            let mut w = held.walk("s", Some("p"), Some(&turns), None);
+            let mut w = held.walk("s", Some(("p", 0)), Some(&turns), None);
             assert_eq!(w.start, start, "build {build}");
             assert_eq!(entries_of(&w.maps), entries_of(&full.maps), "build {build}");
             assert_eq!(held.finish(&mut w), feed_seg_plain_t(&full));
@@ -1314,12 +1319,12 @@ mod tests {
         let turns: Vec<Turn> = (1..=3).map(|n| turn_id(&format!("t{n}"), n, true)).collect();
         let edited: Vec<Turn> = [turn_id("t1", 1, false), turn_id("t2", 2, true), turn_id("t3", 3, true)].into();
         fn fill<'a>(held: &mut SegHeld<'a>, turns: &'a [Turn]) {
-            let mut w = held.walk("s", Some("p"), Some(turns), None);
+            let mut w = held.walk("s", Some(("p", 0)), Some(turns), None);
             held.finish(&mut w);
         }
         let mut held = SegHeld::new(1 << 30);
         fill(&mut held, &turns);
-        let mut w = held.walk("s", Some("q"), Some(&turns), None); // another leaf
+        let mut w = held.walk("s", Some(("q", 0)), Some(&turns), None); // another leaf
         assert_eq!((w.start, held.stats.seg_reset), (0, 1));
         held.finish(&mut w); // stores under the new leaf
         let mut w = held.walk("s", None, Some(&turns), None); // no leaf head: no keys, nothing held
@@ -1327,10 +1332,10 @@ mod tests {
         held.finish(&mut w);
         assert_eq!(held.len(), 0, "a walk without keys stores nothing");
         fill(&mut held, &turns);
-        let w = held.walk("s", Some("p"), Some(&edited), None); // the first closed turn's key moved
+        let w = held.walk("s", Some(("p", 0)), Some(&edited), None); // the first closed turn's key moved
         assert_eq!((w.start, held.stats.seg_partial), (0, 1));
         fill(&mut held, &turns);
-        let w = held.walk("s", Some("p"), Some(&turns[..2]), None); // a rewind: fewer closed turns than held keys
+        let w = held.walk("s", Some(("p", 0)), Some(&turns[..2]), None); // a rewind: fewer closed turns than held keys
         assert_eq!((w.start, held.stats.seg_partial), (0, 2));
     }
 
@@ -1339,12 +1344,12 @@ mod tests {
         let turns: Vec<Turn> = (1..=3).map(|n| turn_id(&format!("t{n}"), n, true)).collect();
         let mut held = SegHeld::new(100);
         held.build_begin();
-        let mut w = held.walk("s", Some("p"), Some(&turns), None);
+        let mut w = held.walk("s", Some(("p", 0)), Some(&turns), None);
         held.finish(&mut w);
         assert_eq!((held.len(), held.stats.seg_over_bound), (0, 1));
         let mut held = SegHeld::new(1 << 30);
         for sid in ["a", "b"] {
-            let mut w = held.walk(sid, Some("p"), Some(&turns), None);
+            let mut w = held.walk(sid, Some(("p", 0)), Some(&turns), None);
             held.finish(&mut w);
         }
         held.forget(&["a"].into_iter().collect());
