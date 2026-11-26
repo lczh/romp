@@ -278,7 +278,8 @@ pub fn transcript_ident(snap: &Snapshot, sid: &str, facts: &SessionFacts) -> (KV
         Some(J::Null) => (KV::None, None),
         Some(v) => {
             let inode = v.as_array().and_then(|a| a.first()).and_then(J::as_i64);
-            (KV::from_json(v), Some(inode.expect("validated: a transcript identity is null or a list led by an int")))
+            let inode = inode.expect("snapshot::validate refuses a transcript identity not led by an int");
+            (KV::from_json(v), Some(inode))
         }
         None if facts.leaf_ok == Some(true) => (KV::Tuple(vec![KV::Int(0); 4]), Some(0)),
         None => (KV::None, None),
@@ -318,7 +319,10 @@ impl<'b> BuildFacts<'b> {
     pub fn new(b: &'b Build<'_>) -> BuildFacts<'b> {
         let snap = b.snap;
         let board = b.board;
-        // kernel._cleared_by_sid: id -> the text before its LAST colon; an id with no colon belongs to no session
+        // kernel._cleared_by_sid: id -> the text before its LAST colon; an id with no colon belongs to no session. Python
+        // indexes _cleared_ids_display(), a dict (the replay's `dict.fromkeys(board["cleared"])`), so an id the
+        // snapshot lists twice is one key there: each slice is deduplicated after its sort, or a duplicate would move
+        // the session's `cleared` component and every `peers` component carrying its slice where Python's stand.
         let mut cleared_by_sid: FxMap<&str, Vec<&str>> = FxMap::default();
         for i in board.cleared.as_deref().unwrap_or_default() {
             if let Some(cut) = i.rfind(':') {
@@ -327,6 +331,7 @@ impl<'b> BuildFacts<'b> {
         }
         for v in cleared_by_sid.values_mut() {
             v.sort_unstable();
+            v.dedup();
         }
         let bf = board_facts(snap);
         let cap_open = match obj(bf.and_then(|f| f.get("capOpen"))) {
@@ -1012,12 +1017,12 @@ pub fn entries<'a>(b: &Build<'a>, memo: &RefCell<FeedMemo>) -> Vec<(String, Resu
 
 /// The shapes the memo's key would read differently from Python's key, or that break Python's replay harness before
 /// any key runs; none is in either world. Every alive row names its `name`, `anchor` (string or null) and `transcript`
-/// (the replay builds its path from it); the recorded facts have their shapes (a transcript identity null or a list led
-/// by an int, a store identity a list of three, `capOpen` null or `{window, resetsAt}`, `hold` null or a dict); a live
-/// row's `subagents` and `bgTasks` are lists or null (Python iterates any value and raises on a number); a recorded
-/// `bgLive` row is a dict; and a session's own flags and the merged flags agree on `hideFromFeed` (the S2 replay's body
-/// reads the first, Python's key the second; they differ only for a session with null flags and a peer entry of the
-/// same sid that carries the flag).
+/// (the replay builds its path from it); the recorded facts have their shapes (a store identity a list of three,
+/// `capOpen` null or `{window, resetsAt}`, `hold` null or a dict; a transcript identity's shape, null or a list led by an
+/// int, is refused at load by snapshot::validate, since every command reads it); a live row's `subagents` and `bgTasks`
+/// are lists or null (Python iterates any value and raises on a number); a recorded `bgLive` row is a dict; and a
+/// session's own flags and the merged flags agree on `hideFromFeed` (the S2 replay's body reads the first, Python's key
+/// the second; they differ only for a session with null flags and a peer entry of the same sid that carries the flag).
 pub fn validate(snap: &Snapshot) -> Result<(), String> {
     for (i, r) in snap.alive().iter().enumerate() {
         let at = format!("alive[{i}]");
@@ -1038,12 +1043,6 @@ pub fn validate(snap: &Snapshot) -> Result<(), String> {
         if let Some(files) = kf.get("files").filter(|v| !v.is_null()) {
             let files = files.as_object().ok_or("keyFacts.files: not a dict")?;
             for (name, v) in files {
-                if name.starts_with("transcript:")
-                    && !v.is_null()
-                    && !v.as_array().and_then(|a| a.first()).is_some_and(|x| x.as_i64().is_some())
-                {
-                    return Err(format!("keyFacts.files.{name}: a transcript identity is null or a list led by an int inode"));
-                }
                 if name.starts_with("store:") && v.as_array().is_none_or(|a| a.len() != 3) {
                     return Err(format!("keyFacts.files.{name}: a store identity is a list of three"));
                 }

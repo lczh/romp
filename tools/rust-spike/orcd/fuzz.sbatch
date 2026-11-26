@@ -4,13 +4,16 @@
 # worlds, the memo at 2,000 worlds of 8 steps, seeds 1 to 6; and the transcript store's 6 fuzz seeds over the small and
 # large dumps (task 42; needs worlds.sbatch's dumps: submit with --dependency=afterok:<the worlds job>). Each task's
 # output and exit status go to the pool. Restartable (a task redoes its seed), so the preemptable partition.
-#   sbatch [--dependency=afterok:<worlds job>] ~/orcd/scratch/agents/romp_fix/romp/tools/rust-spike/orcd/fuzz.sbatch
+# Smoke first, tasks 0 and 6 (layer 2's and the memo's seed 1), then the rest (setup.sh's header), from the pool's
+# logs directory:
+#   sbatch --array=0,6 ~/orcd/scratch/agents/romp_fix/romp/tools/rust-spike/orcd/fuzz.sbatch     (after setup.sh)
 #SBATCH --job-name=romp-fix-memo2-fuzz
 #SBATCH --account=mit_general
 #SBATCH --partition=mit_preemptable
 #SBATCH --array=0-42%16
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
+# --mem: a guess: size the rest from the smoke tasks' sacct MaxRSS (setup.sh's header)
 #SBATCH --mem=8G
 #SBATCH --time=03:00:00
 #SBATCH --requeue
@@ -30,6 +33,7 @@ fi
 
 source "$HERE/common.sh"
 need_built
+need_tables_python
 TASKS=()
 for seed in 1 2 3 4 5 6; do
     TASKS+=("layer2 $seed dump_layer2.py --fuzz 10000 --seed $seed")

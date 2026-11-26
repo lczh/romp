@@ -13,6 +13,7 @@
 #SBATCH --partition=mit_normal
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
+# --mem: a guess: size it from the large worlds task's sacct MaxRSS (setup.sh's header)
 #SBATCH --mem=24G
 #SBATCH --time=06:00:00
 #SBATCH --output=%x_%j.out

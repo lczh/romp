@@ -9,8 +9,10 @@ string that must occur exactly once in its file, and its replacement.
 
 The sweep (tools/rust-spike/orcd/mutants.sbatch, one array task per mutant, never on lczh's Mac) applies a mutant to a
 scratch copy, builds it under the `mutant` profile (release without LTO, for build time) and runs the memo edge set
-(`romp-spike memo tests/fixtures/memo_edge.json`) and one memo fuzz seed against it; a mutant is caught when either
-reports a difference or the build fails its own tests. Stdlib only; writes nothing in the repo.
+(`romp-spike memo tests/fixtures/memo_edge.json`) and one memo fuzz seed against it. A mutant is caught when either
+reports a difference. The sweep runs no tests, and a mutant whose build fails or whose binary crashes (the profile
+inherits panic = "abort") is recorded under its own status, not as caught, so the table cannot be misread.
+Stdlib only; writes nothing in the repo.
 """
 import argparse
 import json
@@ -81,6 +83,38 @@ MUTANTS = [
      "KV::Bool(jactive), KV::Bool(false), watch,"),
     ("the transcript identity left out", MEMO, "let transcript = KV::Tuple(vec![tident, KV::Str(path.to_string())]);",
      "let transcript = KV::Tuple(vec![KV::None, KV::Str(path.to_string())]);"),
+    # the recorded-fact reads (S6.1's review: the mutants above cover the computed components, none of the plain lookups)
+    ("states: the states logs' identities left out", MEMO,
+     '.map(|k| ident(snap, &format!("states:{k}"))).collect());', ".map(|_k| KV::None).collect());"),
+    ("captions: the captions file's identity left out", MEMO,
+     'let captions = ident(snap, &format!("captions:{fsid}"));', "let captions = KV::None;"),
+    ("reg: the registry signature left out", MEMO,
+     'let reg = KV::Tuple(vec![sk("reg").map_or(KV::None, KV::from_json),', "let reg = KV::Tuple(vec![KV::None,"),
+    ("cut: the pending cut left out", MEMO,
+     'let cut = sk("cut").map_or_else(|| KV::Str(String::new()), KV::from_json);', "let cut = KV::Str(String::new());"),
+    ("live: the live revision left out", MEMO,
+     'let live_rev = sk("live").map_or(KV::Int(0), KV::from_json);', "let live_rev = KV::Int(0);"),
+    ("watch: the watch record left out", MEMO, 'let watch = dumps_sorted(sk("watch"));', "let watch = dumps_sorted(None);"),
+    ("postal: the postal slice left out", MEMO,
+     'let postal = sk("postal").map_or_else(|| KV::Tuple(vec![KV::Tuple(Vec::new()), KV::Tuple(Vec::new())]), KV::from_json);',
+     "let postal = KV::Tuple(vec![KV::Tuple(Vec::new()), KV::Tuple(Vec::new())]);"),
+    ("anchors: the anchors revision left out", MEMO,
+     'let anchors = sk("anchors").map_or(KV::Int(0), KV::from_json);', "let anchors = KV::Int(0);"),
+    ("store: the rewind hold left out", MEMO,
+     'let hold = match sk("hold").and_then(J::as_object).filter(|m| !m.is_empty()) {',
+     "let hold = match None::<&Map<String, J>> {"),
+    ("store: the user-write mark left out", MEMO,
+     '        sk("userWrite").map_or(KV::Float(0.0), KV::from_json),\n', "        KV::Float(0.0),\n"),
+    ("store: the punch record left out", MEMO,
+     '        sk("snapDone").map_or(KV::None, KV::from_json),\n', "        KV::None,\n"),
+    # the cache's bookkeeping
+    ("the LRU: a get is not a use (the entry keeps its age)", MEMO,
+     "            e.used = t;\n", "            let _ = (e, t);\n"),
+    ("the held aggregate: a departed session's aggregate is not forgotten", MEMO,
+     "        h.borrow_mut().forget(&alive);\n", "        let _ = (h, &alive);\n"),
+    # the review's must-fix, as a regression mutant
+    ("cleared: an id listed twice kept twice (Python's key reads the cleared set)", MEMO,
+     "            v.sort_unstable();\n            v.dedup();\n", "            v.sort_unstable();\n"),
 ]
 
 

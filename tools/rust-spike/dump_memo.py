@@ -26,7 +26,9 @@ Per step it records: every alive session's decision ({"hit": true} or {"miss": [
 strings, the held walk's counters moved, the memo's entries and evictions, and the same world built FRESH (every memo
 cleared) with its SHA-1s, so the port can show that a memo-served build equals a fresh one wherever Python's do, and
 that it serves Python's stale bytes where Python's do not. The frame keys build_feed passes through are taken from
-Python's own build, as dump_layer7.py takes them, and written into the step's ops.
+Python's own build, as dump_layer7.py takes them, and written into the step's ops. Where Python's fresh build passes a
+different frame through (the session order after the alive set changes, say), the port cannot build it from the
+snapshot: the step marks the fresh comparison skipped and records the frame keys that differ (`keys`).
 
     python3 tools/rust-spike/dump_memo.py --edge DUMP OUT.json            # the small world's scripted sequence
     python3 tools/rust-spike/dump_memo.py --dump DUMP [--bin B] [--out F]   # a dump's default sequence, then romp-spike memo
@@ -62,6 +64,7 @@ EMBED = False                  # --embed: each step carries Python's wire string
 PLANTS = ("peers-settled", "tag-strict", "row-whole", "raise-absent", "no-forget", "stalls-all")
 SEG_KEYS = ("segWalks", "segHeld", "segWalkTurns", "segPartial", "segReset", "segRaised", "segEvict", "segOverBound")
 SESSION_FACTS = ("cut", "live", "watch", "postal", "reg", "anchors", "userWrite", "snapDone", "hold", "replayWrote")
+MISSING = object()
 
 
 def load_l7():
@@ -369,6 +372,18 @@ class Runner:
             ops.append(S_(["frame"], frame))
         return ops
 
+    def frame_diff(self, feed):
+        """Why a fresh comparison is skipped: the pass-through frame keys whose value in `feed` (the fresh build) differs
+        from the snapshot's frame (the memo build's, just set), and "(order)" when the frame's keys come in another
+        order. The port takes those keys from the snapshot, so it cannot build Python's fresh frame there."""
+        dw, l7 = self.dw, self.l7
+        frame = {k: dw.plain(v) for k, v in feed.items() if k not in dw.FRAME_SKIP}
+        have = self.snap.get("frame") or {}
+        out = sorted(k for k in set(frame) | set(have) if frame.get(k, MISSING) != have.get(k, MISSING))
+        if [k for k in feed if k not in l7.CONDITIONAL] != self.snap.get("frameKeys"):
+            out.append("(order)")
+        return out or ["(unknown)"]
+
     def step(self, ops, note):
         """Apply `ops`, build, and record the step (the frame ops appended to its ops)."""
         dw, l7 = self.dw, self.l7
@@ -401,7 +416,7 @@ class Runner:
         if ffeed is not None:
             same_frame = dw.wire(l7.assemble(dw, self.snap, ffeed)) == dw.wire(ffeed)
             expect["fresh"] = ({"canonSha1": sha1(dw.canon(ffeed)), "wireSha1": sha1(dw.wire(ffeed))} if same_frame
-                               else {"frameDiffers": True})
+                               else {"frameDiffers": True, "keys": self.frame_diff(ffeed)})
         else:
             expect["fresh"] = {"raises": fraised}
         expect["freshEqualsMemo"] = (feed is not None and ffeed is not None
@@ -476,6 +491,8 @@ def edge_steps(runner):
         ("a cleared id under s003: s003 derives (cleared), s001 too (peers: s003's cleared slice)",
          [S_(["board", "cleared"], sorted(snap["board"]["cleared"] + [s3 + ":g9"]))]),
         ("a cleared id with no colon belongs to no session: served", None),
+        ("s003's cleared id listed a second time: served (Python's key reads the cleared set, where the duplicate "
+         "collapses; s001's peer facts carry s003's slice, so s001 too)", None),
         ("s003's store: a node's text changes, its identity stands: served stale", lambda: _edit_store(snap, s3)),
         ("s003's store identity moves: s003 derives (store)",
          files_op(snap, "store:" + s3, [[11, 1781100400000000000, 300], None, None])),
@@ -592,6 +609,10 @@ def run_edge(runner):
 def _late_ops(note, snap, trees, saved, s1, s2, s3, s4):
     if note.startswith("a cleared id with no colon"):
         return [S_(["board", "cleared"], sorted(snap["board"]["cleared"] + ["nocolon"]))]
+    if note.startswith("s003's cleared id listed a second time"):
+        if s3 + ":g9" not in snap["board"]["cleared"]:
+            raise AssertionError("the duplicate step follows the step that clears %s:g9" % s3)
+        return [S_(["board", "cleared"], sorted(snap["board"]["cleared"] + [s3 + ":g9"]))]
     if note.startswith("s004's store read faults"):
         raise AssertionError("listed with its ops")
     if note.startswith("s004's store reads again"):
@@ -717,9 +738,18 @@ def fz_ops(rng, snap, trees, step, kept):
             p = rng.choice(peers)
             ops = [S_(["peers", p, "names"], ["peer-%d" % step, "/x", "#00aa00"])]
     elif kind in ("cleared", "cleared-other"):
-        target = sid if kind == "cleared" else rng.choice(list(snap.get("peers") or {}) + ["nocolon"])
-        ident = target + (":g%d" % step if target != "nocolon" else "")
-        ops = [S_(["board", "cleared"], sorted(set(snap["board"].get("cleared") or []) | {ident}))]
+        cur = list(snap["board"].get("cleared") or [])
+        mine = [c for c in cur if ":" in c and c.rpartition(":")[0] in snap["sessions"]]
+        pool = mine if kind == "cleared" else [c for c in cur if c not in mine]
+        if pool and rng.random() < 0.4:
+            # an id already cleared listed a second time (an alive session's, or a peer's or a colonless one): Python's
+            # key reads the cleared set, where the duplicate collapses, so nothing moves
+            ops = [S_(["board", "cleared"], sorted(cur + [rng.choice(pool)]))]
+            kind += "-dup"
+        else:
+            target = sid if kind == "cleared" else rng.choice(list(snap.get("peers") or {}) + ["nocolon"])
+            ident = target + (":g%d" % step if target != "nocolon" else "")
+            ops = [S_(["board", "cleared"], sorted(set(cur) | {ident}))]
     elif kind == "wait":
         ops = [S_(["board", "wmap", sid], {"peer": "peer9", "since": now - step})] if rng.random() < 0.7 else (
             [D_(["board", "wmap", sid])] if sid in (snap["board"].get("wmap") or {}) else [])
@@ -808,6 +838,23 @@ def fz_ops(rng, snap, trees, step, kept):
     return kind, ops
 
 
+def seed_cleared(rng, snap):
+    """Cleared ids under the world's sessions and peers from the start, in half the worlds (the generator clears only
+    parked and notice ids, which strip_files drops), so a later `cleared` step can list one a second time: only a
+    second copy of an id the stored key already holds moves a slice that is not deduplicated (a duplicate present from
+    the id's first appearance moves nothing a set would not)."""
+    if rng.random() >= 0.5:
+        return
+    owners = sids_of(snap) + sorted(snap.get("peers") or {})
+    ids = set(snap["board"].get("cleared") or [])
+    for _ in range(rng.randint(1, 3)):
+        o = rng.choice(owners)
+        facts = snap["sessions"].get(o) or (snap.get("peers") or {}).get(o) or {}
+        nodes = [n for n in ((facts.get("store") or {}).get("nodes") or {}) if n.startswith(o + ":")]
+        ids.add(rng.choice(nodes) if nodes and rng.random() < 0.5 else "%s:g9%d" % (o, rng.randint(0, 9)))
+    snap["board"]["cleared"] = sorted(ids)
+
+
 def memo_valid(snap):
     """Mirror memo::validate's refusals that a generated world could meet (the generator then redraws)."""
     for sid, S in snap["sessions"].items():
@@ -857,11 +904,19 @@ def write_doc(path, cases, generated_by):
 
 
 def tally(cases):
-    n = {"steps": 0, "hits": 0, "misses": 0, "raises": 0, "stale": 0, "freshEqual": 0}
+    n = {"steps": 0, "hits": 0, "misses": 0, "raises": 0, "stale": 0, "freshEqual": 0, "skipped": 0, "skipKeys": {},
+         "skipAlive": 0, "skipAt": []}
     for c in cases:
-        for st in c["steps"]:
+        for i, st in enumerate(c["steps"]):
             n["steps"] += 1
             e = st["expect"]
+            fr = e.get("fresh", {})
+            if fr.get("frameDiffers"):
+                n["skipped"] += 1
+                for k in fr.get("keys") or ["(unrecorded)"]:
+                    n["skipKeys"][k] = n["skipKeys"].get(k, 0) + 1
+                n["skipAlive"] += any(op["at"] == "snapshot" and op["path"] == ["alive"] for op in st["ops"])
+                n["skipAt"].append("%s step %d" % (c["name"], i))
             for _sid, d in e["decisions"]:
                 n["hits"] += 1 if d.get("hit") else 0
                 n["misses"] += 1 if "miss" in d else 0
@@ -871,6 +926,13 @@ def tally(cases):
             elif "canonSha1" in e.get("fresh", {}):
                 n["stale"] += 1
     return n
+
+
+def print_skips(n, at=False):
+    """The fresh comparisons skipped because Python's fresh build passes another frame through, and why."""
+    print("  fresh comparisons skipped: %d (frame keys that differ: %s; %d in steps that change the alive set)%s" % (
+        n["skipped"], json.dumps(dict(sorted(n["skipKeys"].items()))), n["skipAlive"],
+        (": " + ", ".join(n["skipAt"])) if at and n["skipAt"] else ""))
 
 
 def setup(tmp):
@@ -917,6 +979,7 @@ def edge_main(dump, out):
         print("memo edge set: %d cases, %d steps, %d hits, %d misses, %d raises; %d memo-served builds equal their fresh "
               "build, %d stale; %s (%.2f MB)" % (len(cases), n["steps"], n["hits"], n["misses"], n["raises"],
                                                  n["freshEqual"], n["stale"], out, os.path.getsize(out) / 1e6))
+        print_skips(n, at=True)
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -980,6 +1043,7 @@ def fuzz_main(n, seed, nsteps, plant, binary, out):
             strip_files(snap)
             if not memo_valid(snap):
                 continue
+            seed_cleared(rng, snap)
             base = (copy.deepcopy(snap), copy.deepcopy(trees))
             bound = rng.choice((None, None, None, 4000, 12000))
             r = Runner(l7, l6, dw, km, snap, trees, memo_bound=bound)
@@ -1000,6 +1064,7 @@ def fuzz_main(n, seed, nsteps, plant, binary, out):
                   seed, n, nsteps, t["hits"], t["misses"], t["raises"], t["freshEqual"], t["stale"],
                   time.monotonic() - t0, os.path.getsize(path) / 1e6))
         print("  step kinds: %s" % json.dumps(dict(sorted(kinds.items()))))
+        print_skips(t)
         g, rc = run_rust(rust_binary(binary), path, plant)
         if g is None:
             return 2

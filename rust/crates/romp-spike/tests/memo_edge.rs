@@ -26,9 +26,9 @@ fn every_decision_and_build_is_pythons() {
     let last = out.lines().last().unwrap_or_default().to_string();
     assert!(ok, "{out}");
     assert!(
-        last.starts_with("memo cases: 2 cases, 69 steps, 138 builds compared (275 session decisions: 189 hits, 84 misses, \
-                          6 raises), 60 memo-served builds equal to their fresh build, 7 stale where Python's are, 0 \
-                          differences in 0 steps"),
+        last.starts_with("memo cases: 2 cases, 70 steps, 140 builds compared (279 session decisions: 193 hits, 84 misses, \
+                          6 raises), 61 memo-served builds equal to their fresh build, 7 stale where Python's are, 0 \
+                          differences in 0 steps (2 fresh comparisons skipped where Python's frame differs;"),
         "{last}"
     );
 }

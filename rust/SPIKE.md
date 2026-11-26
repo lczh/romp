@@ -19,12 +19,15 @@ the small world, a short fuzz seed. Every agent brief for this spike must say so
   the held aggregate carried across builds. A new oracle (`tools/rust-spike/dump_memo.py`) runs the REAL key in Python
   over scripted and random change sequences. Light checks, all on the small world and short seeds on this Mac: every
   session decision equals Python's (hit, or miss naming the same moved components, raise served or absent) in the
-  69-step scripted sequence (275 decisions) and in 600 random worlds of 8 steps (7,803 decisions), every memo-served and
+  70-step scripted sequence (279 decisions) and in 600 random worlds of 8 steps (7,752 decisions), every memo-served and
   fresh build byte for byte Python's, 0 differences; the six plants are each caught. Tuning: an in-tree FxHash for every
   map of the views crate, fat LTO, one codegen unit, panic = abort; every existing comparison still 0 differences on the
   small world (round trip, layers 1 to 7, the feed, the edge sets, short fuzz seeds of layers 2 to 7). The heavy checks
   are ORCD job scripts in `tools/rust-spike/orcd/`, written and not run: the large and large4 worlds' comparisons, the
-  full fuzz seeds, the memo's 32-mutant sweep and S6's measurement re-run with the memo rows.
+  full fuzz seeds, the memo's 46-mutant sweep and S6's measurement re-run with the memo rows. Its review round is
+  applied ("The review round" under "S6.1 memo port and tuning"): a cleared id listed twice made the port re-derive
+  where Python serves (fixed: each slice deduplicated, as Python's set reads it; a new edge step and fuzz variant catch
+  the old code), and the cluster runbook now runs a smoke pass of 1 or 2 tasks per array before any sweep.
 - Before it: S6 done and merged into `romp_fix` from `romp_fix-s6`, and independently reproduced (deciding CPU ratio 5.37
   against the reported 5.24; memory ratio 0.249 against 0.248). The full alternated measurement ran on fresh dumps
   (8 runs per configuration, both interpreters, CPU on the small, large and large4 worlds, memory cold and after
@@ -134,9 +137,16 @@ the small world, a short fuzz seed. Every agent brief for this spike must say so
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
 - Next action: run S6.1's cluster jobs (lczh opens the Duo connection; the main session rsyncs and submits, per
-  `tools/rust-spike/orcd/setup.sh`'s header: setup, then worlds, then fuzz and measure after the worlds, and mutants), fill
-  "S6.1 memo port and tuning" with their results (the large worlds at 0 differences, the fuzz seeds, the mutant table, the
-  memo rows against Python's memoKeyed rows, indicative on ORCD's CPU), merge `romp_fix-memo2` into `romp_fix`, then S7.
+  `tools/rust-spike/orcd/setup.sh`'s header, every srun and sbatch from the pool's logs directory). First setup, then a
+  smoke pass of 1 or 2 tasks per array, as ENGAGING.md requires before any sweep: `sbatch --array=0 worlds.sbatch` (the
+  small world), `sbatch --array=0,6 fuzz.sbatch` (layer 2's and the memo's seed 1) and `sbatch --array=45,46
+  mutants.sbatch` (the dedup regression mutant and the control). Check each smoke task's steps.tsv (every exit 0) and
+  SHA256SUMS on the pool, the control's "controlPasses" and mutant 45's "caught", and read each task's sacct MaxRSS to
+  size the rest's `--mem`. Then the rest: worlds' large and large4, every other fuzz task (the store's after the worlds),
+  the other 45 mutants, and the measurement after the worlds (sized from the large world's MaxRSS). Fill "S6.1 memo
+  port and tuning" with their results (the large worlds at 0 differences, the fuzz seeds, the mutant table, the memo rows
+  against Python's memoKeyed rows, indicative on ORCD's CPU, with the caveat under "What is not done"), merge
+  `romp_fix-memo2` into `romp_fix`, then S7.
   The decision S7 takes to lczh is unchanged in kind: whether the memoized port's steady state against memoized Python
   (hit against hit, and the blend at production's miss rate) changes the recommendation, given the memory gate's fail on
   real transcripts.
@@ -229,7 +239,7 @@ kernel, where the memory gain does not depend on interpreter speed.
 | `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py` to `dump_layer7.py`), the measurement (`measure.py`, and `measure_drive.py`, which alternates it with `romp-spike measure`) |
 | `rust/crates/romp-views/src/memo.rs`, `fxhash.rs` | S6.1: build_feed's per-session memo (the key, the deps, the LRU cache, the loop), and the in-tree FxHash every map of the crate uses |
 | `romp-spike memo` (`memo_cmd.rs`) | S6.1: change sequences against Python's decisions and bytes, or a dump built three times with the memo against its oracle |
-| `tools/rust-spike/dump_memo.py`, `memo_mutants.py` | S6.1: the memo oracle (the real key over scripted and random change sequences) and the memo's 32 source mutants |
+| `tools/rust-spike/dump_memo.py`, `memo_mutants.py` | S6.1: the memo oracle (the real key over scripted and random change sequences) and the memo's 46 source mutants |
 | `tools/rust-spike/orcd/` | the cluster's job scripts (setup, worlds, fuzz, mutants, measure); every heavy check runs there |
 
 ## Steps
@@ -2681,7 +2691,9 @@ derivation serves the previous entry when there is one; a departed session's ent
   compare with Python's `==` (`1 == 1.0 == True`, a tuple never equals a list, dicts unordered), so a tag change alone is
   a hit that serves the old tag, as in Python. Constant in the spike, as in Python's replay: `subagents`, a peer's host
   and remote name, the pass memo's alias count. `memo::validate` refuses the shapes Python's key would read differently
-  or its replay cannot answer (none in either world).
+  or its replay cannot answer (none in either world); a recorded transcript identity's shape is refused at load
+  (`snapshot::validate`), since every command reads its inode, not only `memo`. The cleared set is read as Python's
+  `_cleared_ids_display()` dict reads it: an id listed twice counts once (the review round's must-fix 1).
 - The held aggregate's leaf head is now the transcript's path and inode from the key's identity (layer3 `Head`), as
   Python's `ctx["leaf_head"]`, so a rewrite under a new inode resets the aggregate in both.
 - `romp-spike memo CASES.json|DUMP [--plant NAME]` (`memo_cmd.rs`): change sequences against Python's decisions, or a
@@ -2695,7 +2707,9 @@ derivation serves the previous entry when there is one; a departed session's ent
   and the same world built fresh. `--edge DUMP OUT` writes the small world's scripted sequence (the fixture
   `romp-views/tests/fixtures/memo_edge.json`, 0.52 MB, regenerating byte for byte under another hash seed; checked by
   `romp-spike/tests/memo_edge.rs`); `--fuzz N` draws worlds from dump_layer7's generator with random steps over every
-  input kind, each moved with and without its identity; `--dump DUMP` runs a default sequence over a dump in place.
+  input kind, each moved with and without its identity (half the worlds start with cleared ids under their sessions and
+  peers, so a `cleared` step can list one a second time); `--dump DUMP` runs a default sequence over a dump in place.
+  Where a fresh comparison is skipped, the step records the frame keys that differ (`keys` beside `frameDiffers`).
 - Measurement: `romp-spike measure cpu --memo` adds three rows (`memo`: every session a hit; `memoMiss`: the largest
   session misses on its transcript and derives over its held aggregate; `memoBuild`: the whole memo-served build);
   `measure.py cpu --memo` adds a phase with the real key over the same recorded facts (`memoKeyed`, `memoKeyedMiss`), its
@@ -2712,27 +2726,55 @@ seed any dependence would already have shown as run-to-run differences against P
 (a new crate) and `target-cpu=native` (the ORCD binary must not assume the Mac's CPU, or the reverse).
 
 **Results, light checks only (this Mac, the small world, short seeds; one process at a time).**
-- The scripted sequence (two cases over the small world: 65 steps under the kernel's default bound and 4 under a
-  15,000-byte bound that sheds entries): 69 steps, 138 builds (memo and fresh), 275 session decisions (189 hits, 84
-  misses, 6 raises), every decision, absent list, held counter, memo count and SHA-1 equal to Python's: 0 differences. 60
-  memo-served builds equal their fresh build, as Python's do, and 7 serve Python's stale bytes where Python's do (an input
-  the key does not see moved: an atom's text under an unmoved transcript identity, a store edit under an unmoved store
-  identity, a raise served from the previous entry); 2 fresh comparisons are skipped because Python's own two builds pass
-  different frames through. Each plant is caught: `peers-settled` 9 differences in 2 steps, `tag-strict` 4 in 1,
-  `row-whole` 4 in 1, `raise-absent` 26 in 7, `no-forget` 10 in 4, `stalls-all` 13 in 2.
-- Random sequences, seeds 1 to 3 at 200 worlds of 8 steps: 4,800 steps, 9,600 builds, 7,803 session decisions (3,225
-  hits, 3,892 misses, 1,479 raises), 0 differences; 4,117 memo-served builds equal their fresh build and 459 are stale
-  where Python's are; 91 fresh comparisons skipped for the frame. A memo served whole (the dump form): the small world's
-  three builds equal the oracle, the third all hits with no anchor walk.
+- The scripted sequence (two cases over the small world: 66 steps under the kernel's default bound and 4 under a
+  15,000-byte bound that sheds entries), as the review round left it: 70 steps, 140 builds (memo and fresh), 279 session
+  decisions (193 hits, 84 misses, 6 raises), every decision, absent list, held counter, memo count and SHA-1 equal to
+  Python's: 0 differences. 61 memo-served builds equal their fresh build, as Python's do, and 7 serve Python's stale bytes
+  where Python's do (an input the key does not see moved: an atom's text under an unmoved transcript identity, a store
+  edit under an unmoved store identity, a raise served from the previous entry); 2 fresh comparisons are skipped, both
+  for the session order (below). Each plant is caught: `peers-settled` 9 differences in 2 steps, `tag-strict` 4 in 1,
+  `row-whole` 4 in 1, `raise-absent` 26 in 7, `no-forget` 10 in 4, `stalls-all` 13 in 2. (Before the review round: 69
+  steps, 275 decisions, the same plant counts.)
+- Random sequences, seeds 1 to 3 at 200 worlds of 8 steps, rerun in the review round with the generator's new cleared
+  ids (so the worlds differ from the first round's): 4,800 steps, 9,600 builds, 7,752 session decisions (3,133 hits,
+  3,801 misses, 1,528 raises), 0 differences; 4,119 memo-served builds equal their fresh build and 419 are stale where
+  Python's are; 84 fresh comparisons skipped, each traced below; 39 steps list a cleared id a second time. (The first
+  round: 7,803 decisions, 0 differences, 91 skipped.) A memo served whole (the dump form): the small world's three builds
+  equal the oracle, the third all hits with no anchor walk.
 - Every existing comparison on the small world, through `tools/rust-spike/orcd/worlds.sbatch`'s own steps run locally
   with the tuned release binary: the round trip identical; layers 1 to 5 at 6,370, 336, 1,801, 864 and 1,735 values, 0
   differences; layer 6's 17,470 entry bytes and the feed's 17,878 identical; the layer 6 and 7 harnesses equal their
   oracles; check_store OK. The edge sets through the release binary: layers 2 to 6 and the feed at 0 differences (1,210,
   6,501, 25,011, 14,985, 31,321 and 32,013 values) and the 5,797 tint points. Short fuzz seeds with it (seed 1): layers 2
   to 5 at 1,000 cases (9,887, 140,285, 531,977 and 149,334 values), layers 6 and 7 at 500 worlds (77,526 and 137,239), 0
-  differences. Rust tests: 188 pass (6 new unit tests, 2 integration tests over the memo fixture).
-- The memo's 32 source mutants (`tools/rust-spike/memo_mutants.py --list`) each apply exactly once; the sweep that builds
-  and runs them is a cluster job, not run.
+  differences. Rust tests: 188 pass (6 new unit tests, 2 integration tests over the memo fixture); the review round adds
+  one (189), and ran romp-views' 101 unit tests and the memo, layer 6 and layer 7 edge tests (2, 5 and 6), all passing.
+- The memo's 46 source mutants (`tools/rust-spike/memo_mutants.py --list`: the first round's 32 over the computed
+  components, the review round's 13 over the recorded-fact lookups, the LRU's touch and the held aggregate's forget, and
+  number 45, the review's dedup regression) each apply exactly once and all compile (two `cargo check` batches of
+  non-overlapping mutants in a scratch copy). Only number 45 was built and run here: the edge set catches it (5
+  differences in 1 step) and so does fuzz seed 1 (20 in 6). The sweep that builds and runs them all is a cluster job,
+  not run.
+
+**Why some fresh comparisons are skipped.** Each step builds the world twice in Python, once with the memo carried from
+the earlier steps and once fresh, and the port must give both. The frame's pass-through keys (the ones build_feed takes
+from other subsystems) the port reads from the snapshot, which holds the memo build's frame. Where Python's fresh build
+passes a different value through, the port cannot reproduce that build, so that one comparison is skipped; the memo
+build's own bytes are still compared in that step. dump_memo.py now records the keys that differ, and every skip, the
+edge set's 2 and the random seeds' 84, traces to one of three causes, none of them a memo decision:
+- `order` (the session order), 65 of the 84 and both of the edge set's. build_feed reads session-order.json into the
+  frame and then writes it (adopting new sessions, dropping departed ones), so the frame's order lags one build: the memo
+  build, the first after the change, frames the old order, and the fresh build made right after it frames the order the
+  memo build wrote. That happens when the alive set changes (the edge set's steps 42 and 43, where s002 leaves and then
+  returns, and 62 random steps) and at the first build that succeeds in a world whose earlier builds, the adoption build
+  included, all raised (3).
+- `stateUnknown` (sessions shown with no live row that are neither working nor awaiting), 17. A session's derivation
+  raised and the memo served its previous entry, whose cards count it as working or awaiting; the fresh build has nothing
+  to serve, the session is absent there, and it lands in stateUnknown.
+- The memo build raised where the fresh build built (a served previous entry carried a null card, so the fold raised),
+  2: the snapshot still holds the last successful build's frame.
+The review traced the edge set's two skips to `order` and guessed the fuzz's were the same `leave` steps. That held for
+62 of the 84; the other 22 are the last two causes and the first-build case.
 
 **What the memo's checks found in code that predates them (both fixed).**
 - The port walked a session's anchors at the start of its derivation; Python's body walks them after the
@@ -2756,20 +2798,66 @@ seed any dependence would already have shown as run-to-run differences against P
   file reads the same wherever it is made.
 
 **The cluster jobs (`tools/rust-spike/orcd/`; written, not run).** `setup.sh` (through srun on a compute node: rustup
-1.29.3 checked against the archive's published SHA-256 and an optional pin, Rust 1.100.0 with rustup's per-component
-checks, the vendored crates checked against Cargo.lock, a scratch CPython 3.13, the tuned build and the tests);
+1.29.3 checked against the archive's published SHA-256 and against the hash pinned in the script for x86_64 Linux, Rust
+1.100.0 with rustup's per-component checks, the vendored crates checked against Cargo.lock, a scratch CPython 3.12.11,
+exactly the interpreter the port's Unicode tables and fixtures came from, the tuned build and the tests);
 `worlds.sbatch` (array over small, large, large4: a fresh dump, then every comparison and the memo's); `fuzz.sbatch`
 (43 tasks: layers 2 to 7 and the memo at seeds 1 to 6, at the record's sizes, and check_store's 6 seeds); `mutants.sbatch`
-(33 tasks: each memo mutant and the control, built under a `mutant` profile, against the memo edge set and fuzz seed 1);
-`measure.sbatch` (S6's CPU run with the memo rows, 8 runs, both sides, the production window of S6's own `/perf`
-snapshots). ORCD's x86_64 CPUs are not the Mac's M4 Max, so every ratio from there is indicative; the gate's numbers stay
-the Mac's. Results go to the group pool (named in `~/manager/ENGAGING.md`, kept out of the repository), each
-directory checksummed.
+(47 tasks: each memo mutant and the control, built under a `mutant` profile, against the memo edge set and fuzz seed 1;
+each task's status caught, missed, crashed, timedOut, buildFailed or error, from `mutant_status.py`, whose self-test
+covers each); `measure.sbatch` (S6's CPU run with the memo rows, 8 runs, both sides, the production window of S6's own
+`/perf` snapshots). Every correctness job first checks that its Python's Unicode version is the tables' (15.0.0), and
+every job refuses to run unless it was submitted from the pool's logs directory, where its log belongs. The runbook in
+setup.sh's header runs a smoke pass of 1 or 2 tasks per array first and sizes the rest's memory from the smoke tasks'
+sacct MaxRSS (the scripts' `--mem` values are guesses until then). ORCD's x86_64 CPUs are not the Mac's M4 Max, so every
+ratio from there is indicative; the gate's numbers stay the Mac's. Results go to the group pool (named in
+`~/manager/ENGAGING.md`, kept out of the repository), each directory checksummed.
 
 **What is not done.** Every cluster job: the large and large4 worlds' comparisons (the memo there is checked only on the
 small world so far), the full fuzz seeds, the mutant sweep and the measurement, so nothing here says what the memo or the
 tuning buys in CPU. The `peers` facts' host and remote name and the `subagents` component stay constant, since the replay
 has neither attached hosts nor subagent trees.
+
+When the measurement is written up, its memo rows must say what they leave out on both sides: the key's stats (both
+sides read recorded identities instead of stat'ing files) and the replay's stand-ins (Python's region subtracts them,
+and the port looks the same answers up in its snapshot). Production pays those costs in both languages, about equally,
+so the hit-against-hit ratio will overstate what the port saves per hit in production.
+
+**The review round (2026-11-26).** The review of S6.1 (two must-fix, eleven should-fix) and what was done:
+- Must-fix 1, a cleared id listed twice: `BuildFacts::new` indexed `board.cleared` as a raw list, while Python's key
+  reads the cleared set (the replay's `dict.fromkeys`), where a duplicate collapses. The reviewer's reproduction (clear
+  `s003:g9`, then list it again) gave 5 differences in one step: s003 missed on `cleared`, s001 on `peers` (s003's slice
+  is in s001's peer facts), and the held counters moved (segWalks 2, segHeld 19, segWalkTurns 2 against 0). The bytes
+  stayed equal, since the body reads a set, so nothing stale was served, but the port did not serve exactly when Python
+  serves. Fixed: each session's slice is deduplicated after its sort. The edge set gained that step (the code before the
+  fix gives exactly those 5 differences on the regenerated fixture, the fixed code 0), the fuzz's `cleared` kinds list
+  an existing id a second time (`cleared-dup`, `cleared-other-dup`), and mutant 45 is the regression. A first fuzz
+  variant drew too few duplicates (3 in 1,600 steps) and missed mutant 45: a duplicate only moves a slice when the
+  stored key already holds that id once, and generated worlds start with no cleared ids under their sessions. Seeding
+  cleared ids into half the worlds fixed it (fuzz seed 1 now catches mutant 45, 20 differences in 6 steps).
+- Must-fix 2, no smoke step before the sweeps: setup.sh's header and the next action now submit `worlds --array=0`,
+  `fuzz --array=0,6` and `mutants --array=45,46` first, check their steps.tsv, SHA256SUMS and statuses on the pool, then
+  submit the rest.
+- Should-fix, done: the cluster's Python pinned to CPython 3.12.11 and every correctness job guarded on its Unicode
+  version (the Mac's 3.13.18 is refused by the guard, 3.12.11 passes); the mutant sweep's statuses kept apart
+  (`mutant_status.py`, 12 self-test cases, and checked on mutant 45's real outputs); rustup-init's SHA-256 for x86_64
+  Linux pinned (b1c8cb14...6c55, the archive's published file fetched again and matching the review's value), with setup
+  refusing a triple without a pin; jobs submitted from anywhere but the pool's logs directory refused (simulated here:
+  refused from the home directory, accepted from the logs directory with or without a trailing slash); the skipped
+  fresh comparisons explained (above) with the frame keys now recorded; the measurement caveat written down (above); 13
+  mutants for the recorded-fact lookups, the LRU's touch and the held aggregate's forget; a transcript identity's shape
+  refused at load, so layer6, feed and the edge sets can no longer panic on it (a unit test pins it); the conda calls
+  run with HOME in scratch, so conda's environments.txt registration stays out of $HOME; the leftover `__pycache__`
+  removed.
+- Should-fix, not done: sizing the memory requests from a measured peak needs the smoke tasks' sacct MaxRSS, so it is
+  written into the runbook rather than done (the scripts' 24G and 8G stay as marked guesses). The "Unexplained" item the
+  review asked to drop was not in this file; the sentence that stood for it ("Python's own two builds pass different
+  frames through") is replaced by the explanation above.
+- Checks rerun on this Mac (the small world, one process at a time): the round trip, layer 6, the feed and the memo's
+  dump form on a fresh small dump; every edge set (layers 2 to 6 and the feed at 0 differences, the 5,797 tint points);
+  the memo edge set and its six plants; the small dump's default memo sequence (8 steps, 0 differences); memo fuzz seeds
+  1 to 3 at 200 worlds. Not rerun this round: the layer 1 to 5 dump comparisons, the short fuzz seeds of layers 2 to 7
+  and check_store, none of whose code changed except the loader's added refusal, which no dump or fixture meets.
 
 ## Log
 
@@ -3085,3 +3173,19 @@ has neither attached hosts nor subagent trees.
     world, the edge sets and short fuzz seeds of layers 2 to 7, 0 differences with the tuned binary. Rust tests: 188 pass.
   - Fixed, found by the memo's checks: the anchor walk ran before the body's `_session_retrying` read (held counters
     moved where Python's did not); the memo loop now stops where a fold raises, as Python's loop does.
+- 2026-11-26: S6.1's review round (two must-fix, eleven should-fix; "The review round" under "S6.1 memo port and
+  tuning"), light checks only on this Mac.
+  - Must-fix: a cleared id listed twice made the port's `cleared` and `peers` components move where Python's key, which
+    reads the cleared set, stands (5 differences in one step on the reviewer's reproduction; bytes equal). Each slice is
+    now deduplicated; a new edge step gives the old code exactly those 5 and the fixed code 0, and the fuzz's `cleared`
+    kinds list an existing id a second time (cleared ids seeded into half the worlds, or the variant could not catch the
+    regression mutant). And the cluster runbook runs a smoke pass of 1 or 2 tasks per array before any sweep.
+  - Checked: the memo edge set (70 steps, 279 decisions) and memo fuzz seeds 1 to 3 at 200 worlds (7,752 decisions), 0
+    differences; the six plants caught; the edge sets of layers 2 to 7 and the small dump's round trip, layer 6, feed and
+    memo checks unchanged. Every skipped fresh comparison (2 in the edge set, 84 in the fuzz) traced to a frame key the
+    port passes through: the session order (65 and both of the edge set's), stateUnknown after a served raise (17), or a
+    memo build that raised where the fresh one built (2).
+  - The cluster scripts: CPython 3.12.11 pinned with a Unicode guard on every correctness job, rustup-init's hash
+    pinned, jobs refused unless submitted from the pool's logs directory, mutant statuses kept apart (crashed, timedOut
+    and buildFailed are not caught), 46 mutants (13 for the recorded-fact lookups, the LRU touch and the held forget, 1
+    for the dedup regression). Not done: memory requests sized from a measured peak (needs the smoke tasks' MaxRSS).

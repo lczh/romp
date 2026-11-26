@@ -6,13 +6,15 @@
 # builds against the oracle, then dump_memo.py's default sequence against Python's decisions) and the transcript store
 # (check_store.py). The dumps stay in scratch (~/orcd/scratch/agents/romp_fix/dumps/<world>) for measure.sbatch; the
 # outputs, a steps.tsv of exit statuses and SHA256SUMS go to the pool.
-#   sbatch ~/orcd/scratch/agents/romp_fix/romp/tools/rust-spike/orcd/worlds.sbatch     (after setup.sh)
+# Smoke first, the small world alone, then the rest (setup.sh's header), from the pool's logs directory:
+#   sbatch --array=0 ~/orcd/scratch/agents/romp_fix/romp/tools/rust-spike/orcd/worlds.sbatch     (after setup.sh)
 #SBATCH --job-name=romp-fix-memo2-worlds
 #SBATCH --account=mit_general
 #SBATCH --partition=mit_normal
 #SBATCH --array=0-2
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
+# --mem: a guess for the large world (its peak was never measured): sacct MaxRSS after it runs
 #SBATCH --mem=24G
 #SBATCH --time=03:00:00
 #SBATCH --output=%x_%A_%a.out
@@ -27,6 +29,7 @@ fi
 
 source "$HERE/common.sh"
 need_built
+need_tables_python
 WORLDS=(small large large4)
 W="${WORLDS[${SLURM_ARRAY_TASK_ID:-0}]}"
 D="$ROOT/dumps/$W"

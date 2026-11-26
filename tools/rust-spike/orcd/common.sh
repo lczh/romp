@@ -7,7 +7,8 @@
 #                                            (ENGAGING.md names it; kept out of the repository), checksummed outputs
 #                                            under it and the jobs' logs in its logs/ (submit every job from there:
 #                                            `cd "$(cat ~/orcd/scratch/agents/romp_fix/RESULTS)/logs" && sbatch ...`,
-#                                            since each script's --output is relative to the submit directory)
+#                                            since each script's --output is relative to the submit directory; a job
+#                                            submitted from anywhere else is refused below)
 # Nothing here touches $HOME outside ~/orcd/scratch/agents/romp_fix, and no credential or token is used.
 set -euo pipefail
 
@@ -32,10 +33,32 @@ REVISION="$(cat "$ROOT/REVISION" 2>/dev/null || echo unknown)"
 die() { echo "romp_fix: $*" >&2; exit 2; }
 [ -n "$RESULTS" ] || die "no results directory: write it (ENGAGING.md's pool, agent-runs/romp_fix) into $ROOT/RESULTS"
 mkdir -p "$TMPDIR" "$HF_HOME" "$UV_CACHE_DIR" "$RESULTS/logs"
+# Each job script's --output is relative to the submit directory, so a job submitted from anywhere but the pool's logs
+# directory writes its log there ($HOME, say): refuse it before any work, and say where the stray log is.
+if [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ "$(realpath "$SLURM_SUBMIT_DIR")" != "$(realpath "$RESULTS/logs")" ]; then
+    die "submitted from $SLURM_SUBMIT_DIR, not $RESULTS/logs: cd there and submit again (setup.sh's header); delete this job's log from $SLURM_SUBMIT_DIR"
+fi
 
 need_built() {
     [ -x "$BIN" ] || die "no $BIN: run setup.sh first (it builds the release binary)"
-    [ -x "$PYTHON" ] || die "no Python at $PYTHON: run setup.sh first, or set ROMP_FIX_PYTHON to a CPython 3.12+"
+    [ -x "$PYTHON" ] || die "no Python at $PYTHON: run setup.sh first, or set ROMP_FIX_PYTHON to a CPython"
+}
+
+# The interpreter's Unicode version must be the one the port's tables were generated with (pyre_tables.rs and
+# pystr_tables.rs: CPython 3.12.11, Unicode 15.0.0), or a difference on the cluster could be the environment's (Python
+# 3.13 carries Unicode 15.1.0). Every correctness job calls it before any oracle runs; the measurement does not need it.
+need_tables_python() {
+    local t got want=""
+    for t in pyre_tables.rs pystr_tables.rs; do
+        got="$(sed -n 's/^pub const UNICODE_VERSION: &str = "\(.*\)";$/\1/p' "$CODE/rust/crates/romp-views/src/$t")"
+        [ -n "$got" ] || die "no UNICODE_VERSION in $t"
+        [ -z "$want" ] || [ "$got" = "$want" ] || die "$t is Unicode $got, the other table $want"
+        want="$got"
+    done
+    got="$("$PYTHON" -c 'import unicodedata; print(unicodedata.unidata_version)')" || die "$PYTHON does not run"
+    [ "$got" = "$want" ] \
+        || die "$PYTHON has Unicode $got, the port's tables $want: use setup.sh's CPython 3.12.11 (ROMP_FIX_PYTHON unset)"
+    echo "python $("$PYTHON" -c 'import platform; print(platform.python_version())'), unicode $got (the port's tables: $want)"
 }
 
 # run NAME CMD...: one checked step, its output kept in $OUT/NAME.txt, its exit status appended to $OUT/steps.tsv
