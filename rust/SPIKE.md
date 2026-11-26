@@ -6,9 +6,10 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
-- Step: S3, S4.1 and S4.2 done, merged into `romp_fix` from `romp_fix-s3`, `romp_fix-s4a` and `romp_fix-s42`, each
-  with its review's fixes. S4.2's two follow-ups (the empty-trigger pin, `dump_layer2.py --fuzz`) were independently
-  verified: 65,000 more random cases on fresh seeds with 0 differences, and 12 planted mutants all caught.
+- Step: S4.3 done on branch `romp_fix-s43` (from `romp_fix` at the S4.2 merge), awaiting review and merge. S3, S4.1
+  and S4.2 are merged into `romp_fix` from `romp_fix-s3`, `romp_fix-s4a` and `romp_fix-s42`, each with its review's
+  fixes. S4.2's two follow-ups (the empty-trigger pin, `dump_layer2.py --fuzz`) were independently verified: 65,000 more
+  random cases on fresh seeds with 0 differences, and 12 planted mutants all caught.
   - S3: romp-transcript reads both dumps' transcripts with every summary line identical to Python's reader, records
     compared in full, and matches Python's cache read for read on 46 lockstep steps of the identity contract and on
     1,200 random ones (`tools/rust-spike/check_store.py --fuzz 6`). See "S3 as built" below.
@@ -19,17 +20,25 @@ with no server. Both implementations run on one synthetic state, and the feed JS
     differences on every turn of both worlds (336 values small, 135,016 large), on 100 Python-made edge cases (1,210
     values and 300 counts; 10 more are refused at load, as built to be) and on 60,000 random cases (590,031 values,
     `dump_layer2.py --fuzz`). See "S4.2 as built" below.
+  - S4.3: the tree facts and the anchor walk (_session_working, _open_turn_progress, the anchor maps, the plain-prompt
+    time, `seg_turn`, and the four anchor functions per segment) match Python's own answers with zero differences on
+    both worlds (1,801 values small, 695,672 large), on 128 Python-made edge cases (6,444 values; 7 more are refused at
+    load, as built to be) and on 60,000 random sessions and position sets (8,059,862 values, `dump_layer3.py --fuzz`).
+    4 planted mistakes and 21 source mutants are each caught by the edge set and by one fuzz seed. See "S4.3 as built".
   - S2 done before them (byte-identical oracle dumps across seeds and roots, "S2 as built"); S1 before that
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: S4.3, layer 3 (tree facts and the anchor walk), scoped in "What layer 3 needs" below. S4.2 is merged.
+- Next action: S4.4, layer 4 (the store helpers), scoped in "What layer 4 needs" below, once S4.3 is reviewed and
+  merged.
   - Inputs: `python3 tools/rust-spike/dump_world.py --world small` (or `large`), then
-    `python3 tools/rust-spike/dump_layer1.py DUMP` and `python3 tools/rust-spike/dump_layer2.py DUMP`. Never commit a
-    dump.
-  - Checks: `romp-spike roundtrip DUMP`, `romp-spike layer1 DUMP`, `romp-spike layer2 DUMP`,
+    `python3 tools/rust-spike/dump_layer1.py DUMP`, `python3 tools/rust-spike/dump_layer2.py DUMP` and
+    `python3 tools/rust-spike/dump_layer3.py DUMP`. Never commit a dump.
+  - Checks: `romp-spike roundtrip DUMP`, `romp-spike layer1 DUMP`, `romp-spike layer2 DUMP`, `romp-spike layer3 DUMP`,
     `romp-spike layer2 rust/crates/romp-views/tests/fixtures/layer2_edge.json`,
-    `python3 tools/rust-spike/dump_layer2.py --fuzz 10000 --seed S` (seeds 1 to 6) and
+    `romp-spike layer3 rust/crates/romp-views/tests/fixtures/layer3_edge.json`,
+    `python3 tools/rust-spike/dump_layer2.py --fuzz 10000 --seed S` and
+    `python3 tools/rust-spike/dump_layer3.py --fuzz 10000 --seed S` (seeds 1 to 6), and
     `python3 tools/rust-spike/check_store.py --dump DIR --fuzz 6` (`--dump` repeatable). Build with
     `~/.cargo/bin/cargo build --offline --release -p romp-spike`; the binary is in `rust/target/release/`.
   - Re-run check_store after any change to romp-transcript or to Python's reader. S6 should read "What the store
@@ -63,7 +72,7 @@ kernel, where the memory gain does not depend on interpreter speed.
 | `rust/crates/romp-transcript` | the transcript store: raw bytes plus a per-line index, the Python cache's identity contract (inode, size, mtime, CRC), positioned reads |
 | `rust/crates/romp-views` | the feed's per-card build only (the spike's slice of the views crate) |
 | `rust/crates/romp-spike` | the standalone binary: load a snapshot and transcripts, build the feed, print canonical JSON and timings |
-| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py`, `dump_layer2.py`), the measurement |
+| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py`, `dump_layer2.py`, `dump_layer3.py`), the measurement |
 
 ## Steps
 
@@ -439,36 +448,195 @@ case the loader refuses, fails it. The same seed makes the same file byte for by
 The weakest catch is the absent session_id (3 of 10,000): it needs a split of a segment whose first atom has no
 `session_id` (2% of atoms), and not the turn's first segment, where em.segments raises KeyError before any split.
 
-## What layer 3 needs (tree facts and the anchor walk)
+## S4.3 as built (2026-11-26)
 
-Section 2 item 3: _session_working with _suspended_after, _open_turn_progress and _last_plain_user_turn_t;
-_seg_anchors, jd._prompt_anchor_uuid and _seg_last_text; _feed_seg_fold, _feed_seg_walk and _feed_seg_plain_t without
-the held aggregate, and _FeedSegTurns.get. Found while scoping it from the current source and the large world's
+**The problem.** Every card carries links into the chat: the title lands on the prompt that asked for the work, the
+summary on the reply that closed it, and a working card shows how long its turn has run and how many tools it called.
+Layer 3 computes the facts those links and badges come from. Per session: whether it is working (its last turn is open
+and the laptop has not slept since its last activity), the open turn's start and tool count, and the latest time the
+user typed a plain prompt. Per segment: four anchors (the reply, the first atom the chat can land on, the prompt atom,
+the latest substantial prose), folded into maps keyed by a segment key that ignores the time. A port can match Python
+on every ordinary session and still go wrong where two segments share a key, where segmenting a turn fails partway,
+where two equal times differ only in being an int or a float, or where an id is the empty string. The worlds have none
+of those.
+
+`layer3.rs` ports kernel._session_working with _suspended_after, _open_turn_progress, _last_plain_user_turn_t,
+_seg_anchors, _seg_jump (unlisted; the fold calls it when a segment has no reply), jd._prompt_anchor_uuid,
+_seg_last_text, _feed_seg_fold, _feed_seg_walk, _feed_seg_plain_t and _FeedSegTurns.get, line for line. The held
+aggregate (_FEED_SEG_HELD and its keys) is left out, so the walk folds every turn. What the notes flagged, as built:
+- The maps are Python dicts. Two prompts with the same text in two turns share a key, and the later segment overwrites
+  the earlier one's values but keeps its place. The four maps are always written together, so `SegMaps` holds one
+  insertion-ordered map (`PyDict`, overwrite in place) of a struct with the four values, plus the citable set.
+- A segmentation raise (layer 2's `Err(Raise)`) stops the walk: `ok` is false and the maps hold every turn before the
+  raising one. The plain-prompt time is still read over every turn, since it does not segment. `seg_turn.get` answers
+  None and counts a fault when its turn raises, or when the position names a turn past the end (Python's IndexError is
+  inside the same try). Nothing panics.
+- `max(best, x)` keeps the first of equal values, so the plain-prompt time is 5 after 5 then 5.0, and 5.0 after 5.0
+  then 5. `a.get("t") or turn.get("t") or 0` skips a zero time. `_feed_seg_plain_t`'s two steps (closed turns, then
+  the open one) are kept as written.
+- _open_turn_progress counts tool_use blocks over `(message or {}).get("content") or []`, not em._content: a bare
+  string content counts nothing.
+- `x or y` over uuids treats "" as false: a reply whose uuid is "" falls to the settle, then to _seg_jump.
+- With no trigger uuid, _last_plain_user_turn_t's anchor search looks for an atom whose uuid equals None. An idle span
+  (uuid null) matches before `atoms[0]` is tried, so the prompt before it is not the anchor.
+- `board.downtime` is now typed as `[start, end]` number pairs. Python unpacks each entry as `(start, _e)` and
+  compares `start > (t or 0)`, so anything else is refused at load. Both worlds' lists are empty; the round trip still
+  matches byte for byte.
+- Two Python branches cannot run on a tree the loader admits. _feed_seg_fold's stored-prose branch needs a restored
+  pre-cut turn, which is refused. _open_turn_progress's per-atom `except` needs a message that is not a dict, or content
+  that is a dict or a number, also refused.
+
+**The oracle.** `tools/rust-spike/dump_layer3.py DUMP` loads the real kernel as the earlier layers' dumpers do. It
+installs the snapshot's downtime list as kernel._downtime. Then, per alive session, it asks the real functions what
+the per-card build asks them:
+- _session_working inside the key's try;
+- _open_turn_progress, asked whether or not the session works (the build asks only when it does);
+- _feed_seg_walk with _FEED_SEG_HELD cleared and no leaf head, then _feed_seg_plain_t on it;
+- `k in seg_turn` and `seg_turn.get(k)` for every key, and for one key no fold writes, with the faults counted;
+- per turn, per segment of kernel._segs_seam, the answers of _seg_anchors, _seg_jump, jd._prompt_anchor_uuid and
+  _seg_last_text, or the exception segmentation raised.
+
+It writes `DUMP/layer3.json` (0.03 MB small, 12.2 MB large). The held aggregate the port leaves out gets a self-check:
+each session is walked again with a leaf head, twice, the second walk served from what the first stored, and both must
+give the same maps and time as the walk with nothing held. `romp-spike layer3 DUMP` builds the same answer from the
+typed structs and compares it value by value. Each object's key order and each list's length count as one value, and
+every leaf is compared as romp-json writes it, so an int/float tag counts.
+
+**Result on the worlds: zero differences.**
+- Small: 4 sessions, 42 turns, 42 keys, 1,801 values. Large: 38 sessions, 16,877 turns, 16,877 keys, 695,672 values.
+- The held aggregate agreed on 4 of 4 and 38 of 38 sessions. It served 38 and 16,839 closed turns, which is every
+  closed turn, so leaving it out changes no answer on either world.
+- Why that is not enough. No key repeats in either world. No walk raises, no session is suspended, and no segment has a
+  settle, an attachment, an API error or an empty uuid. No anchor comes from _seg_jump, and every `seg_turn` position
+  matches its segment. Only 2 sessions per world are working. The one layer-3 branch the worlds do reach off the
+  common path is the 80-code-point floor, at the boundary atom.
+
+**The edge set.** `dump_layer3.py --edge-cases` writes `rust/crates/romp-views/tests/fixtures/layer3_edge.json`
+(synthetic, 0.31 MB; it regenerates byte for byte under another hash seed). Its 135 cases:
+- 112 sessions: empty and ended turns, idle tails, trailing command atoms (truthy and falsy), downtime before, at and
+  after the last activity (an int start against a float end, a zero end), the progress count over every content
+  shape, echo turns, `_echo_text`, romp-goal-id prompts (in a list and in a bare string), every trigger shape, zero,
+  negative and tied times of both tags (and an int past 2**53), settle and synthetic replies, API errors, bare ends,
+  empty and missing uuids, attachment triggers, the floor at 79 and 80 code points, repeated keys, raises in the first,
+  a middle and the open turn, seam tails, placed echoes;
+- 11 direct _FeedSegTurns cases over hand-made positions, as a held aggregate would hand them: the matching ordinal,
+  another key at the ordinal (the turn's last segment with the key is taken), an ordinal past the end, no such key, a
+  raising turn (a fault on every get), a turn index past the end, no turns;
+- 12 direct _suspended_after reads, including `t` null, 0 and -0.0.
+
+Result: 128 cases load and match on every value (6,444), 0 differences. The other 7 are refused at load, and they are
+exactly the cases named REFUSE. Python raises on 3 of them: an AttributeError on a string message (em._stop_reason, in
+_seg_anchors), a ValueError on a downtime entry of three values, a TypeError on a null start. On the other 4 Python
+answers: a content that is a dict, a restored pre-cut turn with stored prose counts, a trigger that is a string, and a
+downtime start that is a bool.
+
+**The randomized check.** `python3 tools/rust-spike/dump_layer3.py --fuzz N --seed S` makes N random sessions from
+layer 2's random turns (dump_layer2.fuzz_turn, its atom, text, time and trigger generators). It decorates them with
+what layer 3 reads: ended flags, idle tails, command atoms, echoes, romp-goal-id prompts, settles and synthetic
+replies, bare ends, API errors, attachment triggers, prose at the floor, zero times, an input repeated inside a turn,
+earlier turns repeated (sometimes with every time's tag flipped, so ties differ only in tag), downtime around the last
+activity, and seams aimed at the turns' segments (dump_layer2.fuzz_store). One case in twelve instead hands
+_FeedSegTurns the walk's positions perturbed: another ordinal, another turn, past the end. Python answers each with the
+real functions, `romp-spike layer3` compares, and any difference or refusal fails the run. The same seed makes the same
+file, so a failure replays.
+- Result, seeds 1 to 6 at 10,000 cases each (about 6 s apiece): 60,000 cases (55,487 sessions, 4,513 position sets),
+  8,059,862 values, **0 differences**, 0 refused.
+- What they reached: 145,312 turns and 224,311 segments; 28,379 keys overwritten; 7,621 walks stopped by a raise;
+  6,054 sessions suspended and 23,978 working; 9,853 plain-prompt times that are floats; 31,890 segments whose anchor
+  came from _seg_jump; 2,178 `seg_turn` faults and 10,551 default answers over the perturbed positions.
+
+**Planted mistakes, each caught.** The first four are romp-spike's `--plant` options (`dump_layer3.py --fuzz ...
+--plant NAME` passes only when the plant is caught). The other 21 were edits to `layer3.rs`, each built, run on all
+four inputs and reverted by a scratch script. Each cell is differences, then the sessions or cases they fell in.
+
+| Mistake | Small | Large | Edge set (135) | Fuzz, seed 1 (10,000) |
+|---|---|---|---|---|
+| `--plant max-last` (the last of equal times kept) | 0 | 0 | 5 in 5 | 57 in 57 |
+| `--plant overwrite-moves` (a repeated key moves to the end) | 0 | 0 | 57 in 2 | 36,400 in 937 |
+| `--plant bytes` (the substantive floor in UTF-8 bytes) | 3 in 1 | 3 in 1 | 4 in 1 | 4,649 in 1,481 |
+| `--plant raise-skips` (a raising turn skipped, the walk ok) | 0 | 0 | 17 in 6 | 5,857 in 1,324 |
+| trailing command atoms are not skipped | 0 | 0 | 1 in 1 | 34 in 34 |
+| a suspension at the last activity counts (`>=`) | 0 | 0 | 5 in 3 | 1,740 in 1,096 |
+| progress counts tool uses of every atom kind | 0 | 0 | 1 in 1 | 1,985 in 1,985 |
+| progress dates from the first atom, not the turn | 0 | 0 | 1 in 1 | 1,140 in 1,140 |
+| with no trigger uuid, `atoms[0]` is the anchor | 0 | 0 | 3 in 3 | 537 in 537 |
+| a zero atom time is kept (no `or` to the turn's) | 0 | 0 | 1 in 1 | 125 in 125 |
+| echoTurn is not read | 0 | 0 | 1 in 1 | 167 in 167 |
+| romp-goal-id read through jd._atom_text | 0 | 0 | 1 in 1 | 53 in 53 |
+| the plain-prompt time reads the open turn only | 0 | 0 | 13 in 13 | 1,649 in 1,649 |
+| the settle beats the reply | 0 | 0 | 9 in 5 | 1,793 in 826 |
+| _seg_anchors does not skip API errors | 0 | 0 | 8 in 3 | 1,728 in 715 |
+| a reply uuid "" is kept (Rust's `Option::or`) | 0 | 0 | 1 in 1 | 36 in 35 |
+| the attachment branch is dropped | 0 | 0 | 4 in 2 | 160 in 76 |
+| the substantive floor is strict (`> 80`) | 0 | 0 | 15 in 7 | 1,307 in 576 |
+| prose counted on the stripped text | 0 | 0 | 3 in 1 | 738 in 306 |
+| the citable set admits a uuid "" | 0 | 0 | 1 in 1 | 223 in 223 |
+| an overwrite keeps the earlier position | 0 | 0 | 64 in 28 | 9,744 in 2,726 |
+| the fold segments without the store's seams | 0 | 0 | 22 in 4 | 3,043 in 599 |
+| a raise discards the maps | 0 | 0 | 26 in 5 | 4,267 in 802 |
+| `seg_turn.get`'s fallback takes the first segment with the key | 0 | 0 | 2 in 2 | 57 in 30 |
+| `seg_turn.get` caches a raising turn (one fault, not one per get) | 0 | 0 | 1 in 1 | 8 in 8 |
+
+The worlds catch one mistake of the 25, the byte count, and only at the boundary atom: s001's fourth segment key
+names `...-000000000033` (79 code points, 82 bytes) as its latest substantial prose where Python names `...-032`,
+and the citable set gains it. Everything else rests on the edge set and the fuzz, and each of them catches every row.
+
+The first round of this table was weaker, and each check found what the other missed:
+- The edge set missed the reply uuid "" mutant (0 cases), and the fuzz caught it (63). That needs a settle whose uuid
+  is "", so `reply or settle` yields "" and the fold must go on to _seg_jump. A case was added.
+- The fuzz missed the zero-time and first-fallback mutants (0 each) that the edge set caught. It drew no human anchor
+  at time 0 under a later turn time, and no turn with the same input twice. Both were added. A plain-prompt tie
+  differing only in tag came up in 5 of 10,000 cases, and after the tag-flipped repeats in 57.
+- The weakest catch is still `seg_turn.get` caching a raising turn, 8 of 10,000. It needs a perturbed position on a
+  raising turn, asked twice.
+- `--plant overwrite-moves` falls in only 2 of the edge set's 35 overwritten keys. Moving a session's only key leaves
+  it where it was, so a check needs a repeat with another key between. The same holds for the worlds' sessions, which
+  have no repeat at all.
+
+Tests: 16 new, 102 pass in the workspace. 11 unit tests are in `layer3.rs`. `tests/layer3_edge.rs` has 4 tests over the
+fixture: every case answers as Python does, the branch counts equal the fixture's own, and each plant is caught on
+exactly the cases built for it. 1 is in romp-spike, for the comparison's messages.
+
+What this feeds: layer 4 (the store helpers) reads these maps directly. _node_anchor_uuids looks up `seg_trig` and
+`seg_uuid`, and _node_log_rows looks up `seg_uuid`. Layer 5's summary landing reads `seg_best`, `cite_uuids` and
+`seg_turn`, and the body's working card reads `who_working` and the open turn's progress. A wrong key order or tag here
+would surface there as a card linking to the wrong message.
+
+## What layer 4 needs (the store helpers)
+
+Section 2 item 4: _agent_open_set, _parked_rows, _focus_open_top with jd._top_of, _goal_awaiting_stamp_full,
+_open_leaves, _all_outstanding_delegated; _handoff_card_fields, _handoff_peer_identities, _peer_identity (registry rung
+only), _awaiting_item and _awaiting_peer_items; _newest_block_ev_t, jd._block_ev_t, jd._block_since, jd._done_since,
+jd.review_boundary; _session_started_face, _node_log_rows, _node_anchor_uuids with jd.junk_quote, _landing_inputs,
+_login_refusal_label, _name_color, _name_of. Found while scoping it from the current source and the large world's
 `coverage/port.json`:
-- One unlisted function: `_seg_jump`. _feed_seg_fold stores `r or _seg_jump(atoms)`, and `r` (the text reply) is set
-  on every segment of both worlds, so _seg_jump never runs. Port it with edge cases or refuse loudly. It reads
-  em.atom_has_text and em.atom_tool_uses (layer 1).
-- From layer 2: _feed_seg_fold walks `_segs_seam(turn, store)` per turn and keys every map by
-  `_seg_key(seg["id"])`. A later segment with the same key overwrites an earlier one but keeps the earlier one's place
-  (a Python dict), so the maps need an insertion-ordered upsert. `pos[k] = (turn index, segment ordinal)` feeds
-  _FeedSegTurns.get, which segments that one turn again and, when the segment at the ordinal carries another key,
-  takes the turn's last segment with the key.
-- Raises: _feed_seg_walk runs both folds inside one try. A raise leaves the maps as far as the fold got and marks the
-  walk not ok. _FeedSegTurns.get answers its default when segmentation raises. So layer 2's `Err(Raise)` must reach
-  layer 3 as a partial result, never a panic.
-- Numbers: `seg_best[k]` carries `seg.get("t", 0)` with its tag. _last_plain_user_turn_t takes
-  `max(best, a.get("t") or turn.get("t") or 0)`: `or` skips a zero time, and `max` keeps the first of equal values
-  (5 before 5.0), so the tag depends on order. _open_turn_progress returns the turn's `t` as is.
-- _open_turn_progress counts tool uses over `(message or {}).get("content") or []` directly, not em._content (a
-  bare-string content iterates characters, none a dict), and swallows any exception per atom.
-- Outside the tree: _suspended_after reads `_downtime`, the snapshot's `board.downtime` (raw JSON today, empty in both
-  worlds). The held aggregate (_FEED_SEG_HELD, _turn_hold_key, _seams_fp, _feed_seg_copy) stays out, so the port walks
-  every turn; the oracle must clear _FEED_SEG_HELD (dump_world's clear_build_memos) or call _feed_seg_fold directly.
-- Branches the worlds miss, each needing Python-made edge cases as layers 1 and 2 had: _session_working's empty turns
-  and its skip of trailing command atoms; _last_plain_user_turn_t's echo-turn and romp-goal-id skips;
-  jd._prompt_anchor_uuid's no-trigger and attachment branches; _seg_anchors' settle anchor; _open_turn_progress's
-  empty, ended and exception branches; _FeedSegTurns.get's absent key, raise and fallback (it runs once on the large
-  world); and _feed_seg_fold's stored `pcs` branch, which is unreachable while the loader refuses pre-cut turns.
+- Unlisted functions and constants they call: _peer_stamp_superseded (from _goal_awaiting_stamp_full, reading
+  `recorded.peerAnswered`, a tuple or a legacy scalar), _title_shaped and _HANDOFF_LABEL_RE (from
+  _handoff_card_fields), jd._JUNK_QUOTES (junk_quote), _AWAIT_ITEM_KINDS (an assert in _awaiting_item), _UUIDISH_RE,
+  and _names_parts (a snapshot lookup behind _name_of and _name_color). _peer_identity's rungs past the registry
+  (_host_for_sid, _remote_name_of, _postal_peer_names) read state outside the snapshot. Port the registry rung and the
+  composite and stub fallbacks, and refuse or record the rest.
+- Node keys to type: the loader refuses them today (`NODE_UNPORTED`), and these readers need them typed. They are
+  agentTask (`.status`), awaitingWhy, awaitingAt, awaitingKind, awaitingPeers, rolledUp, born (`parentText`, `why`),
+  deltaSince, distilledMt and summaryAnchor, plus `synth` on log rows (_parked_rows skips synthesized rows).
+- State across calls: _node_anchor_uuids writes `_node_anchor_last[nid]` on a warm resolve and serves it when a later
+  lookup misses. The table is keyed by node id alone and lives for the kernel run. So a cold lookup serves an earlier
+  build's warm one. Within one build, a session's answer can depend on an earlier session's wherever two ids collide;
+  its docstring says ids are bare (g1), while both worlds' ids carry the sid prefix. The port needs the table as state
+  walked in the alive order, and the oracle must clear it (a fresh process, or `_node_anchor_last.clear()`), as
+  dump_world's cold-oracle note says. It also takes layer 3's `seg_trig` and `seg_uuid`.
+- Numbers and order: _block_ev_t and _done_since take `max` over `ev_t or at` (the first of equal values, and the tag
+  rides through), with `mt or t or 0` fallbacks. _goal_awaiting_stamp_full takes `max` over tuples (at, why, kind or "",
+  peers), so ties break on the strings. _awaiting_item writes `int(since)`. _parked_rows compares `(t or 0) > t0` and
+  returns a dict in the order of `children.values()`. _handoff_peer_identities sorts by name, stably (equal names keep
+  first-seen order). _open_leaves keeps document order. _agent_open_set is a set, read by membership only.
+- Recursion: _agent_open_set and _open_leaves recurse in Python, past about 1,000 levels a RecursionError. The port
+  must not overflow its stack on a deep tree (iterate, or refuse past a depth, and say which).
+- Branches the worlds miss, each needing Python-made edge cases. From `coverage/port.json`, these never run in either
+  world: _goal_awaiting_stamp_full's stamps (5 of 18 lines missed: no node carries awaitingWhy), _peer_identity past the
+  registry (5 of 23 lines run), _handoff_card_fields' handoff-root card (4 of 17 run), _session_started_face's `born`,
+  _login_refusal_label's auth error, _node_anchor_uuids' cold road (the held anchor, summaryAnchor), review_boundary's
+  distilledMt advance, and _agent_open_set's open agentTask.
 
 ## Log
 
@@ -552,3 +720,18 @@ the held aggregate, and _FeedSegTurns.get. Found while scoping it from the curre
   - `dump_layer2.py --fuzz`: seeds 1 to 6 at 10,000 cases, 590,031 values and 180,000 counts, 0 differences. Seed 1
     catches both plants (end 5,197, bytes 216) and all 12 source mutants tried (3 to 5,037 differences each).
   - Rust tests: 86 pass.
+- 2026-11-26: S4.3, layer 3 (tree facts and the anchor walk), on fresh dumps (`dump_layer3.py`, `romp-spike layer3`).
+  - Worlds: small 4 sessions, 42 turns, 42 keys, 1,801 values; large 38 sessions, 16,877 turns, 16,877 keys, 695,672
+    values; 0 differences. The held aggregate the port leaves out agreed on every session (4 of 4, 38 of 38), serving
+    every closed turn (38 and 16,839).
+  - Edge set: 135 cases; 128 load and match on 6,444 values, 0 differences; 7 refused at load (every REFUSE case),
+    Python raising on 3 of them.
+  - `dump_layer3.py --fuzz`: seeds 1 to 6 at 10,000 cases, 60,000 cases (55,487 sessions, 4,513 position sets),
+    8,059,862 values, 0 differences, 0 refused; 28,379 overwritten keys, 7,621 walks stopped by a raise, 6,054
+    suspended sessions reached.
+  - Planted: 4 `--plant` options and 21 source mutants, every one caught by the edge set and by fuzz seed 1 (1 to
+    36,400 differences); the worlds catch only the byte count, at the boundary atom. The first round's edge set missed
+    one mutant (an empty reply uuid kept) and its fuzz missed two (a zero time kept, the first fallback); each was
+    closed with a case or a generator change.
+  - `board.downtime` typed as number pairs; the round trip and layers 1 and 2 still match on both worlds (6,370 and
+    2,499,514 layer-1 values, 336 and 135,016 layer-2 values). Rust tests: 102 pass.

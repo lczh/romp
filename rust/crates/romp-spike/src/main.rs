@@ -5,6 +5,8 @@
 //!     romp-spike layer1 DUMP [--plant bytes]          # layer 1 against DUMP/layer1.json (dump_layer1.py)
 //!     romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]
 //!         Layer 2 (segmentation) against DUMP/layer2.json, or against an edge set (both by dump_layer2.py).
+//!     romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]
+//!         Layer 3 (tree facts and the anchor walk) against DUMP/layer3.json, or an edge set (dump_layer3.py).
 //!     romp-spike store DUMP [--records] [--plant NAME]
 //!         Read every file of DUMP/transcripts/ through the transcript store and print the canonical summary
 //!         (romp_transcript::canon): per file one line, then one line per record. --records prints each record's
@@ -16,8 +18,10 @@
 //! `--plant` makes one deliberate mistake, to show the comparison catches it: `float-tag` drops the int/float tag of
 //! the alive rows' mtime (1781099940.0 written as 1781099940) and gives the first tree's first atom a float `t`,
 //! `bytes` counts atom_prose_chars in UTF-8 bytes; layer2's `end` ends each segment at its own last atom and its
-//! `bytes` counts the seam prose floor in UTF-8 bytes; the store's plants are no-tool-result, vt-strip and
-//! skip-held-crc.
+//! `bytes` counts the seam prose floor in UTF-8 bytes; layer3's `max-last` keeps the last of equal times in the
+//! plain-prompt max, `overwrite-moves` moves a repeated key to the end of the anchor maps, `bytes` counts the
+//! substantive floor in UTF-8 bytes and `raise-skips` skips a raising turn instead of stopping the walk; the store's
+//! plants are no-tool-result, vt-strip and skip-held-crc.
 //! Exit status: 0 when everything matched, 1 on any difference, 2 on a usage or load error.
 
 use romp_transcript::canon::{self, RecordMode};
@@ -31,13 +35,14 @@ use std::time::Instant;
 use romp_json::Value as Out;
 use romp_views::layer1::{self, ATOM_COLUMNS, SEG_COLUMNS, TURN_KEYS};
 use romp_views::layer2::{self, Plant as Plant2, Probe};
+use romp_views::layer3::{self, Plant as Plant3};
 use romp_views::load;
 use romp_views::record::{Num, OMap, ToJson};
 use romp_views::snapshot::{Snapshot, Store as GoalStore};
 use romp_views::tree::{self, Atom, Content, Tree, Turn};
 
 const USAGE: &str =
-    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
+    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
 const MAX_SHOWN: usize = 10;
 
 fn store_usage() -> ExitCode {
@@ -194,6 +199,8 @@ fn main() -> ExitCode {
         ("layer2", None) => layer2_cmd(&dir, None),
         ("layer2", Some("end")) => layer2_cmd(&dir, Some(Plant2::EndAtLastAtom)),
         ("layer2", Some("bytes")) => layer2_cmd(&dir, Some(Plant2::FloorInBytes)),
+        ("layer3", None) => layer3_cmd(&dir, None),
+        ("layer3", Some(p)) if Plant3::parse(p).is_some() => layer3_cmd(&dir, Plant3::parse(p)),
         _ => return usage(),
     };
     match result {
@@ -781,6 +788,230 @@ fn layer2_edge(file: &Path, plant: Option<Plant2>) -> Result<bool, String> {
     Ok(cmp.diffs == 0)
 }
 
+/// One step of the path to a compared value: an object key or an array index.
+#[derive(Clone, Copy)]
+enum Step<'a> {
+    Key(&'a str),
+    Idx(usize),
+}
+
+fn path_text(at: &str, path: &[Step<'_>]) -> String {
+    let mut s = at.to_string();
+    for p in path {
+        match p {
+            Step::Key(k) => {
+                s.push('.');
+                s.push_str(k);
+            }
+            Step::Idx(i) => s.push_str(&format!("[{i}]")),
+        }
+    }
+    s
+}
+
+/// A structural comparison of answers (the port's against Python's, read from JSON): every object's key order and
+/// every array's length count one value each, and every leaf one value, compared as romp-json writes it (so an
+/// int/float tag or a negative zero counts).
+#[derive(Default)]
+struct Tally {
+    values: usize,
+    diffs: usize,
+    shown: Vec<String>,
+}
+
+impl Tally {
+    fn diff(&mut self, what: String) {
+        self.diffs += 1;
+        if self.shown.len() < MAX_SHOWN {
+            self.shown.push(what);
+        }
+    }
+
+    fn compare(&mut self, at: &str, got: &Out, want: &Out) {
+        let mut path = Vec::new();
+        self.walk(at, &mut path, got, want);
+    }
+
+    fn walk<'a>(&mut self, at: &str, path: &mut Vec<Step<'a>>, got: &'a Out, want: &'a Out) {
+        self.values += 1;
+        match (got, want) {
+            (Out::Array(g), Out::Array(w)) => {
+                if g.len() != w.len() {
+                    self.diff(format!("{}: {} items here, {} in python (rust {} python {})", path_text(at, path),
+                                      g.len(), w.len(), dumps_short(Some(got)), dumps_short(Some(want))));
+                    return;
+                }
+                for (i, (a, b)) in g.iter().zip(w).enumerate() {
+                    path.push(Step::Idx(i));
+                    self.walk(at, path, a, b);
+                    path.pop();
+                }
+            }
+            (Out::Object(g), Out::Object(w)) => {
+                let (kg, kw) = (keys_of(got), keys_of(want));
+                if kg != kw {
+                    self.diff(format!("{}: keys rust {kg:?} python {kw:?}", path_text(at, path)));
+                    return;
+                }
+                for ((k, a), (_, b)) in g.iter().zip(w) {
+                    path.push(Step::Key(k));
+                    self.walk(at, path, a, b);
+                    path.pop();
+                }
+            }
+            _ => {
+                if romp_json::dumps(got) != romp_json::dumps(want) {
+                    self.diff(format!("{}: rust {} python {}", path_text(at, path), dumps_short(Some(got)),
+                                      dumps_short(Some(want))));
+                }
+            }
+        }
+    }
+}
+
+fn plant3_name(plant: Option<Plant3>) -> String {
+    plant.map_or_else(String::new, |p| format!(" [planted: {}]", p.name()))
+}
+
+fn check_cite(doc: &serde_json::Value, file: &str) -> Result<(), String> {
+    let floor = doc["constants"]["CITE_MIN_CHARS"].as_u64();
+    if floor != Some(layer3::CITE_MIN_CHARS as u64) {
+        return Err(format!("{file}: CITE_MIN_CHARS is {floor:?} in Python, {} here", layer3::CITE_MIN_CHARS));
+    }
+    Ok(())
+}
+
+/// Layer 3 against Python's answers: DUMP/layer3.json for a dump directory, or an edge set file.
+fn layer3_cmd(path: &Path, plant: Option<Plant3>) -> Result<bool, String> {
+    if path.is_dir() { layer3_dump(path, plant) } else { layer3_edge(path, plant) }
+}
+
+fn layer3_dump(dir: &Path, plant: Option<Plant3>) -> Result<bool, String> {
+    let dump = load::load_dump(dir)?;
+    let expect: serde_json::Value =
+        serde_json::from_slice(&read(&dir.join("layer3.json"))?).map_err(|e| format!("layer3.json: {e}"))?;
+    if expect["schema"] != "romp-spike-layer3/1" {
+        return Err(format!("layer3.json: schema {}, expected romp-spike-layer3/1", expect["schema"]));
+    }
+    check_cite(&expect, "layer3.json")?;
+    let sessions = expect["sessions"].as_array().ok_or("layer3.json: no sessions")?;
+    if sessions.len() != dump.trees.len() {
+        return Err(format!("layer3.json has {} sessions, the dump {}", sessions.len(), dump.trees.len()));
+    }
+    let facts = dump.snapshot.sessions.as_ref().ok_or("snapshot.json: no sessions")?;
+    let downtime: &[(Num, Num)] =
+        dump.snapshot.board.as_ref().and_then(|b| b.downtime.as_deref()).unwrap_or_default();
+    let t0 = Instant::now();
+    let mut tally = Tally::default();
+    let (mut n_turns, mut n_keys, mut working, mut differing) = (0usize, 0usize, 0usize, 0usize);
+    for ((sid, tree), sess) in dump.trees.iter().zip(sessions) {
+        if sess["sid"].as_str() != Some(sid.as_str()) {
+            return Err(format!("layer3.json's sessions are out of order at {sid}"));
+        }
+        let store: Option<&GoalStore> = facts.get(sid).and_then(|f| f.store.as_ref()).and_then(Option::as_ref);
+        let turns: &[Turn] = tree.as_ref().and_then(|t| t.turns.as_deref()).unwrap_or_default();
+        n_turns += turns.len();
+        let w = layer3::feed_seg_walk(tree.as_ref().map(|_| turns), store);
+        n_keys += w.maps.segs.len();
+        working += usize::from(tree.is_some() && layer3::session_working(turns, downtime));
+        let got = layer3::session_json(tree.as_ref(), store, downtime, plant);
+        let before = tally.diffs;
+        tally.compare(sid, &got, &sess["answer"].to_json());
+        differing += usize::from(tally.diffs > before);
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    for s in &tally.shown {
+        println!("  {s}");
+    }
+    println!(
+        "layer3 {}{}: {} sessions, {} turns, {} segment keys, {} working: {} values compared, {} differences in {} \
+         sessions ({:.0} ms; python {})",
+        world_name(&dump.snapshot),
+        plant3_name(plant),
+        dump.trees.len(),
+        n_turns,
+        n_keys,
+        working,
+        tally.values,
+        tally.diffs,
+        differing,
+        ms,
+        expect["python"].as_str().unwrap_or("?")
+    );
+    let held = &expect["heldCheck"];
+    println!(
+        "  python: coverage {}; the held aggregate agreed on {} of {} sessions ({} turns served from it)",
+        expect["coverage"], held["agree"], held["sessions"], held["turnsServed"]
+    );
+    Ok(tally.diffs == 0)
+}
+
+fn layer3_edge(file: &Path, plant: Option<Plant3>) -> Result<bool, String> {
+    let name = file.display().to_string();
+    let doc: serde_json::Value = serde_json::from_slice(&read(file)?).map_err(|e| format!("{name}: {e}"))?;
+    if doc["schema"] != "romp-spike-layer3-edge/1" {
+        return Err(format!("{name}: schema {}, expected romp-spike-layer3-edge/1", doc["schema"]));
+    }
+    check_cite(&doc, &name)?;
+    let cases = doc["cases"].as_array().ok_or_else(|| format!("{name}: no cases"))?;
+    let mut tally = Tally::default();
+    let (mut loaded, mut refused, mut raised_refused, mut differing) = (0, 0, 0, 0);
+    let mut kinds: Vec<(String, usize)> = Vec::new();
+    for case in cases {
+        let cname = case["name"].as_str().ok_or("a case without a name")?;
+        let python_raises = case["expect"].get("raises").is_some();
+        let loaded_case = match layer3::EdgeCase::load(case) {
+            Ok(c) => c,
+            Err(e) => {
+                if cname.starts_with("REFUSE ") {
+                    refused += 1;
+                    raised_refused += usize::from(python_raises);
+                } else {
+                    tally.diff(format!("{cname}: the loader refused it: {e}"));
+                    differing += 1;
+                }
+                continue;
+            }
+        };
+        if cname.starts_with("REFUSE ") {
+            tally.diff(format!("{cname}: the loader accepted it"));
+            differing += 1;
+            continue;
+        }
+        loaded += 1;
+        let kind = case["kind"].as_str().unwrap_or("?");
+        match kinds.iter_mut().find(|(k, _)| k == kind) {
+            Some((_, n)) => *n += 1,
+            None => kinds.push((kind.to_string(), 1)),
+        }
+        let before = tally.diffs;
+        tally.compare(cname, &loaded_case.answer(plant), &case["expect"].to_json());
+        differing += usize::from(tally.diffs > before);
+    }
+    for s in &tally.shown {
+        println!("  {s}");
+    }
+    println!(
+        "layer3 edge set{}: {} cases, {} loaded and compared ({} values), {} refused at load (every REFUSE case), {} \
+         differences in {} cases (python {})",
+        plant3_name(plant),
+        cases.len(),
+        loaded,
+        tally.values,
+        refused,
+        tally.diffs,
+        differing,
+        doc["python"].as_str().unwrap_or("?")
+    );
+    println!(
+        "  loaded by kind: {}; Python raises on {} of the refused cases; python coverage {}",
+        kinds.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", "),
+        raised_refused,
+        doc["coverage"]
+    );
+    Ok(tally.diffs == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -819,6 +1050,29 @@ mod tests {
         assert_eq!(c.shown[4], "d: rust null python {\"raises\": \"KeyError\", \"arg\": \"'t'\"}");
         assert_eq!(c.diffs, 5);
         assert_eq!(count_str(None), "absent");
+    }
+
+    #[test]
+    fn the_layer3_comparison_names_each_differing_value_by_its_path() {
+        let obj = |m: Vec<(&str, Out)>| Out::Object(m.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+        let ans = |t: Out, keys: Vec<Out>| obj(vec![("plainT", t), ("pos", Out::Array(keys))]);
+        let mut t = Tally::default();
+        let same = ans(Out::Int(5), vec![Out::Str("k".into())]);
+        t.compare("s1", &same, &same);
+        assert_eq!((t.values, t.diffs), (4, 0), "the object, two members, the array's one item");
+        t.compare("s2", &ans(Out::Float(5.0), vec![]), &ans(Out::Int(5), vec![Out::Str("k".into())]));
+        assert_eq!(t.shown, [
+            "s2.plainT: rust 5.0 python 5",
+            "s2.pos: 0 items here, 1 in python (rust [] python [\"k\"])",
+        ]);
+        t.compare("s3", &obj(vec![("a", Out::Null)]), &obj(vec![("b", Out::Null)]));
+        assert_eq!(t.shown[2], "s3: keys rust [\"a\"] python [\"b\"]");
+        let nested = |x: i64| Out::Array(vec![Out::Array(vec![Out::Int(0), Out::Int(x)])]);
+        t.compare("s4", &obj(vec![("turns", nested(1))]), &obj(vec![("turns", nested(2))]));
+        assert_eq!(t.shown[3], "s4.turns[0][1]: rust 1 python 2");
+        assert_eq!(t.diffs, 4);
+        assert_eq!(plant3_name(Some(Plant3::MaxKeepsLast)), " [planted: max-last]");
+        assert_eq!(plant3_name(None), "");
     }
 
     #[test]

@@ -88,7 +88,9 @@ record! {
         debug: bool = "debug",
         debug_rows: serde_json::Value = "debugRows",
         notify_cards: serde_json::Value = "notifyCards",
-        downtime: Vec<serde_json::Value> = "downtime",
+        /// Host suspensions, oldest first: `[start, end]` wall times (kernel._downtime, read by _suspended_after in
+        /// layer 3). Anything but a pair of numbers is refused: Python unpacks each entry as `(start, _e)`.
+        downtime: Vec<(Num, Num)> = "downtime",
     }
 }
 
