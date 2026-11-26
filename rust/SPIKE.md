@@ -4,6 +4,12 @@ This is the first step of `plans/rust-migration.md`: its one-week benchmark spik
 work is affordable. It ports the transcript store and `build_feed`'s per-card build to a standalone Rust program
 with no server. Both implementations run on one synthetic state, and the feed JSON is compared byte for byte.
 
+**Where heavy work runs (lczh, 2026-11-26): NOT on lczh's Mac.** Large-world dumps, fuzz sweeps, mutant sweeps,
+measurements, parallel builds and romp's full pytest suite go to the MIT Engaging (ORCD) cluster, after telling lczh,
+through Slurm per `~/manager/ENGAGING.md`. On 2026-11-26 running them locally, several at once, exhausted the Mac's
+memory (7.7 GB of swap, macOS's force-quit dialog). Only small checks stay local, one at a time: a single test file,
+the small world, a short fuzz seed. Every agent brief for this spike must say so.
+
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
 - Step: S6 done and merged into `romp_fix` from `romp_fix-s6`, and independently reproduced (deciding CPU ratio 5.37
