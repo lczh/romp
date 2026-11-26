@@ -89,6 +89,10 @@ with no server. Both implementations run on one synthetic state, and the feed JS
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
 - Next action: S6, the measurement (S5, the serde_json::Value variant, stays in the plan and does not block it). The
   port now builds the whole feed (`layer7::build_feed`), so both sides can time the same region, derivation plus fold.
+  - In progress since 2026-11-26 as workflow run `wf_44865c0b-c11` in worktree `~/romp-romp_fix-s6` (branch
+    `romp_fix-s6`): build the harness, an adversarial design review before any quoted run, fix, measure (alternated,
+    both Python interpreters), then an independent reproduction. If a session dies, check that worktree first, then
+    resume the run with Workflow `resumeFromRunId`.
   What S6 needs, from the earlier steps:
   - CPU: Python's `time.process_time()` in a single-threaded process (`time.thread_time()` under-reports about 42x on
     this Mac, s2-design section 4), and Rust's process CPU through a raw `getrusage` or `clock_gettime` extern (no
