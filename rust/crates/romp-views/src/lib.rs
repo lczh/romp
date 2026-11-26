@@ -4,8 +4,8 @@
 //! then layer 1, the text and atom primitives (`layer1`, over `pystr` and `sha1`), layer 2, segmentation (`layer2`),
 //! layer 3, the tree facts and the anchor walk (`layer3`), layer 4, the store helpers (`layer4`), and layer 5, landing,
 //! delegation and provisional (`layer5`, over `pyre`: Python's regex classes and ignore-case folding, from generated
-//! tables), and layer 6, the body and its closures (`layer6`: the per-session entry build_feed memoizes). Layer 7
-//! follows.
+//! tables), and layer 6, the body and its closures (`layer6`: the per-session entry build_feed memoizes, over
+//! `pystr::upper`: Python's `str.upper()`, from a generated table in `pystr_tables`). Layer 7 follows.
 
 #[macro_use]
 pub mod record;
@@ -19,6 +19,7 @@ pub mod load;
 pub mod pyre;
 pub mod pyre_tables;
 pub mod pystr;
+pub mod pystr_tables;
 pub mod sha1;
 pub mod snapshot;
 pub mod tree;

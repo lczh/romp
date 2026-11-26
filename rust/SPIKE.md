@@ -6,10 +6,15 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
-- Step: S4.6 (layer 6, the body and its closures) built on `romp_fix-s46`, not yet reviewed or merged. Every alive
-  session's entry (the dict _feed_session_entry returns, written through romp-json) equals Python's real memo entry byte
-  for byte on both worlds (the S2 dump's `oracle/entries/`), on 262 synthetic worlds and on 24,000 random ones; 6 plants
-  and 59 of the 60 source mutants are each caught by the edge set (the 60th is equivalent). See "S4.6 as built". An early
+- Step: S4.6 (layer 6, the body and its closures) done on `romp_fix-s46` with its review's fixes, not yet merged into
+  `romp_fix`. Every alive session's entry (the dict _feed_session_entry returns, written through romp-json) equals
+  Python's real memo entry byte for byte on both worlds (the S2 dump's `oracle/entries/`), on 289 synthetic worlds and
+  on 24,000 random ones; 6 plants, 59 of the 60 source mutants (the 60th is equivalent) and the review's 17 more are
+  each caught by the edge set. Its review (two must-fix) is under "The review round" in "S4.6 as built": Python's
+  `str.upper()` now comes from a table generated from Python (Rust's follows Unicode 18.0 and differed on 76 code
+  points), a current ask's non-string question or header now raises as Python does, and its 17 edge-set gaps are
+  filled, each shown to catch its mutant. A Python-side finding from it: the body's `_note_peers([handoff_to] ...)`
+  never adds a peer (the badge has `peerSid`, not `sid`), a dead call for the bug lane. See "S4.6 as built". An early
   signal for S6, not a measurement: the release build makes the large world's 38 entries in 31 to 33 ms of wall time
   (ten runs, a quiet machine), against the 87 ms Python's derivation took from an empty memo (s2-design section 4):
   about 2.7x, short of the gate's 5x.
@@ -54,14 +59,15 @@ with no server. Both implementations run on one synthetic state, and the feed JS
   - S4.6: the body and its closures (_feed_session_entry with _note_peers, _subtree, _closure_done, _fsubmax,
     _closure_blocked, _block_check_floor, _brief_landing and flatten, plus _card_warn_rows, _blocked_placeholder and
     _awaiting_card) give every entry byte for byte: both worlds' 4 and 38 entries against `oracle/entries/` (17,470 and
-    114,100 bytes), 262 Python-made worlds (276 entries, 25 of them the same raise in both; 21 more worlds are refused
+    114,100 bytes), 289 Python-made worlds (305 entries, 31 of them the same raise in both; 21 more worlds are refused
     at load, as built to be) and 24,000 random worlds (40,058 entries, 3,813,717 values, `dump_layer6.py --fuzz`).
     Python's line trace over the edge set runs 585 of the 592 lines; the 7 left cannot run on an admitted input.
+    Python's `str.upper()` comes from a table generated from its own engine, checked on every code point.
   - S2 done before them (byte-identical oracle dumps across seeds and roots, "S2 as built"); S1 before that
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: S4.6's review, then S4.7, layer 7 (the loop, the fold and the cross-session pass), scoped in "What
+- Next action: S4.6's merge, then S4.7, layer 7 (the loop, the fold and the cross-session pass), scoped in "What
   layer 7 needs" below, which carries forward what layer 6 found about the replay's cleared set, the raising session,
   the serving fold and the handoff row's working bit.
   - Inputs: `python3 tools/rust-spike/dump_world.py --world small` (or `large`), then
@@ -1317,12 +1323,15 @@ flagged, as built:
   which no reader can tell from a removed key).
 - `isinstance(n, int)` is true of a bool, so an awaiting count of `true` is kept (an int must also be positive on a card;
   on the awaiting placeholder 0 and negatives pass); Python's `str.upper()` of the placeholder's first code point is the
-  full case mapping (`ß` gives `SS`).
+  full case mapping at Python's Unicode version, 15.0 (`ß` gives `SS`, and `ɤ` stays `ɤ`), read from a table generated
+  from Python (`pystr::upper`; Rust's `char::to_uppercase` follows Unicode 18.0, see "The review round" below).
 - Raises that fail the entry, each matched by name and message: `nodes[nid]["t"]` under the wait graph, a row's
   `nd["text"]` and `nd["t"]` (after its anchors are written and its landing resolved), a stall record's `why` and
-  `since`, a session-awaiting answer's `why` and `kind`, segmentation in the placeholders, and every recorded answer the
-  body reaches unrecorded. Two recorded reads sit inside a `try` in Python and read False or None when unrecorded:
-  `_interrupted_by` and the live backend's `current_ask`.
+  `since`, a session-awaiting answer's `why` and `kind`, segmentation in the placeholders, a current ask's truthy
+  `question` or `header` that is not a string (AttributeError from `.strip()`), and every recorded answer the body
+  reaches unrecorded. Two recorded reads sit inside a `try` in Python and read False or None when unrecorded:
+  `_interrupted_by` and the live backend's `current_ask` (only the call: the ask's question and header are read after
+  the `try`).
 - Left out, as layers 3 and 5 left them out: the held aggregate (_FEED_SEG_HELD) and _SUMMARY_ANCHOR_MEMO, whose seam
   staleness (S4.5's "The review round") only a warm build after a seam can meet; the oracles run fresh
   processes and clear both. `lg.mark_refused` (a write to the login registry, no part of the entry) is not ported.
@@ -1331,21 +1340,23 @@ flagged, as built:
 Loader changes (round trip and layers 1 to 5 re-run on both worlds, every number as before): nodes type the 13 keys
 layer 6 reads (`background`, `followupPending`, `summaryQuote`, `briefParts`, `summaryParts`, `relayCarried`,
 `stallSummary`, `warns`, `failLog`, `umbrella` and `serving` as any JSON, `blockCheckT` as a number or null,
-`summaryAnchors` as any JSON that layer 6 checks), handoffs and origins type `tracked` and `peerHost`, and `NODE_UNPORTED`
-and the handoff and origin lists are empty. The log-row list (`a`, `q`, `login`, `fsid`) was an artifact of the ast
-scan's grouping by receiver name: those are reads of a summaryAnchors item, a debug row and build_feed's judge-auth
-entries, never of a log row, so it is empty too. The recorded answers gain `bgOwnerTops` and `bgServiceDescs`
+`summaryAnchors` as any JSON that layer 6 checks), handoffs and origins type `tracked` and `peerHost`, and
+`NODE_UNPORTED` and the handoff and origin lists are empty. The log-row list (`a`, `q`, `login`, `fsid`) was an artifact
+of the ast scan's grouping by receiver name: those are reads of a summaryAnchors item, a debug row and build_feed's
+judge-auth entries, never of a log row, so it is empty too. The recorded answers gain `bgOwnerTops` and `bgServiceDescs`
 (`tools/rust-spike/dump_world.py` now records _bg_owner_tops and _bg_service_descs, which only a session with live
 background tasks reaches; no world does, and both worlds re-dumped byte-identical but for `run.json`) and `currentAsk`
-(recorded by dump_layer6.py's harness only). `layer6::validate` refuses, each with its path, what layer 6 would read
-differently from Python; none is in either world: a session without a `store` key, truthy `flags` that are not a dict, a
-wait-graph entry that is not a dict with a number `since`, a truthy stall record or judge-auth entry that is not a dict,
-a judge-auth entry with a truthy `login` (build_feed resolves its label through the SDK, which the replay does not) or a
-non-string label, debug rows that are not a list of dicts or hold a non-string `seg` or an unhashable `goal` item,
-non-string `confirming` items, a truthy `summaryAnchors` that is not a list or holds a truthy item without `a`, and
-recorded answers of a shape the body would `str()` or iterate differently (a session-awaiting `why` that is not a
-string, its `items` not a list, a peer sid that is not a string, owner tops not `{since: number, descs: [str]}`, a truthy
-current ask that is not a dict).
+(recorded by dump_layer6.py's harness only). `layer6::validate` refuses, each with its path, the shapes found that layer
+6 would read differently from Python and does not mirror; none is in either world: a session without a `store` key,
+truthy `flags` that are not a dict, a wait-graph entry that is not a dict with a number `since`, a truthy stall record
+or judge-auth entry that is not a dict, a judge-auth entry with a truthy `login` (build_feed resolves its label through
+the SDK, which the replay does not) or a non-string label, debug rows that are not a list of dicts or hold a non-string
+`seg` or an unhashable `goal` item, non-string `confirming` items, a truthy `summaryAnchors` that is not a list or holds
+a truthy item without `a`, and recorded answers of a shape the body would `str()` or iterate differently (a
+session-awaiting `why` that is not a string, its `items` not a list, a peer sid that is not a string, owner tops not
+`{since: number, descs: [str]}`, a truthy current ask that is not a dict). These are the shapes found, not every shape
+by construction: the review found a current ask whose question or header is truthy and not a string, which the port now
+mirrors with Python's raise ("The review round" below).
 
 **The oracle.** For the worlds it is the dump's own `oracle/entries/<sid>.json`, compared byte for byte. For synthetic
 worlds, `tools/rust-spike/dump_layer6.py` answers each case with one replay build_feed over it (dump_world's Replay
@@ -1363,7 +1374,8 @@ _node_anchor_last and the build memos are cleared first, so a case starts as a f
   a citation or a placeholder but s004's provisional card, and none of the six plants moves either world.
 
 **The edge set.** `dump_layer6.py --edge-cases` writes `rust/crates/romp-views/tests/fixtures/layer6_edge.json`
-(synthetic, 1.6 MB; it regenerates byte for byte under another hash seed). Its 283 worlds of one to three sessions: every
+(synthetic, 1.7 MB; it regenerates byte for byte under another hash seed). Its 310 worlds (283 as first built, 27 from
+the review round) of one to three sessions: every
 session-level read (hide by the session's flags and by a peer row's, the cold warm ask, downtime, every interrupted
 answer, interrupting, retrying, the judges in flight and the closer, a faulted store, every recorded answer unrecorded
 where the body reaches it), the heal and the hidden set (counts that include absent nodes, born records, every floor's
@@ -1374,8 +1386,9 @@ time, re-check and re-judging, nudges, stalls, the pass-through keys, the servin
 ties, the anchor table within and across sessions, rows), every landing tier, the three placeholders, peers and reads;
 and 21 worlds the loader must refuse.
 
-Result: 262 worlds load and give all 276 entries byte for byte (304 cards, 334 tree rows, 28,878 values), 0 differences;
-25 entries are the same raise in both, 3 are a hidden session's null. The other 21 worlds are refused at load, exactly
+Result: 289 worlds load and give all 305 entries byte for byte (334 cards, 357 tree rows, 31,321 values), 0 differences;
+31 entries are the same raise in both, 3 are a hidden session's null. (As first built: 262 worlds, 276 entries, 28,878
+values, 25 raises.) The other 21 worlds are refused at load, exactly
 the cases named REFUSE. Python's line trace ran 585 of the 592 lines. The 7 it did not run cannot run on an admitted
 input: _closure_done's absent node and _block_check_floor's memo hit (every caller passes a node of the tree, visited
 once), and the two placeholders' parse failures inside their `try` (the replay serves the same tree as the parse).
@@ -1471,7 +1484,10 @@ it). The 60 source mutants were edits to `layer6.rs`, each built, run on all fou
 The worlds catch 2 of the 66: equal-recency siblings in reverse store order (s001's delegating goal has two handoff rows
 of one time) and _fsubmax reading `t` before `mt` (every touched node). The edge set catches every row but M52, which
 is equivalent: _text_atoms admits only atoms with a truthy uuid, so every landing tier yields a truthy uuid or None, and
-`not u` cannot differ from `u is None` on an admitted input. M33 makes the fuzz run die (leaving a healed top under its
+`not u` cannot differ from `u is None` on an admitted input. (The review's R44, the delegation's names deduplicated but
+not sorted, is equivalent too: layer4::handoff_peer_identities already returns the identities sorted by name, so
+`names.sort()` is a no-op and the dedup meets equal names side by side; its scratch mutant gives 0 on both edge sets.)
+M33 makes the fuzz run die (leaving a healed top under its
 host as well as under the roots lets flatten walk a cycle). Fuzz seed 1 misses 16 rows (M11 to M14, M21, M22, M24, M27,
 M32, M36, M37, M39, M46, M51, M52, M56). The generator draws none of their inputs: blocked children with distinct
 watermarks around a fractional reply time (M11 to M13), a diary row at exactly the nudge block's time (M14), two peers
@@ -1501,9 +1517,93 @@ time, falsy pass-through keys, a follow-up stamp of 0) went in before the run.
   2 and 3), the port allocates freely (cloned keys, owned strings, hash maps per derivation), and as written it is short
   of the gate's 5x. S6 should profile before it times.
 
-Tests: 8 new, 156 pass in the workspace: 3 unit tests in `layer6.rs`, the snapshot test rewritten for the typed keys,
-`tests/layer6_edge.rs` (4: every entry byte for byte with its SHA-1, each plant caught on exactly its cases, the line
-trace's missed lines, the schema) and 1 in romp-spike for the comparison's messages.
+**The review round.** Two must-fix, both applied:
+- Python's `str.upper()` follows Python's Unicode version (15.0 for 3.12); the port's `char::to_uppercase` followed the
+  toolchain's (18.0, `char::UNICODE_VERSION` on Rust 1.100). Over every code point the two disagree on 76 (U+019B,
+  U+0264, U+0277, U+027C, U+1C8A, U+A7CD and 70 more: the case pairs Unicode 16 to 18 added; recounted here with a
+  scratch program over Rust's own mapping). So a recorded session-awaiting `why` of `ɤait on the build`, which the loader
+  admits, gave the awaiting placeholder the headline `Ꟛait on the build` where Python keeps `ɤait on the build`.
+  `pystr::upper` now reads Python's own table, generated the way layer 5 generates its regex tables:
+  `dump_layer6.py --tables` writes `pystr_tables.rs` (194 runs of one-code-point mappings and 102 longer ones, such as
+  `ß` to `SS`), and `tests/layer6_edge.rs` checks it on every code point against the table Python writes into the
+  fixture (1,525 code points change). The same test covers the one other case mapping layer 6 reads, the blocked
+  placeholder's `h.lower() != "permission"`, which keeps Rust's lowercase: on every code point Rust lowers to ASCII
+  letters only exactly where Python does (53 code points: A to Z, a to z and the Kelvin sign), and to the same letters,
+  so that comparison cannot tell the two apart. Two edge worlds: three sessions whose `why` begins with U+0264, U+A7CD
+  and U+10D70, and one beginning with the ligature `ﬀ` (Python: `FF`, a two-code-point mapping). The claim "the full case
+  mapping (`ß` gives `SS`)" in `layer6.rs` and above held only for letters Unicode 15 already cased; both now name the
+  version.
+- In kernel._blocked_placeholder only the `current_ask` call sits inside the `try`. `(ask.get("question") or
+  "").strip()` and the header's run after it, so a truthy value that is not a string raises AttributeError and fails the
+  entry; the port read such a value as "" and rendered the placeholder. It now raises as Python does, with Python's
+  message (`'int' object has no attribute 'strip'`, or `bool`, `float`, `list`, `dict`): the question's raise first, and
+  the header's even when the question is a string. Eight edge worlds: question 5, header 7, question `["a"]`, a string
+  question with a dict header, question `true` with header 2.5, and question 2.5 (six raises), and the falsy non-strings
+  that read as empty (question 0 with header `[]`; question `{}` with header " Plan "). The claim that
+  `layer6::validate` refuses every shape Python would read differently was wrong. `layer6.rs`, the loader paragraph
+  above and this round's commit now say it refuses the shapes found, and that this one is mirrored, not refused. An
+  audit of the body's other lenient reads (each `as_str`, `as_object`, `as_array` and `filter_map` against the Python
+  line it ports) found no other: each is refused at load (`agentTask` and `born` by the snapshot loader; the typed node,
+  log-row and nudge keys; the recorded shapes in `validate`), or reads as Python does (a stall `why` that is a list
+  compares unequal to every string in the `WHY_IN_FLIGHT` tuple, without raising).
+- The build before this round fails exactly the seven new worlds that raise or begin with a newly cased letter (9
+  differences); the build after passes all 310. Put back as scratch mutants, the old upper fails 1 case (3
+  differences) and the old ask reading 6 cases, and both give 0 on the 283-world set.
+
+Should-fix, applied:
+- 17 edge worlds, one per review mutant the first edge set missed: R06, R29 and R74 (missed by every check, the fuzz
+  included), R13 (caught by both worlds and the fuzz, not by the edge set) and the 13 the fuzz alone caught. The review's
+  own worlds and mutants were not handed over, so each world was rebuilt from its description with dump_layer6's
+  builders, and each mutant as an edit to the fixed `layer6.rs` in a scratch copy. Each mutant gives 0 on the old
+  283-world set and fails the new 310-world set on its own case:
+
+| Mutant (the review's number) | Edge set, 283 | Edge set, 310 | The case that catches it |
+|---|---|---|---|
+| _closure_blocked ignores agent_open (R03) | 0 | 6 in 2 | c1 nodeComplete, blocked and agent-open under a working g1 (Python: both rows read question); R06's world too |
+| _block_check_floor ignores agent_open (R06) | 0 | 1 in 1 | status-blocked g1 over c1 nodeComplete, blocked, agent-open, blockCheckT 300; the plain reply at 200 (Python: needs you, not re-judging) |
+| agent_open and parked not rebuilt after the un-nest (R08) | 0 | 1 in 1 | r1 nodeComplete, g1 healed under r1 with an open agent task, a permission floor on g1 (Python: r1's row reads done) |
+| recheck ignores the hard floors (R12) | 0 | 1 in 1 | status-blocked g1 with followupPending, lastNode g1, apiError {status: 500} (Python: needs you, recheck false) |
+| re-judging when the plain reply ties the card time, `>=` (R13) | 0 | 1 in 1 | g1 blocked by a planner row at ev_t 200, the plain reply at 200 (Python: needs you) |
+| a diary row's time read as ev_t before at (R25) | 0 | 1 in 1 | the nudge's block row {at 150, ev_t 100}, a planner row {at 120, ev_t 200}, the nudge failed (Python: nudgeFailed) |
+| failedAt preferred over the nudge's block row (R26) | 0 | 1 in 1 | the block row at 150, failedAt 100, a planner row at 120 (Python: nudgeFailed) |
+| the last block's source read from the first block row (R27) | 0 | 1 in 1 | an interrupt block at 150, a planner block at 160, blockCheckT 250, interrupting recorded (Python: not interrupting) |
+| the landing memo key ignores `completed` (R29) | 0 | 1 in 1 | g1 nodeComplete and blocked, status blocked, blockCheckT 300, summary and blockSummary both SUB1, trail [k2, k1] (Python: the card lands on b2, its done row on a1) |
+| judging ignores who_working (R36) | 0 | 1 in 1 | an open turn, the board's jactive [sid] (Python: judging false) |
+| the stamp's peers unsorted (R43) | 0 | 10 in 1 | awaitingPeers ["s9", PEER] (Python: peer9, then s9) |
+| a handoff row wears the session's working bit (R46) | 0 | 1 in 1 | an open turn, dictated g1, handoff child h1 (Python: h1's whoWorking false) |
+| the stall note passes a falsy value (R58) | 0 | 1 in 1 | stallSummary "" with a stall record (Python: note null) |
+| the awaiting dot ignores who_working (R66) | 0 | 2 in 2 | an open turn and an awaiting stamp on g1 (Python: the entry's awaiting null); R46's world too |
+| an open leaf whose handoff is `{}` is not a delegation leaf (R74) | 0 | 1 in 1 | dictated g1, c1 with handoff {} at t 150, h2 a handoff at t 120 (Python: awaiting since 150) |
+| the cited quote shipped for an empty cold citation (R76) | 0 | 2 in 1 | no tree, summaryAnchor "", summaryQuote and summaryAnchors set (Python: quote and paragraphs null) |
+| a healed floor top un-nested when it is not under its host (R78) | 0 | 3 in 1 | g1 with a born record, healed under a missing r9, lastNode g1, a permission floor (Python: one card, heal 1) |
+
+- R44 is equivalent (the note after the first table). Its scratch mutant gives 0 on both edge sets.
+- "What layer 7 needs" said a placeholder's `_ageT` is null. It is null only while the placeholder's `t` is the build's
+  clock: the blocked placeholder dates from its held segment and the awaiting one from the last turn's `t` whenever there
+  is one. The review also counted the provisional card among the null ones; it is not (its `_ageT` is its held
+  segment's `t`, as s004's card shows in both worlds, and so do all 59 provisional cards in the edge set). Reworded.
+- Where the port leaves out the body's `_note_peers([handoff_to] if handoff_to else None)`, a comment now says why: the
+  handoffTo badge carries `peerSid`, not the `sid` _note_peers reads, so Python's call adds nothing (flatten notes the
+  top's own handoff peer when it writes the card's first row). On the Python side that dependency record never fires: a
+  dead call, with no effect on the entry, for the bug lane.
+- The re-run: fresh dumps of both worlds; the round trip and layers 1 to 6 on both (every number as before); the
+  harness's own check (4 of 4, 38 of 38); the layer 2 to 6 edge sets (layer 6: 310 worlds, 289 load and give all 305
+  entries byte for byte, 31,321 values, 31 raise in both, 21 refused); `dump_layer6.py --fuzz` seeds 1 to 6 at 4,000
+  (40,058 entries, 3,813,717 values, 0 differences, the same numbers as first built: the generator is unchanged); layers
+  2 to 5's fuzz at 10,000 per seed, seeds 1 to 6; check_store over both dumps with 6 fuzz seeds; the edge fixture and
+  `pystr_tables.rs` regenerate byte for byte (the fixture under hash seeds 7 and 12345). Python's line trace: 585 of
+  592 lines on the edge set and on fuzz seeds 1 to 3, as before.
+- Not done: the fuzz generator is unchanged, so the two must-fix shapes are pinned by the edge set alone. A scratch run
+  with them added to the generator (a `why` starting with U+0264, U+A7CD or `ﬀ`; a current ask with question 5, a list
+  header, or question 0 with a header) gave 0 differences on seed 5 at 4,000 worlds (106 of its entries were the new
+  AttributeError raises in both). It is not committed because a generator change redraws every seed and voids the
+  first table's fuzz column, whose 60 scratch mutants are gone (S4.5's review round made the same call). The first
+  commit's message, which repeats the `validate` claim, is not rewritten; this round's commit corrects it.
+
+Tests: 10 new, 158 pass in the workspace: 3 unit tests in `layer6.rs`, 1 in `pystr.rs` (Python's upper at its
+Unicode version), the snapshot test rewritten for the typed keys, `tests/layer6_edge.rs` (5: every entry byte for byte
+with its SHA-1, each plant caught on exactly its cases, the case tables on every code point, the line trace's missed
+lines, the schema) and 1 in romp-spike for the comparison's messages.
 
 What this feeds: layer 7's loop folds these entries (the tint from each card's `_ageT`, the bells, the working and
 awaiting dots, the service chip, the serving-fold join, absent sessions); "What layer 7 needs" below.
@@ -1514,8 +1614,11 @@ Section 2 item 7: the build_feed loop minus memo and key (57255-57320 at this HE
 and _feed_fold_card, cm.age_rgb and ramp (colormap.py), _notify_card_effective, _push_explicit_bell, the handoff
 whoWorking stamp, the serving-fold join, and the frame assembled from the passthrough keys. Found while building layer 6:
 - The fold reads the entry string, and layer 6's entry is byte-identical to it, so the fold can take layer 6's value
-  directly. A placeholder's `_ageT` is null (its `t` is the build's clock, which the fold restamps); every other card's
-  and row's `_ageT` is its tint's epoch.
+  directly. Every card's and row's `_ageT` is its tint's epoch, the provisional card's included (its held segment's
+  `t`). Only the blocked and awaiting placeholders can carry a null `_ageT`, and only while their `t` is the build's
+  clock (which the fold restamps): _blocked_placeholder sets `t` and `_ageT` to the last turn's held segment's `t` when
+  the session has a segment, and _awaiting_card to the last turn's `t` when it is not null. In the edge set 22 of the 23
+  placeholders of those two kinds carry a time; the one null is the blocked placeholder with no turns.
 - A session whose derivation raises: build_feed serves its previous entry when the memo holds one, else lists the sid in
   `absentSids` and folds nothing. The spike has no memo, so a raising session is absent. 4,112 of the fuzz's 40,058
   entries raise, so layer 7's fuzz meets this often.
@@ -1721,3 +1824,17 @@ whoWorking stamp, the serving-fold join, and the frame assembled from the passth
   - Findings: the replay's cleared set is a Python set where the frame's `_cleared_foreign` reads a dict (layer 7);
     the release build makes the large world's entries in 31 to 33 ms (ten runs), against Python's 87 ms derivation
     (about 2.7x, short of the 5x gate; not a measurement), which S6 should profile before it times.
+- 2026-11-26: S4.6's review round (two must-fix), on fresh dumps.
+  - Must-fix: `pystr::upper` reads Python's own `str.upper()` table (`dump_layer6.py --tables` writes
+    `pystr_tables.rs`), checked on every code point; Rust's `char::to_uppercase` (Unicode 18.0) differed from Python
+    3.12's (15.0) on 76 code points, which the awaiting placeholder's headline showed. A current ask's truthy question or
+    header that is not a string now raises AttributeError as Python does (only the call is inside the `try`). 10 edge
+    worlds pin both; the build before the round fails 7 of them (9 differences).
+  - 17 edge worlds, one per review mutant the first edge set missed; each mutant, rebuilt in a scratch copy, gives 0 on
+    the old 283 worlds and fails the new 310 on its own case. R44 is equivalent.
+  - Re-run: the round trip and layers 1 to 6 on both worlds, every number as before; the layer 2 to 6 edge sets (layer
+    6: 289 load, 305 entries, 31,321 values, 0 differences, 21 refused); the fuzz of layers 2 to 6, seeds 1 to 6 (layer
+    6: 3,813,717 values; layers 2 to 5: 590,031, 8,059,862, 30,625,221 and 9,054,772), 0 differences; check_store,
+    mismatches 0. Rust tests: 158 pass.
+  - Docs: the placeholders' `_ageT` in "What layer 7 needs", the `validate` and upper claims, and a comment on the
+    left-out `_note_peers([handoff_to] ...)`, a dead call in Python (for the bug lane).

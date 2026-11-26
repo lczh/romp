@@ -14,7 +14,8 @@
 //! (dump_world.py RECORDED); an answer the body needs that was never recorded raises `NotRecorded`, as the replay's
 //! harness raises, and that session's entry is the raise. Two of them sit inside a `try` in Python, which swallows the
 //! raise: `_interrupted_by` (the interrupted badge reads False) and the live backend's `current_ask` in
-//! _blocked_placeholder (no question).
+//! _blocked_placeholder (no question). Only the call is inside that `try`: the ask's `question` and `header` are read
+//! after it, so a truthy one that is not a string raises AttributeError and fails the entry, as here.
 //!
 //! What a naive port would get wrong, each pinned by the edge cases (tools/rust-spike/dump_layer6.py --edge-cases):
 //! - _node_anchor_uuids runs inside flatten, once per flattened node in flatten's order (a card top, then its children
@@ -37,10 +38,13 @@
 //!   card loop runs over `children[None]` after the floor un-nest, which may append a top at the end; a healed top's
 //!   un-nest also removes it from its host's list.
 //! - `isinstance(n, int)` is true of a bool, so an awaiting count of `true` is kept, where any other non-int is None.
-//! - Python's `str.upper()` of the awaiting card's first code point is the full case mapping (`ß` gives `SS`).
+//! - Python's `str.upper()` of the awaiting card's first code point is the full case mapping at Python's Unicode
+//!   version, 15.0 (`ß` gives `SS`, and `ɤ` stays `ɤ`): `pystr::upper` reads a table generated from Python, since
+//!   Rust's `char::to_uppercase` follows the toolchain's Unicode 18.0 and differs on 76 code points.
 //! - A body read that raises fails the whole entry: `nodes[nid]["t"]` under the wait graph, a row's `nd["text"]` and
 //!   `nd["t"]` (after its anchors were written and its landing resolved), a stall record's `why`, a session-awaiting
-//!   answer's `why` and `kind`, and every recorded answer the body reaches unrecorded.
+//!   answer's `why` and `kind`, the current ask's `question` or `header` that is truthy and not a string (`.strip()`),
+//!   and every recorded answer the body reaches unrecorded.
 //!
 //! Left out, as in layers 3 and 5: the held aggregate (_FEED_SEG_HELD) and _SUMMARY_ANCHOR_MEMO (SPIKE.md, "What layer
 //! 6 needs": a pure cache within one build, so the spike's fresh-process comparisons never meet the memo's seam
@@ -223,12 +227,35 @@ pub fn not_recorded(name: &str, sid: &str, sub: Option<&str>) -> Raise {
     Raise { exc: NOT_RECORDED, arg: format!("{name}({sid}{})", sub.map_or(String::new(), |s| format!(",{s}"))) }
 }
 
-/// Python's `str.upper()` of a string's first code point, then the rest: `why[:1].upper() + why[1:]`.
+/// `why[:1].upper() + why[1:]`: Python's `str.upper()` of the first code point (`pystr::upper`, Python's own table, not
+/// Rust's `char::to_uppercase`, whose Unicode version is the toolchain's), then the rest.
 fn cap_first(s: &str) -> String {
-    let mut it = s.chars();
-    match it.next() {
-        Some(c) => c.to_uppercase().chain(it).collect(),
-        None => String::new(),
+    let first = head(s, 1);
+    pystr::upper(first) + &s[first.len()..]
+}
+
+/// Python's type name of a JSON value, as an AttributeError or TypeError message names it.
+fn py_type_name(v: &J) -> &'static str {
+    match v {
+        J::Null => "NoneType",
+        J::Bool(_) => "bool",
+        J::Number(n) if n.is_f64() => "float",
+        J::Number(_) => "int",
+        J::String(_) => "str",
+        J::Array(_) => "list",
+        J::Object(_) => "dict",
+    }
+}
+
+/// `(v or "").strip()`: "" for an absent or falsy value, a string stripped the Python way, and for any other truthy
+/// value the AttributeError Python raises (`'int' object has no attribute 'strip'`).
+fn or_empty_strip(v: Option<&J>) -> Result<&str, Raise> {
+    match v.filter(|v| py_truthy(v)) {
+        None => Ok(""),
+        Some(J::String(s)) => Ok(pystr::strip(s)),
+        Some(other) => {
+            Err(Raise { exc: "AttributeError", arg: format!("'{}' object has no attribute 'strip'", py_type_name(other)) })
+        }
     }
 }
 
@@ -1212,6 +1239,9 @@ impl<'a, 'b> Derive<'a, 'b> {
                 ]);
             }
             let (handoff_to, card_text) = layer4::handoff_card_fields(&b.ctx(), &self.ns, &nid);
+            // Python's `_note_peers([handoff_to] if handoff_to else None)` is left out: it adds nothing, since the
+            // handoffTo badge carries `peerSid`, not the `sid` _note_peers reads (flatten notes the top's own handoff
+            // peer when it writes the card's first row)
             // the awaiting badge's why, kind, since, peers, count and items: the or-chain's first truthy why
             let is_awaiting = col == "awaiting";
             let await_why: Out = if is_awaiting {
@@ -1698,11 +1728,17 @@ impl<'a, 'b> Derive<'a, 'b> {
             // `Sessions.backend_for(fsid).current_ask(fsid)` inside a try: an unrecorded answer reads None
             let ask = self.rec.rec().current_ask.as_ref().filter(|a| py_truthy(a)).and_then(J::as_object);
             if let Some(ask) = ask {
-                let q = pystr::strip(ask.get("question").and_then(J::as_str).unwrap_or(""));
-                let h = pystr::strip(ask.get("header").and_then(J::as_str).unwrap_or(""));
+                // `(ask.get("question") or "").strip()`, then the header's, both outside the try: a truthy value that is
+                // not a string raises AttributeError and fails the entry (the question's first, and the header's even
+                // when the question is a string)
+                let q = or_empty_strip(ask.get("question"))?;
+                let h = or_empty_strip(ask.get("header"))?;
                 if !q.is_empty() {
                     text = Out::Str(if pystr::len(q) > 140 { format!("{}…", rstrip(head(q, 139))) } else { q.to_string() });
                 } else if !h.is_empty() && h.to_lowercase() != "permission" {
+                    // Rust's lowercase and Python's `lower()` differ in Unicode version, but not on any code point that
+                    // lowers to ASCII letters (A to Z, a to z, the Kelvin sign), the only ones an equal "permission"
+                    // can hold: tests/layer6_edge.rs checks every code point against Python's list
                     text = Out::Str(h.to_string());
                 }
             }
@@ -1893,8 +1929,11 @@ fn is_num(v: &J) -> bool {
     matches!(v, J::Number(_))
 }
 
-/// Refuse the inputs layer 6 would read differently from Python, each with the path of the refused part. None is in
-/// either world. Python answers most of these (or raises in ways the port does not mirror):
+/// Refuse the inputs found that layer 6 would read differently from Python and does not mirror, each with the path of
+/// the refused part. None is in either world. This is not every such shape by construction: S4.6's review found one
+/// it had missed (a current ask's truthy `question` or `header` that is not a string, read after the `try`), which the
+/// port now mirrors with Python's AttributeError rather than refusing. Python answers most of these (or raises in ways
+/// the port does not mirror):
 /// - a session without a `store` key (the replay's key raises KeyError), a truthy `flags` that is not a dict;
 /// - a wait-graph entry that is not a dict with a number `since`; a stall record or a judge-auth entry that is truthy
 ///   and not a dict, a judge-auth entry with a truthy `login` (build_feed resolves its label through the SDK, which is
@@ -2085,6 +2124,14 @@ mod tests {
         assert_eq!(cap_first("ßeta"), "SSeta", "str.upper() is the full case mapping");
         assert_eq!(cap_first("waiting"), "Waiting");
         assert_eq!(cap_first(""), "");
+        assert_eq!(cap_first("\u{264}ait"), "\u{264}ait", "Python's Unicode 15 has no uppercase for U+0264");
+        let j = |s: &str| serde_json::from_str::<J>(s).unwrap();
+        assert_eq!(or_empty_strip(Some(&j(r#"" Plan ""#))), Ok("Plan"));
+        assert_eq!(or_empty_strip(Some(&j("0"))).and(or_empty_strip(Some(&j("[]")))).and(or_empty_strip(None)), Ok(""));
+        for (v, name) in [("5", "int"), ("2.5", "float"), ("true", "bool"), ("[\"a\"]", "list"), ("{\"a\": 1}", "dict")] {
+            let e = or_empty_strip(Some(&j(v))).unwrap_err();
+            assert_eq!((e.exc, e.arg), ("AttributeError", format!("'{name}' object has no attribute 'strip'")));
+        }
         assert_eq!(py_int(Num::Float(-2.5)), Num::Int(-2));
         assert_eq!(py_int_out(Num::Float(1e20)), Out::BigInt("100000000000000000000".into()));
         assert_eq!(py_min(Num::Int(5), Num::Float(5.0)), Num::Int(5), "min keeps the first of equal values");

@@ -20,11 +20,14 @@ backend's `current_ask` (recorded here as `currentAsk`, read by _blocked_placeho
     python3 tools/rust-spike/dump_layer6.py DUMP_DIR [DUMP_DIR ...]   # the harness against the dump's own entries
     python3 tools/rust-spike/dump_layer6.py --edge-cases OUT.json     # the synthetic cases (romp-spike layer6 OUT.json)
     python3 tools/rust-spike/dump_layer6.py --fuzz N [--seed S] [--plant NAME] [--bin ROMP_SPIKE] [--out FILE] [--lines]
+    python3 tools/rust-spike/dump_layer6.py --tables OUT.rs           # romp-views' pystr_tables.rs, Python's str.upper
 
 The dump mode runs this harness over a dump's snapshot and trees and requires every entry to equal the dump's
 oracle/entries file byte for byte (the harness's own external check), and reports the body's lines the world runs. A
 case named "REFUSE ..." is one the Rust loader must refuse. The edge set reports the lines of the body and its builders
-it ran (`lineCoverage`), and so does `--fuzz` with `--lines`. Stdlib only.
+it ran (`lineCoverage`), and so does `--fuzz` with `--lines`. It also carries Python's case tables (`str.upper()` of
+every code point it changes, `str.lower()` of every code point that lowers to ASCII letters), which
+`tests/layer6_edge.rs` checks the port's against on every code point. Stdlib only.
 """
 import argparse
 import copy
@@ -976,6 +979,19 @@ def edge_cases(km):
                        ("a Permission header", {"header": "PERMISSION"}), ("an empty ask", {}), ("no ask", None)):
         add("blocked placeholder: no human prompt, %s" % name_, W(S(tr=nt, st=ST(), live=live_perm,
                                                                     rec=REC(currentAsk=ask))))
+    # `(ask.get("question") or "").strip()` and the header's run outside the try: a truthy non-string raises
+    for name_, ask in (("a question that is a number raises AttributeError", {"question": 5}),
+                       ("a header that is a number raises AttributeError", {"header": 7}),
+                       ("a question that is a list raises AttributeError", {"question": ["a"]}),
+                       ("a string question and a header that is a dict: the header still raises",
+                        {"question": "Proceed?", "header": {"a": 1}}),
+                       ("a question of true and a header of 2.5: the question raises first",
+                        {"question": True, "header": 2.5}),
+                       ("a float question raises", {"question": 2.5}),
+                       ("falsy non-strings read as empty", {"question": 0, "header": []}),
+                       ("a falsy dict question falls to the header", {"question": {}, "header": " Plan "})):
+        add("blocked placeholder: no human prompt, %s" % name_, W(S(tr=nt, st=ST(), live=live_perm,
+                                                                    rec=REC(currentAsk=ask))))
     add("blocked placeholder: an unrecorded ask is no ask (inside a try)",
         W(S(tr=nt, st=ST(), live={"state": "picker", "since": 5})))
     add("blocked placeholder: no turns", W(S(tr=tree(), st=ST(), live=live_perm)))
@@ -1000,6 +1016,15 @@ def edge_cases(km):
     add("awaiting placeholder: a one-letter why and a non-ASCII first letter",
         W(S(0, tr=awt, st=ST(placements=pl), rec=REC(sessionAwaiting={"idle=true": dict(aw2, why="w")})),
           S(1, tr=awt1, st=ST(placements={w2: None}), rec=REC(sessionAwaiting={"idle=true": dict(aw2, why="ǆob")}))))
+    awt2 = tree(turn([u("u1", 100, "go", s=2), asst("a1", 101, "done", s=2)]))
+    (w3,) = segids(km, awt2)
+    add("awaiting placeholder: first letters Unicode 16 cased and Python's Unicode 15 did not stay (str.upper)",
+        W(S(0, tr=awt, st=ST(placements=pl), rec=REC(sessionAwaiting={"idle=true": dict(aw2, why="\u0264ait on the build")})),
+          S(1, tr=awt1, st=ST(placements={w2: None}), rec=REC(sessionAwaiting={"idle=true": dict(aw2, why="\ua7cdait")})),
+          S(2, tr=awt2, st=ST(placements={w3: None}),
+            rec=REC(sessionAwaiting={"idle=true": dict(aw2, why="\U00010d70ait")}))))
+    add("awaiting placeholder: a first letter whose uppercase is two code points (the ff ligature gives FF)",
+        W(S(tr=awt, st=ST(placements=pl), rec=REC(sessionAwaiting={"idle=true": dict(aw2, why="\ufb00ix the build")}))))
     add("awaiting dot: an awaiting card lights the session's awaiting dot",
         W(S(tr=T_idle, st=ST(g("g1", **stamp)))))
     # ── peers, reads, several sessions
@@ -1011,6 +1036,58 @@ def edge_cases(km):
     add("reads: the usage read before the nudges", W(S(tr=T_idle, st=ST(g("g1"), g("g2", t=90)),
                                                       rec=REC(apiError={"status": 500}))))
     add("reads: no top reached, no nudges", W(S(tr=T_idle, st=ST(g("g1"), status={"g1": "cleared"}))))
+
+    # ── S4.6's review: one world per mutant the first edge set missed (rust/SPIKE.md, "The review round" in S4.6)
+    aopen = {"status": "open"}
+    add("rejudging: a done blocked child whose agent task is open still sets the watermark floor",
+        W(S(tr=T_idle, st=ST(g("g1"), g("c1", parentId="g1", nodeComplete=True, blocked=True, agentTask=aopen,
+                                         blockCheckT=300), status={"g1": "blocked"}))))
+    add("landing: a card's blocked landing and its done row's completed landing of one line are two resolves",
+        W(S(tr=T_idle, st=ST(g("g1", trail=[k2, k1], nodeComplete=True, blocked=True, blockCheckT=300, summary=SUB1,
+                                blockSummary=SUB1), status={"g1": "blocked"}))))
+    add("delegation: an open leaf whose handoff is an empty dict is a delegation leaf (its time dates the wait)",
+        W(S(tr=T_idle, st=ST(g("g1", promptUuid="u1"), g("c1", parentId="g1", t=150, handoff={}),
+                             hand("h2", parentId="g1", t=120)))))
+    add("row: a done blocked row whose agent task is open reads as a question",
+        W(S(tr=T_idle, st=ST(g("g1"), g("c1", parentId="g1", nodeComplete=True, blocked=True, agentTask=aopen)))))
+    add("un-nest: the agent-open set is rebuilt after the un-nest (the host's row reads done)",
+        W(S(tr=T_idle, st=ST(g("r1", nodeComplete=True), g("g1", t=110, agentTask=aopen), lastNode="g1",
+                             status={"r1": "completed"}),
+            rec=REC(healSessionTops={"g1": ["r1", {"why": "the planner started it"}]}), live=live_perm)))
+    add("recheck: a follow-up on the api floor's own top does not recheck it (it stays needs you)",
+        W(S(tr=T_idle, st=ST(g("g1", followupPending={"t": 150}), lastNode="g1", status={"g1": "blocked"}),
+            rec=REC(apiError={"status": 500}))))
+    add("rejudging: a plain reply at the card's own time does not re-judge (strictly after)",
+        W(S(tr=T_idle, st=ST(blk("g1", 200), status={"g1": "blocked"}))))
+    add("nudge: failed, a diary row's time is its at before its ev_t",
+        W(S(tr=T_idle, st=ST(g("g1", log=[{"kind": "block", "src": "nudge", "at": 150, "ev_t": 100},
+                                          {"kind": "note", "src": "planner", "at": 120, "ev_t": 200}]))),
+          board={"nudgeRecords": {"g1": nr(failed=True)}}))
+    add("nudge: failed, the nudge's block row is the floor before the failure stamp",
+        W(S(tr=T_idle, st=ST(g("g1", log=[{"kind": "block", "src": "nudge", "at": 150},
+                                          {"kind": "note", "src": "planner", "at": 120}]))),
+          board={"nudgeRecords": {"g1": nr(failed=True, failedAt=100)}}))
+    add("interrupting: a needs-you card whose last block is the planner's, after an interrupt block, is not interrupting",
+        W(S(tr=T_idle, st=ST(g("g1", blocked=True, blockCheckT=250, log=[{"kind": "block", "src": "interrupt", "ev_t": 150},
+                                                                         {"kind": "block", "src": "planner", "ev_t": 160}]),
+                             status={"g1": "blocked"}), rec=REC(interrupting=True))))
+    add("judging: a judge in flight on a working session does not light the swirl",
+        W(S(tr=T_open, st=ST(g("g1"))), board={"jactive": [SIDS[0]]}))
+    add("stamp: the stamp's peers sort by name (peer9 before s9), not by their order in the stamp",
+        W(S(tr=T_idle, st=ST(g("g1", awaitingWhy="waiting on peers", awaitingAt=160, awaitingKind="peer",
+                                awaitingPeers=["s9", PEER])))))
+    add("row: a handoff row on a working session does not wear the session's working bit",
+        W(S(tr=T_open, st=ST(g("g1", promptUuid="u1"), hand("h1", parentId="g1")))))
+    add("stall: an empty stall summary is a null note", W(S(tr=T_idle, st=ST(g("g1", stallSummary=""))),
+                                                          board={"stalls": {"g1": st_rec}}))
+    add("awaiting dot: a working session's awaiting card does not light the awaiting dot",
+        W(S(tr=T_open, st=ST(g("g1", **stamp)))))
+    add("landing: no parse and an empty citation: no cited quote and no paragraphs",
+        W(S(tr=None, st=ST(N("g1", summaryAnchor="", summary="s", summaryQuote="sq", summaryAnchors=[{"a": "x"}]),
+                         status={"g1": "completed"}))))
+    add("un-nest: a floor on a healed top whose host is gone (so it is no child of it) leaves it one card",
+        W(S(tr=T_idle, st=ST(g("g1", born={"why": "started it", "parentText": "old ask"}), lastNode="g1"),
+            rec=REC(healSessionTops={"g1": ["r9", {"why": "the planner started it"}]}), live=live_perm)))
     return c
 
 
@@ -1093,7 +1170,7 @@ def edge_main(out):
         cases += answer_cases(km, dw, refuse_cases(km))
         doc = {"schema": EDGE_SCHEMA, "python": platform.python_version(),
                "generatedBy": "tools/rust-spike/dump_layer6.py --edge-cases", "lineCoverage": lines.report(),
-               "cases": cases}
+               "tables": case_tables(), "cases": cases}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
@@ -1423,6 +1500,67 @@ def fuzz_main(n, seed, plant, binary, out, with_lines):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ───────────────────────────── --tables ─────────────────────────────
+def case_tables():
+    """Python's own case mappings where layer 6 reads them, as the edge fixture carries them (layer6_edge.rs checks the
+    port against both on every code point): `str.upper()` of every code point it changes (the awaiting placeholder's
+    headline, `why[:1].upper()`), and `str.lower()` of every code point that lowers to ASCII letters only (the blocked
+    placeholder's `h.lower() != "permission"`, which the port reads with Rust's own lowercase)."""
+    import unicodedata
+    cps = [c for c in range(sys.maxunicode + 1) if not 0xD800 <= c <= 0xDFFF]
+    return {"unicode": unicodedata.unidata_version,
+            "upper": [[c, chr(c).upper()] for c in cps if chr(c).upper() != chr(c)],
+            "lowerAscii": [[c, chr(c).lower()] for c in cps
+                           if chr(c).lower() and all("a" <= x <= "z" for x in chr(c).lower())]}
+
+
+def tables_source():
+    """The Rust source of romp-views' pystr_tables.rs: Python's own `str.upper()` of one code point."""
+    import unicodedata
+    up = case_tables()["upper"]
+    runs = []                                     # [first, last, step, delta], as dump_layer5.py writes LOWER
+    for ch, u in up:
+        if len(u) != 1:
+            continue
+        d = ord(u) - ch
+        if runs:
+            f, last, st, dd = runs[-1]
+            if dd == d and ((st == 0 and ch - last in (1, 2)) or (st and ch - last == st)):
+                runs[-1] = [f, ch, st or ch - last, dd]
+                continue
+        runs.append([ch, ch, 0, d])
+
+    def lit(s):
+        return '"%s"' % "".join(c if " " <= c <= "~" and c not in '"\\' else "\\u{%X}" % ord(c) for c in s)
+
+    def pack(items, fmt, indent="    ", width=120):
+        rows, cur = [], indent
+        for it in items:
+            s = fmt(it) + ", "
+            if len(cur) + len(s.rstrip()) > width:
+                rows.append(cur.rstrip())
+                cur = indent
+            cur += s
+        if cur.strip():
+            rows.append(cur.rstrip())
+        return "\n".join(rows)
+    head = ("// Generated by `python3 tools/rust-spike/dump_layer6.py --tables` from Python %s (Unicode %s): do not edit.\n"
+            "// Regenerate with the same command when Python's Unicode version moves; `layer6_edge.rs` checks every code\n"
+            "// point against the table Python writes into the layer-6 fixture.\n\n"
+            % (platform.python_version(), unicodedata.unidata_version))
+    return head + "\n".join([
+        "/// The Unicode version this table comes from (Python's `unicodedata.unidata_version`).",
+        "pub const UNICODE_VERSION: &str = \"%s\";\n" % unicodedata.unidata_version,
+        "/// `str.upper()` of one code point where it is one other code point, as runs `(first, last, step, delta)`: every",
+        "/// code point `first + k * step` up to `last` uppercases to itself plus `delta` (step 0: `first` alone).",
+        "pub const UPPER: &[(u32, u32, u32, i32)] = &[\n%s\n];\n" % pack(
+            runs, lambda r: "(0x%X, 0x%X, %d, %d)" % tuple(r)),
+        "/// `str.upper()` of one code point where it is several (the full mapping: `ß` gives `SS`), by code point.",
+        "pub const UPPER_FULL: &[(u32, &str)] = &[\n%s\n];\n" % pack(
+            [(c, u) for c, u in up if len(u) > 1], lambda kv: "(0x%X, %s)" % (kv[0], lit(kv[1]))),
+    ])
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("dumps", nargs="*", help="dump directories (dump_world.py --out)")
@@ -1434,7 +1572,13 @@ def main(argv=None):
     ap.add_argument("--bin", help="a built romp-spike for --fuzz (default: cargo build --release)")
     ap.add_argument("--out", help="keep the --fuzz cases in this file (default: a temporary file, removed)")
     ap.add_argument("--lines", action="store_true", help="--fuzz: also report the body's lines run")
+    ap.add_argument("--tables", metavar="OUT", help="write romp-views' pystr_tables.rs (Python's str.upper) to OUT")
     a = ap.parse_args(argv)
+    if a.tables:
+        with open(a.tables, "w", encoding="utf-8", newline="") as f:
+            f.write(tables_source())
+        print("tables -> %s" % a.tables)
+        return 0
     if a.edge_cases:
         return edge_main(a.edge_cases)
     if a.fuzz is not None:
@@ -1442,7 +1586,7 @@ def main(argv=None):
             ap.error("--fuzz N needs N >= 1")
         return fuzz_main(a.fuzz, a.seed, a.plant, rust_binary(a.bin), a.out, a.lines)
     if not a.dumps:
-        ap.error("name at least one dump directory, or --edge-cases OUT, or --fuzz N")
+        ap.error("name at least one dump directory, or --edge-cases OUT, or --fuzz N, or --tables OUT")
     return main_dumps(a.dumps)
 
 

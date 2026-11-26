@@ -4,10 +4,14 @@
 //! with its SHA-1), or the raise that failed the session.
 //!
 //! A case named "REFUSE ..." is one the loader must refuse; every other case must load and give every session's entry
-//! byte for byte. Python's entries are read with romp-transcript's decoder, which reads numbers as Python does.
+//! byte for byte. Python's entries are read with romp-transcript's decoder, which reads numbers as Python does. The
+//! fixture also carries Python's case tables, checked here on every code point.
+
+use std::collections::HashMap;
 
 use romp_json::Value as Out;
 use romp_views::layer6::{answer_json, Build, Case, Plant};
+use romp_views::{pystr, pystr_tables};
 use serde_json::Value as J;
 
 const BYTES: &[u8] = include_bytes!("fixtures/layer6_edge.json");
@@ -107,7 +111,7 @@ fn every_case_answers_as_python_does_byte_for_byte() {
         }
     }
     assert_eq!((loaded + refused, refused), (all.len(), 21), "every REFUSE case is refused, every other loads");
-    assert!(sessions >= 250 && raised >= 20, "{sessions} sessions, {raised} raising");
+    assert!(sessions >= 300 && raised >= 30, "{sessions} sessions, {raised} raising");
 }
 
 #[test]
@@ -151,6 +155,36 @@ fn each_plant_is_caught_on_the_cases_built_for_it() {
     for (plant, names) in want {
         assert_eq!(differing(&all, Some(plant)), names, "{}", plant.name());
     }
+}
+
+#[test]
+fn the_case_tables_are_pythons_on_every_code_point() {
+    // Python's `str.upper()` (the awaiting placeholder's headline) from the generated table; and Rust's own lowercase,
+    // which the blocked placeholder compares with "permission": it lowers a code point to ASCII letters only exactly
+    // where Python's `lower()` does, and to the same letters, so the comparison cannot tell the two apart
+    let f = fixture();
+    let t = &f["tables"];
+    assert_eq!(t["unicode"], pystr_tables::UNICODE_VERSION);
+    let pairs = |k: &str| -> HashMap<u32, String> {
+        t[k].as_array()
+            .expect("a table")
+            .iter()
+            .map(|p| (u32::try_from(p[0].as_u64().unwrap()).unwrap(), p[1].as_str().unwrap().to_string()))
+            .collect()
+    };
+    let (upper, lower_ascii) = (pairs("upper"), pairs("lowerAscii"));
+    let mut checked = 0;
+    for c in (0..=0x10FFFFu32).filter_map(char::from_u32) {
+        let u = c as u32;
+        let one = c.to_string();
+        assert_eq!(pystr::upper(&one), upper.get(&u).cloned().unwrap_or_else(|| one.clone()), "upper {u:#x}");
+        let low: String = c.to_lowercase().collect();
+        let ascii = low.bytes().all(|b| b.is_ascii_lowercase()).then_some(low);
+        assert_eq!(ascii, lower_ascii.get(&u).cloned(), "lower {u:#x}");
+        checked += 1;
+    }
+    assert_eq!(checked, 0x110000 - 0x800);
+    assert_eq!((upper.len(), lower_ascii.len()), (1525, 53));
 }
 
 #[test]
