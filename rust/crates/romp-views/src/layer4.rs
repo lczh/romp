@@ -259,6 +259,20 @@ impl Children {
         }
     }
 
+    /// `children.setdefault(k, []).append(nid)` (the body's floor un-nest appends a top to `children[None]`).
+    pub fn push_child(&mut self, k: Option<&str>, nid: &str) {
+        self.push(k, nid);
+    }
+
+    /// `children[k].remove(nid)`: the first occurrence goes, and the key keeps its place even when its list empties.
+    pub fn remove_child(&mut self, k: Option<&str>, nid: &str) {
+        if let Some(&i) = self.index.get(&k.map(str::to_string))
+            && let Some(j) = self.entries[i].1.iter().position(|c| c == nid)
+        {
+            self.entries[i].1.remove(j);
+        }
+    }
+
     /// `children.get(k, [])`.
     pub fn get(&self, k: Option<&str>) -> &[String] {
         self.index.get(&k.map(str::to_string)).map_or(&[], |&i| &self.entries[i].1)

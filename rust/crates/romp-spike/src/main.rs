@@ -11,6 +11,10 @@
 //!         Layer 4 (the store helpers) against DUMP/layer4.json, or an edge set (dump_layer4.py).
 //!     romp-spike layer5 DUMP|EDGE.json [--plant lowercase|em-text|uuid-exclude|outrun-float|prompt-bytes|idle-tail]
 //!         Layer 5 (landing, delegation and provisional) against DUMP/layer5.json, or an edge set (dump_layer5.py).
+//!     romp-spike layer6 DUMP|EDGE.json [--plant anchor-store-order|fsubmax-last|mt-or|land-first-equal|peers-unsorted|born-empty-kept]
+//!         Layer 6 (the body and its closures): each alive session's entry, byte for byte against the S2 dump's own
+//!         oracle/entries/<sid>.json, or against an edge set or fuzz file (dump_layer6.py), whose expected entries carry
+//!         the SHA-1 of Python's entry string.
 //!     romp-spike store DUMP [--records] [--plant NAME]
 //!         Read every file of DUMP/transcripts/ through the transcript store and print the canonical summary
 //!         (romp_transcript::canon): per file one line, then one line per record. --records prints each record's
@@ -31,6 +35,10 @@
 //! (a bare string counts) instead of jd._atom_text, `uuid-exclude` drops the turn's text atoms by uuid instead of by
 //! identity, `outrun-float` skips `int()` of the coverage stamps, `prompt-bytes` cuts the provisional prompt at 140
 //! UTF-8 bytes and `idle-tail` closes the provisional turn only on a trailing idle span;
+//! layer6's `anchor-store-order` calls _node_anchor_uuids per node in store order instead of from flatten,
+//! `fsubmax-last` keeps the last of equal subtree times, `mt-or` reads a row's mt as `mt or t`, `land-first-equal`
+//! keeps the first of equal trail-segment times in the landing, `peers-unsorted` leaves the peers in read order and
+//! `born-empty-kept` ships an empty born record as `{}`;
 //! the store's plants are no-tool-result, vt-strip and skip-held-crc.
 //! Exit status: 0 when everything matched, 1 on any difference, 2 on a usage or load error.
 
@@ -48,13 +56,14 @@ use romp_views::layer2::{self, Plant as Plant2, Probe};
 use romp_views::layer3::{self, Plant as Plant3};
 use romp_views::layer4::{self, Plant as Plant4};
 use romp_views::layer5::{self, Plant as Plant5};
+use romp_views::layer6::{self, Plant as Plant6};
 use romp_views::load;
 use romp_views::record::{Num, OMap, ToJson};
 use romp_views::snapshot::{Snapshot, Store as GoalStore};
 use romp_views::tree::{self, Atom, Content, Tree, Turn};
 
 const USAGE: &str =
-    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]\n       romp-spike layer5 DUMP|EDGE.json [--plant lowercase|em-text|uuid-exclude|outrun-float|prompt-bytes|idle-tail]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
+    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]\n       romp-spike layer5 DUMP|EDGE.json [--plant lowercase|em-text|uuid-exclude|outrun-float|prompt-bytes|idle-tail]\n       romp-spike layer6 DUMP|EDGE.json [--plant anchor-store-order|fsubmax-last|mt-or|land-first-equal|peers-unsorted|born-empty-kept]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
 const MAX_SHOWN: usize = 10;
 
 fn store_usage() -> ExitCode {
@@ -217,6 +226,8 @@ fn main() -> ExitCode {
         ("layer4", Some(p)) if Plant4::parse(p).is_some() => layer4_cmd(&dir, Plant4::parse(p)),
         ("layer5", None) => layer5_cmd(&dir, None),
         ("layer5", Some(p)) if Plant5::parse(p).is_some() => layer5_cmd(&dir, Plant5::parse(p)),
+        ("layer6", None) => layer6_cmd(&dir, None),
+        ("layer6", Some(p)) if Plant6::parse(p).is_some() => layer6_cmd(&dir, Plant6::parse(p)),
         _ => return usage(),
     };
     match result {
@@ -1401,6 +1412,193 @@ fn layer5_edge(file: &Path, plant: Option<Plant5>) -> Result<bool, String> {
     Ok(tally.diffs == 0)
 }
 
+fn plant6_name(plant: Option<Plant6>) -> String {
+    plant.map_or_else(String::new, |p| format!(" [planted: {}]", p.name()))
+}
+
+/// What one entry comparison counts: the entry's cards (asks and serving-fold cards) and their tree rows.
+fn entry_size(v: &Out) -> (usize, usize) {
+    let cards: Vec<&Out> = match v {
+        Out::Object(_) => {
+            let mut c: Vec<&Out> = match member(v, "asks") {
+                Some(Out::Array(a)) => a.iter().collect(),
+                _ => Vec::new(),
+            };
+            if let Some(Out::Array(f)) = member(v, "servingFolds") {
+                c.extend(f.iter().filter_map(|x| member(x, "card")));
+            }
+            c
+        }
+        _ => Vec::new(),
+    };
+    let rows = cards.iter().map(|c| match member(c, "tree") {
+        Some(Out::Array(t)) => t.len(),
+        _ => 0,
+    });
+    (cards.len(), rows.sum())
+}
+
+/// Compare one entry's bytes with Python's; on a difference, name the first differing values (Tally over the decoded
+/// oracle) and the first differing byte.
+fn entry_check(tally: &mut Tally, at: &str, got: &Out, want_bytes: &[u8]) -> Result<bool, String> {
+    let got_s = romp_json::dumps(got);
+    let want = exact_doc(want_bytes, at)?;
+    let before = tally.diffs;
+    tally.compare(at, got, &want);
+    if got_s.as_bytes() == want_bytes {
+        if tally.diffs > before {
+            return Err(format!("{at}: the bytes match but the values differ (a comparison defect)"));
+        }
+        return Ok(true);
+    }
+    if tally.diffs == before {
+        tally.diff(format!("{at}: the values agree but the bytes differ: {}", first_difference(want_bytes, got_s.as_bytes())
+            .unwrap_or_default()));
+    }
+    Ok(false)
+}
+
+/// Layer 6 against Python's entries: a dump directory's oracle/entries/, or an edge set or fuzz file.
+fn layer6_cmd(path: &Path, plant: Option<Plant6>) -> Result<bool, String> {
+    if path.is_dir() { layer6_dump(path, plant) } else { layer6_edge(path, plant) }
+}
+
+fn layer6_dump(dir: &Path, plant: Option<Plant6>) -> Result<bool, String> {
+    let dump = load::load_dump(dir)?;
+    let snap = &dump.snapshot;
+    layer6::validate(snap).map_err(|e| format!("snapshot.json: {e}"))?;
+    let t0 = Instant::now();
+    let build = layer6::Build::new(snap, &dump.trees, plant);
+    let entries = build.entries();
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    let mut tally = Tally::default();
+    let (mut bytes, mut cards, mut rows, mut differing) = (0usize, 0usize, 0usize, 0usize);
+    for (sid, got) in &entries {
+        let file = dir.join("oracle").join("entries").join(format!("{sid}.json"));
+        let want = read(&file)?;
+        bytes += want.len();
+        let got = layer6::answer_json(got);
+        let (c, r) = entry_size(&got);
+        cards += c;
+        rows += r;
+        if !entry_check(&mut tally, sid, &got, &want)? {
+            differing += 1;
+        }
+    }
+    for s in &tally.shown {
+        println!("  {s}");
+    }
+    println!(
+        "layer6 {}{}: {} sessions, {} cards, {} tree rows: {} entry bytes and {} values compared with oracle/entries, \
+         {} sessions differ, {} differences ({:.1} ms for the build)",
+        world_name(snap),
+        plant6_name(plant),
+        entries.len(),
+        cards,
+        rows,
+        bytes,
+        tally.values,
+        differing,
+        tally.diffs,
+        ms
+    );
+    Ok(differing == 0 && tally.diffs == 0)
+}
+
+fn layer6_edge(file: &Path, plant: Option<Plant6>) -> Result<bool, String> {
+    let name = file.display().to_string();
+    let bytes = read(file)?;
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("{name}: {e}"))?;
+    if doc["schema"] != "romp-spike-layer6-edge/1" {
+        return Err(format!("{name}: schema {}, expected romp-spike-layer6-edge/1", doc["schema"]));
+    }
+    let exact = exact_doc(&bytes, &name)?;
+    let exact_cases = exact_items(&exact, "cases", &name)?;
+    let cases = doc["cases"].as_array().ok_or_else(|| format!("{name}: no cases"))?;
+    if cases.len() != exact_cases.len() {
+        return Err(format!("{name}: {} cases, {} read exactly", cases.len(), exact_cases.len()));
+    }
+    let mut tally = Tally::default();
+    let (mut loaded, mut refused, mut differing, mut sessions, mut raised, mut cards, mut rows) = (0, 0, 0, 0, 0, 0, 0);
+    for (case, exact_case) in cases.iter().zip(exact_cases) {
+        let cname = case["name"].as_str().ok_or("a case without a name")?;
+        let loaded_case = load::refuse_big_int(member(exact_case, "snapshot").unwrap_or(&Out::Null), &[])
+            .and_then(|()| layer6::Case::load(case));
+        let c = match loaded_case {
+            Ok(c) => c,
+            Err(e) => {
+                if cname.starts_with("REFUSE ") {
+                    refused += 1;
+                } else {
+                    tally.diff(format!("{cname}: the loader refused it: {e}"));
+                    differing += 1;
+                }
+                continue;
+            }
+        };
+        if cname.starts_with("REFUSE ") {
+            tally.diff(format!("{cname}: the loader accepted it"));
+            differing += 1;
+            continue;
+        }
+        loaded += 1;
+        let expect = exact_items(exact_case, "expect", cname)?;
+        let build = layer6::Build::new(&c.snapshot, &c.trees, plant);
+        let entries = build.entries();
+        if entries.len() != expect.len() {
+            tally.diff(format!("{cname}: {} entries here, {} in python", entries.len(), expect.len()));
+            differing += 1;
+            continue;
+        }
+        let before = tally.diffs;
+        for ((sid, got), want) in entries.iter().zip(expect) {
+            sessions += 1;
+            let at = format!("{cname} {sid}");
+            if member(want, "sid") != Some(&Out::Str(sid.clone())) {
+                tally.diff(format!("{at}: python's entries are out of order"));
+                continue;
+            }
+            let got = layer6::answer_json(got);
+            let want_answer = member(want, "answer").ok_or_else(|| format!("{at}: no answer"))?;
+            raised += usize::from(member(want_answer, "raises").is_some());
+            let (cc, rr) = entry_size(&got);
+            cards += cc;
+            rows += rr;
+            let got_s = romp_json::dumps(&got);
+            let want_s = romp_json::dumps(want_answer);
+            let digest = romp_views::sha1::hex(got_s.as_bytes());
+            if let Some(Out::Str(w)) = member(want, "sha1")
+                && *w != digest
+                && got_s == want_s
+            {
+                tally.diff(format!("{at}: the values agree but the SHA-1 of Python's entry string differs"));
+            }
+            entry_check(&mut tally, &at, &got, want_s.as_bytes())?;
+        }
+        differing += usize::from(tally.diffs > before);
+    }
+    for s in &tally.shown {
+        println!("  {s}");
+    }
+    println!(
+        "layer6 edge set{}: {} cases, {} loaded and compared ({} sessions, {} cards, {} tree rows, {} values), {} \
+         refused at load (every REFUSE case), {} differences in {} cases (python {})",
+        plant6_name(plant),
+        cases.len(),
+        loaded,
+        sessions,
+        cards,
+        rows,
+        tally.values,
+        refused,
+        tally.diffs,
+        differing,
+        doc["python"].as_str().unwrap_or("?")
+    );
+    println!("  entries that raise in Python and here: {raised}");
+    Ok(tally.diffs == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1489,6 +1687,28 @@ mod tests {
         assert_eq!(check_cite5(&ok, "f"), Ok(()));
         let off: serde_json::Value = serde_json::json!({"constants": {"CITE_MIN_CHARS": 79}});
         assert_eq!(check_cite5(&off, "f").unwrap_err(), "f: CITE_MIN_CHARS is Some(79) in Python, 80 here");
+    }
+
+    #[test]
+    fn the_layer6_check_compares_bytes_and_names_the_first_differing_value() {
+        assert_eq!(plant6_name(Some(Plant6::MtOr)), " [planted: mt-or]");
+        assert_eq!(plant6_name(None), "");
+        for p in Plant6::ALL {
+            assert_eq!(Plant6::parse(p.name()), Some(p));
+        }
+        let obj = |m: Vec<(&str, Out)>| Out::Object(m.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+        let row = obj(vec![("id", Out::Str("g1".into()))]);
+        let card = |t: Out| obj(vec![("t", t), ("tree", Out::Array(vec![row.clone(), row.clone()]))]);
+        let entry = |t: Out| obj(vec![("asks", Out::Array(vec![card(t)])), ("servingFolds", Out::Array(vec![
+            obj(vec![("tracker", Out::Str("x".into())), ("card", card(Out::Int(1)))])]))]);
+        assert_eq!(entry_size(&entry(Out::Int(5))), (2, 4), "two cards (one folded), four rows");
+        assert_eq!(entry_size(&Out::Null), (0, 0), "a hidden session's null entry");
+        let mut t = Tally::default();
+        let want = romp_json::dumps(&entry(Out::Int(5)));
+        assert_eq!(entry_check(&mut t, "s1", &entry(Out::Int(5)), want.as_bytes()), Ok(true));
+        assert_eq!(entry_check(&mut t, "s2", &entry(Out::Float(5.0)), want.as_bytes()), Ok(false));
+        assert_eq!(t.shown, ["s2.asks[0].t: rust 5.0 python 5"]);
+        assert_eq!(t.diffs, 1);
     }
 
     #[test]

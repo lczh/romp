@@ -40,7 +40,7 @@
 //! segment's atoms, and only eviction clears it. A seam stamped between two builds keeps the head segment's key and
 //! the turn's end, so the second build's hit serves the landing found over the whole unsplit segment, while this port
 //! (no memo) searches the head's own atoms first and can land on an older atom. The spike compares fresh processes, so
-//! it never meets this; a warm build after a seam can (SPIKE.md, "What layer 6 needs"). Body reads that
+//! it never meets this; a warm build after a seam can (SPIKE.md, "S4.6 as built"). Body reads that
 //! fault (a lazy atom's unreadable body) cannot happen on a tree the loader admits (it refuses lazy atoms), so the
 //! fault count is always 0. `str(a.get("text") or "")` is ported for strings and falsy values; the loader refuses a
 //! truthy `text` that is not a string (`tree::validate_atom`).

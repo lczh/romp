@@ -94,6 +94,10 @@ RECORDED = {
     "_awaiting_task_descs": ("awaitingTaskDescs", 0),
     "_warm_wanted": ("warmWanted", "row"),
     "_cap_switch_offer": ("capSwitchOffer", 0),
+    # reached only when _bg_live_norm answers live tasks (no world has any); recorded so a world that has them replays
+    # (S4.6, the body's owned-task yield and service chip)
+    "_bg_owner_tops": ("bgOwnerTops", 0),
+    "_bg_service_descs": ("bgServiceDescs", 0),
 }
 SLICE_KEYS = ("asks", "working", "awaiting", "bgServices", "servingFoldedIds", "absentSids")   # what the per-card build makes
 FRAME_SKIP = SLICE_KEYS + ("now",)
