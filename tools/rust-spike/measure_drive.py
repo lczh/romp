@@ -350,11 +350,16 @@ def ratio(a, b):
     return None if (a is None or not b) else a / b
 
 
+def ran_gen2(span):
+    """Whether a build's span ran a full (gen2) collection (measure.py's timed_build counts each generation's)."""
+    return len(span.get("gc") or []) > 2 and span["gc"][2] > 0
+
+
 def kept(builds, drop_first=True):
     """A row's builds for its statistic: the first dropped (it pays the row's warm-up: heldWarm drifted from 21.8 to
     17.4 ms within one row before), and any build that ran a full (gen2) collection dropped and counted."""
     bs = builds[1:] if drop_first and len(builds) > 1 else list(builds)
-    full = [len(b.get("gc") or []) > 2 and b["gc"][2] > 0 for b in bs]
+    full = [ran_gen2(b) for b in bs]
     return [b for b, f in zip(bs, full) if not f], sum(full)
 
 
@@ -370,18 +375,32 @@ def balanced(vals):
 
 
 def row_ms(builds):
-    full = [len(b.get("gc") or []) > 2 and b["gc"][2] > 0 for b in builds]
+    full = [ran_gen2(b) for b in builds]
     vals = [(i, b["cpuNs"]) for i, (b, f) in enumerate(zip(builds, full)) if i > 0 and not f]
     if not vals and builds:
         vals = [(0, builds[0]["cpuNs"])]
     return ms(balanced(vals))
 
 
-def inst_runs(x, row):
-    """The instrumented builds of a row as (round, run), the first dropped when there are at least two."""
-    runs = ((x.get("instrumentedRows") or {}).get(row) or {}).get("runs") or []
+def inst_all(x, row, memo=False):
+    """Every instrumented build of a row, in round order: S6's rows, or with `memo` the memo phase's (measure.py
+    --memo)."""
+    src = (x.get("memoRows") or {}) if memo else x
+    return ((src.get("instrumentedRows") or {}).get(row) or {}).get("runs") or []
+
+
+def inst_kept(runs):
+    """Instrumented builds for a statistic, as `kept` keeps plain ones: (round, run) pairs, the first dropped when there
+    are at least two and any build whose span ran a full (gen2) collection dropped; and how many were dropped so."""
     pairs = list(enumerate(runs))
-    return pairs[1:] if len(pairs) > 1 else pairs
+    pairs = pairs[1:] if len(pairs) > 1 else pairs
+    full = [ran_gen2(r.get("span") or {}) for _i, r in pairs]
+    return [q for q, f in zip(pairs, full) if not f], sum(full)
+
+
+def inst_runs(x, row, memo=False):
+    """The instrumented builds of a row as (round, run) for its statistic (`inst_kept`)."""
+    return inst_kept(inst_all(x, row, memo))[0]
 
 
 def inst_ms(x, row, key):
@@ -390,10 +409,57 @@ def inst_ms(x, row, key):
 
 def memo_inst_ms(x, row, key):
     """A memo-phase row's instrumented figure (measure.py --memo), balanced as `inst_ms`."""
-    runs = ((((x.get("memoRows") or {}).get("instrumentedRows") or {}).get(row) or {}).get("runs")) or []
-    pairs = list(enumerate(runs))
-    pairs = pairs[1:] if len(pairs) > 1 else pairs
-    return ms(balanced([(i, r["derived"].get(key)) for i, r in pairs]))
+    return ms(balanced([(i, r["derived"].get(key)) for i, r in inst_runs(x, row, memo=True)]))
+
+
+def memo_plain(x, row):
+    """A memo-phase row's plain builds (measure.py --memo), in round order."""
+    return ((x.get("memoRows") or {}).get("rows") or {}).get(row) or []
+
+
+def by_position(results, values, parity_ratio=False):
+    """A row's builds by round parity, each spread over runs: per run, the median of its builds in even rounds (round 0,
+    the first build, left out) and the median of those in odd rounds, in ms; `values(x)` gives one run's values in ns,
+    in round order. Every build counts here, gen2 or not. With `parity_ratio`, also each run's even-round median over
+    its odd-round median: how much a row's position moves it, comparable across sides whatever each side times."""
+    out = {"evenRounds": spread([ms(med(values(x)[2::2])) for x in results]),
+           "oddRounds": spread([ms(med(values(x)[1::2])) for x in results])}
+    if parity_ratio:
+        out["evenOverOdd"] = spread([ratio(med(values(x)[2::2]), med(values(x)[1::2])) for x in results])
+    return out
+
+
+MEMO_HIT_BUILDS = ("memoBuild", "memo", "memo (served)")    # the port's all-hit builds in its memo phase
+
+
+def memo_predecessors(results):
+    """The port's memo phase as it ran, from each build's `seq` (its place among the builds the process ran from the
+    first round on, the memo phase's oracle builds included): per memo row and round parity, the builds it followed.
+    measure.py's memoKeyed and memoKeyedMiss follow an all-hit build in even rounds and a miss build in odd rounds, so
+    the port's memo and memoMiss must too; returns (the table, what breaks that rule). (None, []) for a run file
+    written before `seq`."""
+    table, bad = {}, []
+    for x in results:
+        ran = {}
+        for row, builds in (x.get("rows") or {}).items():
+            for rnd, b in enumerate(builds):
+                if "seq" in b:
+                    ran[b["seq"]] = (row, rnd)
+        for c in (x.get("memo") or {}).get("checks") or []:
+            if "seq" in c:
+                ran[c["seq"]] = (c.get("what"), None)
+        for sq, (row, rnd) in sorted(ran.items()):
+            if row not in ("memoBuild", "memo", "memoMiss"):
+                continue
+            prev = (ran.get(sq - 1) or ("nothing", None))[0]
+            parity = "oddRounds" if rnd % 2 else "evenRounds"
+            table.setdefault(row, {}).setdefault(parity, set()).add(prev)
+            in_phase = prev in MEMO_HIT_BUILDS + ("memoMiss",)
+            if row != "memoBuild" and (not in_phase or (prev == "memoMiss") != (rnd % 2 == 1)):
+                bad.append("%s in round %d followed %s" % (row, rnd, prev))
+    if not table:
+        return None, []
+    return {row: {par: sorted(v) for par, v in sorted(t.items())} for row, t in sorted(table.items())}, bad
 
 
 def memo_row_ms(x, row):
@@ -484,16 +550,19 @@ def summarize(doc):
             s["rust"] = {"coldMs": spread([ms(x["cold"]["cpuNs"]) for x in rs]),
                          "loadMs": spread([ms(x["load"]["cpuNs"]) for x in rs]),
                          "rows": {row: spread([rust_row(x, row) for x in rs]) for row in rows},
-                         "byPositionMs": {row: {"evenRounds": spread([ms(med([b["cpuNs"] for b in x["rows"][row][2::2]]))
-                                                                      for x in rs]),
-                                                "oddRounds": spread([ms(med([b["cpuNs"] for b in x["rows"][row][1::2]]))
-                                                                     for x in rs])} for row in rows},
+                         "byPositionMs": {row: by_position(rs, lambda x, row=row: [b["cpuNs"] for b in x["rows"][row]])
+                                          for row in rows},
                          "heldSeg": seg_of([b for x in rs for b in x["rows"].get("held", [])]),
                          "heldColdSeg": seg_of([b for x in rs for b in x["rows"].get("heldCold", [])]),
                          "warmCpuOverWall": med([med([w["cpuNs"] / w["wallNs"] for w in x["rows"]["warm"]]) for x in rs]),
                          "spin": spin_flags(sorted(rust_by_run.items()), "rust"),
                          "build": rs[0].get("build")}
             s["problems"] += ["spin rate: %r" % f for f in s["rust"]["spin"]["flagged"]]
+            # the memo phase's order as it ran (romp-spike measure --memo; `seq` on every build since 2026-11-26)
+            s["rust"]["memoPredecessors"], bad = memo_predecessors(rs)
+            if bad:
+                s["problems"].append("the port's memo phase: %d builds follow what their Python rows do not (an "
+                                     "all-hit build in even rounds, a miss in odd ones), first %s" % (len(bad), bad[0]))
         pys = {}
         for lab in sorted({r["interp"] for r in cpu if r["side"] == "python"}):
             by_run = {r["run"]: r["result"] for r in cpu if r["side"] == "python" and r["interp"] == lab}
@@ -511,10 +580,7 @@ def summarize(doc):
                       "firstBuildMs": spread([ms(x["rows"][row][0]["cpuNs"]) for x in res]),
                       # the rows alternate their order between rounds (measure.py ROWS_ODD): even and odd rounds apart,
                       # since a row's predecessor moves it (about 15% for the held rows in the smoke runs)
-                      "byPositionMs": {"evenRounds": spread([ms(med([b["cpuNs"] for b in x["rows"][row][2::2]]))
-                                                             for x in res]),
-                                       "oddRounds": spread([ms(med([b["cpuNs"] for b in x["rows"][row][1::2]]))
-                                                            for x in res])},
+                      "byPositionMs": by_position(res, lambda x: [b["cpuNs"] for b in x["rows"][row]]),
                       "seg": seg_of([b for x in res for b in x["rows"][row]][-1:])}
                 if any(x.get("instrumentedRows") for x in res):
                     keys = ("regionCorrectedNs", "regionNs", "derivationPlusFoldNs", "entryNs", "foldNs",
@@ -523,6 +589,7 @@ def summarize(doc):
                             "parkedNs", "noticeNs", "residualNs", "residualFloorNs", "hitNs", "missNs",
                             "totalNs", "totalLessWrappersNs")
                     r_["instrumentedMs"] = {k[:-2] + "Ms": spread([inst_ms(x, row, k) for x in res]) for k in keys}
+                    r_["instrumentedGen2BuildsDropped"] = sum(inst_kept(inst_all(x, row))[1] for x in res)
                     r_["standinsCalls"] = med([med([q["derived"]["standinsCalls"] for _i, q in inst_runs(x, row)])
                                                for x in res])
                     # the wrappers' correction checked: the plain build against the instrumented total less the wrappers
@@ -584,6 +651,20 @@ def summarize(doc):
                         ("memoKeyedFold", "memoKeyed", "foldNs"), ("memoKeyedBook", "memoKeyed", "memoBookNs"))},
                     "pythonPlainMs": {r: spread([memo_row_ms(x, r) for x in res]) for r in ("memoKeyed", "memoKeyedMiss")},
                     "rustMs": {r: s["rust"]["rows"].get(r) for r in ("memo", "memoMiss", "memoBuild")},
+                    # each side's memo rows by round parity: both alternate the same way, so a row's even/odd pattern is
+                    # what to compare across sides (a gap is expected on both: in odd rounds the rows follow a miss)
+                    "byPositionMs": {
+                        "python": {r: by_position(res, lambda x, r=r: [b["cpuNs"] for b in memo_plain(x, r)], True)
+                                   for r in ("memoKeyed", "memoKeyedMiss")},
+                        "pythonRegion": {r: by_position(res, lambda x, r=r: [q["derived"].get("regionCorrectedNs")
+                                                                              for q in inst_all(x, r, memo=True)], True)
+                                         for r in ("memoKeyed", "memoKeyedMiss")},
+                        "rust": {r: by_position(rust_by_run.values(), lambda x, r=r: [b["cpuNs"] for b in
+                                                                                      x["rows"].get(r, [])], True)
+                                 for r in ("memo", "memoMiss", "memoBuild")}},
+                    "gen2BuildsDropped": {r: {"plain": sum(kept(memo_plain(x, r))[1] for x in res),
+                                              "instrumented": sum(inst_kept(inst_all(x, r, memo=True))[1] for x in res)}
+                                          for r in ("memoKeyed", "memoKeyedMiss")},
                     "decisions": {"python": sorted({json.dumps(b.get("memo"), sort_keys=True) for x in res
                                                     for r in ("memoKeyed", "memoKeyedMiss")
                                                     for b in ((x.get("memoRows") or {}).get("rows") or {}).get(r, [])}),
@@ -596,6 +677,24 @@ def summarize(doc):
                 if dec["python"] != dec["rust"]:
                     s["problems"].append("%s: the memo rows' decisions differ: python %r, rust %r" % (lab, dec["python"],
                                                                                                      dec["rust"]))
+                # the wrappers' correction checked on the memo rows too, as on S6's rows: the plain build against the
+                # instrumented total less the wrappers
+                p["memo"]["wrapperCheck"] = {}
+                for r in ("memoKeyed", "memoKeyedMiss"):
+                    tl = (spread([memo_inst_ms(x, r, "totalLessWrappersNs") for x in res]) or {}).get("median")
+                    wc = p["memo"]["wrapperCheck"][r] = ratio(tl, (p["memo"]["pythonPlainMs"][r] or {}).get("median"))
+                    if wc is not None and abs(wc - 1) > 0.10:
+                        s["problems"].append("%s %s: the instrumented total less the wrappers is %.2fx the plain build"
+                                             % (lab, r, wc))
+                # the miss rows do the same held walk on both sides (the largest session re-derived over its held
+                # aggregate), over every build, plain and instrumented, as heldWarm's against held
+                pseg = seg_of([b for x in res for b in memo_plain(x, "memoKeyedMiss")]
+                              + [q.get("span") or {} for x in res for q in inst_all(x, "memoKeyedMiss", memo=True)])
+                rseg = seg_of([b for x in rust_by_run.values() for b in x["rows"].get("memoMiss", [])])
+                p["memo"]["missSeg"] = {"python": pseg, "rust": rseg}
+                if pseg != rseg:
+                    s["problems"].append("%s memoKeyedMiss's held counters %r differ from the port's memoMiss %r"
+                                         % (lab, pseg, rseg))
                 if perf and perf.get("missesPerBuild") is not None:
                     mpb = min(1.0, perf["missesPerBuild"])
 

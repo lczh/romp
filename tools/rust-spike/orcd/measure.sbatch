@@ -8,6 +8,9 @@
 # 0.46 a build) for the blend. ORCD's CPUs are not the Mac's (x86_64 Linux, not Apple M4 Max), so every ratio here is
 # indicative; the gate's numbers stay the Mac's (arm64 CPython 3.13.18), and the driver's gate verdict reads
 # "insufficient" for this interpreter by design. Not preemptable: a measurement cut in the middle is wasted.
+# --instrumented 11 (since 2026-11-26; the driver's default is 5): every paired memo figure comes from Python's
+# instrumented memo builds, so 11 gives them the port's 5 builds per round parity after the first is dropped, not 2
+# (S6's instrumented rows get 11 too: more builds, the same statistic).
 #   sbatch --mem=<from the large worlds tasks> ~/orcd/scratch/agents/romp_fix/romp/tools/rust-spike/orcd/measure.sbatch
 # The job exits 1 when a step failed, 2 when it refused to start.
 #SBATCH --job-name=romp-fix-memo2-measure
@@ -53,8 +56,8 @@ for name, snap in zip(("perf-before.json", "perf-after.json"), doc["perf"]):
         json.dump(snap, f)
 EOF
 run drive "$PYTHON" "$SPIKE/measure_drive.py" --dump "$ROOT/dumps/large" --dump "$ROOT/dumps/large4" \
-    --dump "$ROOT/dumps/small" --runs 8 --python "$PYTHON" --cpu --memo --perf "$OUT/perf-before.json" \
-    --perf "$OUT/perf-after.json" --binary "$BIN" --out "$OUT/s61-runs.json"
+    --dump "$ROOT/dumps/small" --runs 8 --python "$PYTHON" --cpu --memo --instrumented 11 \
+    --perf "$OUT/perf-before.json" --perf "$OUT/perf-after.json" --binary "$BIN" --out "$OUT/s61-runs.json"
 run summary "$PYTHON" "$SPIKE/measure_drive.py" --summarize "$OUT/s61-runs.json"
 seal
 awk -F'\t' '$2 != 0 {bad=1} END {exit bad}' "$OUT/steps.tsv"

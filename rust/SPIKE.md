@@ -144,9 +144,12 @@ the small world, a short fuzz seed. Every agent brief for this spike must say so
   scratch, and each stage was copied to the group pool from the login node and verified again there, after the pool's
   NFS mount hung on some compute nodes). (1) Ask lczh whether to run the S6.1 measurement once on the Mac, the
   gate's platform (arm64 CPython 3.13.18 on the M4 Max): one process, about 2.5 GB for about 10 minutes,
-  `measure_drive.py --cpu --memo` as `measure.sbatch` runs it. The port's memo rows now have a phase of their own, as
-  Python's have (2026-11-26, light checks only: "The port's memo rows in a phase of their own" under "S6.1 results
-  (cluster)"); that run, or a cluster rerun, shows whether the position cost is gone. Without the go-ahead, S7 quotes the
+  `measure_drive.py --cpu --memo --instrumented 11` as `measure.sbatch` now runs it. The port's memo rows now have a
+  phase of their own, as Python's have (2026-11-26, light checks only: "The port's memo rows in a phase of their own"
+  under "S6.1 results (cluster)"); that run, or a cluster rerun, shows whether the port's memo rows now move with round
+  parity as Python's do (the summary's `memo.byPositionMs`, both sides side by side). A gap between even and odd
+  rounds is expected on both sides, since in odd rounds both sides' memo rows follow a miss build, so the test is
+  whether the port's pattern matches Python's, not whether its gap is zero. Without the go-ahead, S7 quotes the
   cluster figures as indicative. (2) Merge `romp_fix-memo2` into `romp_fix`: the correctness checks are complete, and
   the merge does not wait on the Mac run. (3) S7. The decision S7 takes to lczh: whether a feed port is worth a month
   when, with the memo on both sides, it is about three times cheaper per build on the cluster, short of five, with
@@ -3288,12 +3291,50 @@ memoMiss and odd rounds reversed: Python's rule for memoKeyed and memoKeyedMiss.
 is exactly Python's (memo, memoMiss, then memoMiss, memo, and so on), and memoBuild, itself an all-hit build, sits
 only between two all-hit builds, so the hit row and the miss row each follow what their Python rows follow: an all-hit
 build in even rounds, a miss build in odd rounds. A unit test pins that, and it fails on the order memo, memoMiss,
-memoBuild, where the miss row would follow memoBuild in odd rounds instead of another miss. What each row times, the
-driver's first-build drop and its even/odd balancing are unchanged; the seven other rows rotate as they do without
-`--memo` (the only neighbor that changes is buildNew's in odd rounds, which was the memo row). Python's memo region
-still comes from its instrumented builds, which the port has no counterpart for (it times its region directly). The
-figures above predate the change; in the next run, the summary's `byPositionMs` for memo, memoMiss and memoBuild shows
-whether the parity gap is gone.
+memoBuild, where the miss row would follow memoBuild in odd rounds instead of another miss. The test pins the order's
+definition, not the run, so every build the port times now also carries `seq`, its place in the order the process ran
+them (the memo phase's oracle builds included), and the driver reads each memo and memoMiss build's predecessor from
+every run's output and flags one that breaks that rule (`rust.memoPredecessors`). What each row times, the driver's
+first-build drop and its even/odd balancing are unchanged.
+
+The heavy rows changed in two ways, neither in what they time. Their rotation is the one without `--memo` (in odd
+rounds buildNew's neighbor was the memo row). And their process state: before, the memo's three warm-up builds ran
+before the heavy rounds, and the memo (every session's entry) and its held table (their aggregates) stayed allocated
+through them; now neither exists until the heavy rounds are done, as in the runs without `--memo` and as in Python,
+whose heavy rows also run before its memo phase. So the next run's held, region and other heavy figures can differ
+from these runs' (which used `--memo`) by that change too, and "Rust held / Rust memo" now divides rows from different
+phases. The port's `memory.end` is now read after the memo state is freed (nothing reads it).
+
+What the paired memo figures compare did not change, and it is not quite the rows the port's phase mirrors. The port
+copies Python's plain memo rounds (K of them, right after the three warm-ups), but the paired hit and miss comparisons
+and the production blend use Python's instrumented memo rounds, which run after the K plain rounds and one more oracle
+check, with the timing wrappers installed. There are M of them, and these runs passed no `--instrumented`, so M was the
+default 5: after the first build is dropped, each parity's median was the mean of 2 builds, against the port's 5. No
+direction of bias is known from that. `measure.sbatch` now passes `--instrumented 11`, which gives the compared Python
+figures 5 builds per parity too (S6's instrumented rows get 11 as well: more builds, the same statistic). Python's memo
+region still comes from those instrumented builds, which the port has no counterpart for (it times its region directly).
+
+The driver also gives the memo rows S6's checks, which they lacked (the fields named below sit in each world's summary,
+the memo ones under each interpreter's `python.<interpreter>.memo`). Builds that ran a full (gen2) collection are now
+dropped and counted in every instrumented figure, not only in the plain ones: `gen2BuildsDropped` for the memo rows
+(plain and instrumented), `instrumentedGen2BuildsDropped` for S6's rows, whose deciding heldWarm figure had the same
+gap. The memo phase matters most here, since it allocates objects after run_rows' gc.freeze() (a copy of the snapshot, a
+new Replay and KeyHarness, a module), and a full collection inside an instrumented memo build would inflate Python's
+region, leaning toward the port. The wrapper check (the instrumented total less the wrappers within 10% of the plain
+build) now runs on memoKeyed and memoKeyedMiss (`memo.wrapperCheck`), where it matters most: the hit region is about 2
+ms, the stand-ins subtracted from it cost more than that (3.13 and 3.28 ms a build, above), and each of their calls is
+corrected with an estimated wrapper cost. And the miss rows' held-walk counters must agree, Python's memoKeyedMiss over
+every plain and instrumented build against the port's memoMiss (`memo.missSeg`), as heldWarm's against held, so that
+both sides derive over their held aggregate is now checked at run time (off macOS the port's held-table bound falls back
+to 8 GB/128, since its memory read answers only on macOS; a bound tight enough to change the walk would show here).
+
+The summary's `memo.byPositionMs` sets each side's memo rows by round parity side by side: the port's memo, memoMiss and
+memoBuild, Python's plain memoKeyed and memoKeyedMiss (the K rounds, the same placement and number of rounds as the
+port's rows) and their instrumented regions, each with `evenOverOdd`, every run's even-round median over its odd-round
+median. The figures above predate the change. In the next run, a gap between even and odd rounds is expected on both
+sides by design (in odd rounds both sides' hit and miss rows follow a miss build; the miss row then re-derives s001
+right after the build before it did, its data still in cache), so what that field answers is whether the port's even/odd
+pattern now matches Python's, not whether the port's gap is zero.
 
 *The cluster, briefly.* The group pool's NFS mount hung on some compute nodes: on node1623 a job's slurmstepd sat in D
 state for 2 hours and a stat of the pool timed out while scratch answered, and node1294 had shown the same signature
@@ -3719,3 +3760,10 @@ load, and S7 should set that number beside the ratios. A Mac run can move the ra
     nothing; the text now names that check.
 - 2026-11-26: the port's memo rows given a phase of their own (`romp-spike measure cpu --memo`: "The port's memo
   rows in a phase of their own" under "S6.1 results (cluster)"); light checks only on this Mac, nothing measured.
+- 2026-11-26: that change's review applied (same paragraph). Corrected: the next run's test is whether the port's
+  memo rows move with round parity as Python's do, not whether their gap is gone, so the summary now gives Python's
+  memo rows by position too (`memo.byPositionMs`, with `evenOverOdd`). Added: the paired memo figures come from
+  Python's instrumented memo rounds (`measure.sbatch` now passes `--instrumented 11`, 5 builds per parity as the
+  port's); the heavy rows' process state changed with the move; gen2 builds dropped and counted in instrumented
+  figures; the wrapper check and a held-walk check on the memo rows; `seq` on every port build, from which the driver
+  checks each memo build's predecessor. Light checks only on this Mac, nothing measured.

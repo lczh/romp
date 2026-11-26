@@ -35,6 +35,8 @@
 //! build like the memo row, sits only between two all-hit builds, so memo and memoMiss follow what their Python rows
 //! follow: an all-hit build in even rounds, a miss build in odd rounds.
 //! Each memo build keeps its hits and misses; after the rounds a memo build is checked against the oracle again.
+//! Every build from the first round on carries `seq`, its place in the order the process ran them (the memo phase's
+//! oracle builds too, each with its `what`), so the driver checks from the output what each memo build followed.
 //! What a timed call returns is dropped after the clock stops, as Python's harness keeps its result past its clock.
 //! Every held and heldCold build keeps the held walk's counters it moved (segWalks, segHeld, segWalkTurns, ...), which
 //! the driver checks against Python's heldWarm and emptyMemo builds: equal counters show the held path really ran.
@@ -370,7 +372,8 @@ const ROWS: [&str; 7] = ["warm", "region", "bound", "held", "heldCold", "entries
 const MEMO_PHASE: [&str; 3] = ["memoBuild", "memo", "memoMiss"];
 
 /// The indices of `n` rows in the order round `round` times them: listed in even rounds, reversed in odd ones, so no
-/// row always follows the same one (measure.py: ROWS and ROWS_ODD; run_memo_rows: MEMO_ROWS and its reverse).
+/// row always follows the same one (measure.py's run_rows alternates ROWS with ROWS_ODD, another order, not the
+/// reverse; its run_memo_rows reverses MEMO_ROWS in odd rounds, as here).
 fn round_order(n: usize, round: usize) -> Vec<usize> {
     if round % 2 == 1 { (0..n).rev().collect() } else { (0..n).collect() }
 }
@@ -473,12 +476,19 @@ fn cpu(dir: &Path, builds: usize, memo_rows: bool) -> Result<(bool, J), String> 
         memo::validate(snap).map_err(|e| format!("snapshot.json (memo): {e}"))?;
     }
 
+    // every build from the first round on carries `seq`, its place in the order this process ran them (the memo phase's
+    // oracle builds included), so the driver reads each build's predecessor from the output
+    let mut seq: u64 = 0;
+    let mut next_seq = || {
+        seq += 1;
+        json!(seq - 1)
+    };
     let mut rows: Vec<Vec<J>> = vec![Vec::with_capacity(builds); ROWS.len()];
     for round in 0..builds {
         // odd rounds run the rows in reverse, so no row always follows the same one (nothing a row needs depends on
         // another row: the held table is the held row's alone)
         for ri in round_order(ROWS.len(), round) {
-            let s = match ROWS[ri] {
+            let mut s = match ROWS[ri] {
                 "warm" => {
                     let m = mark();
                     let f = layer7::build_feed(snap, &dump.trees, None).map_err(|r| format!("build_feed raised {}", r.exc))?;
@@ -544,6 +554,7 @@ fn cpu(dir: &Path, builds: usize, memo_rows: bool) -> Result<(bool, J), String> 
                     s
                 }
             };
+            s["seq"] = next_seq();
             rows[ri].push(s);
         }
     }
@@ -569,6 +580,8 @@ fn cpu(dir: &Path, builds: usize, memo_rows: bool) -> Result<(bool, J), String> 
             drop(b);
             let mut c = oracle_check(dir, &f, what)?;
             c["memo"] = memo_counts(&memo.borrow());
+            c["what"] = json!(what);
+            c["seq"] = next_seq();
             memo_checks.push(c);
         }
         if memo.borrow().decisions.iter().any(|d| d.hit != Some(true)) {
@@ -578,7 +591,7 @@ fn cpu(dir: &Path, builds: usize, memo_rows: bool) -> Result<(bool, J), String> 
         for round in 0..builds {
             for ri in round_order(MEMO_PHASE.len(), round) {
                 let row = MEMO_PHASE[ri];
-                let s = match row {
+                let mut s = match row {
                     "memo" | "memoMiss" => {
                         if row == "memoMiss" && !memo.borrow_mut().invalidate(&big, "transcript") {
                             return Err(format!("the memo holds no entry for {big}"));
@@ -608,6 +621,7 @@ fn cpu(dir: &Path, builds: usize, memo_rows: bool) -> Result<(bool, J), String> 
                         s
                     }
                 };
+                s["seq"] = next_seq();
                 memo_timed[ri].push(s);
             }
         }
@@ -616,6 +630,8 @@ fn cpu(dir: &Path, builds: usize, memo_rows: bool) -> Result<(bool, J), String> 
         drop(b);
         let mut c = oracle_check(dir, &f, "memo (after the rounds)")?;
         c["memo"] = memo_counts(&memo.borrow());
+        c["what"] = json!("memo (after the rounds)");
+        c["seq"] = next_seq();
         memo_checks.push(c);
     }
     let mem_end = mem();
