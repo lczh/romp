@@ -6,7 +6,17 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
-- Step: S4.7 (layer 7, the loop, the fold and the cross-session pass) done and merged into `romp_fix` from
+- Step: S6, the measurement harness, built on `romp_fix-s6` (worktree `~/romp-romp_fix-s6`), smoke runs only; no
+  figure is quoted yet. `tools/rust-spike/measure.py` (Python's replay build by process CPU, row by row, with its key,
+  memo, frame and file work attributed apart; the record cache's resident and traced bytes, cold and after appends),
+  `romp-spike measure` (the port's build by process CPU through a raw clock_gettime extern; the store's resident size by
+  task_info, cold and after appends) and `tools/rust-spike/measure_drive.py` (the two alternated, every run kept raw in
+  one JSON file, with the live kernel's memo miss rate folded in). The method, what is excluded and why, and every known
+  unfairness are under "S6 method". The smoke runs passed every check (32 runs, both worlds, both interpreters) and
+  raised two things S6 proper must settle first: s2-design's 87 ms empty-memo derivation matches neither Python row the
+  harness measures, and the held anchor aggregate, which the port lacks, moves Python's derivation by about an order of
+  magnitude.
+- Before it: S4.7 (layer 7, the loop, the fold and the cross-session pass) done and merged into `romp_fix` from
   `romp_fix-s47`, with its review round's fixes (two must-fix). With it every port step S4.1 to S4.7 is merged. The whole feed frame comes out of the port: `romp-spike feed DUMP` builds it from
   a dump, and its canonical and wire bytes equal the S2 oracle's on both worlds (17,878 and 114,338 bytes, 0
   differences). The edge set (154 worlds, 118 load and give the feed byte for byte, 36 refused at load as built to be,
@@ -20,7 +30,7 @@ with no server. Both implementations run on one synthetic state, and the feed JS
   `run.json`). A Python-side finding for the bug lane: a null card in an entry's asks (the awaiting placeholder of a
   session that is not live) makes the fold raise outside build_feed's per-session guard, failing the whole build; the
   port mirrors it. See "S4.7 as built" and its review round.
-- Before it: S4.6 (layer 6, the body and its closures) done and merged into `romp_fix` from `romp_fix-s46`, with its
+- Earlier: S4.6 (layer 6, the body and its closures) done and merged into `romp_fix` from `romp_fix-s46`, with its
   review's fixes. Every alive session's entry (the dict _feed_session_entry returns, written through romp-json) equals
   Python's real memo entry byte for byte on both worlds (the S2 dump's `oracle/entries/`), on 289 synthetic worlds and
   on 24,000 random ones; 6 plants, 59 of the 60 source mutants (the 60th is equivalent) and the review's 17 more are
@@ -32,7 +42,7 @@ with no server. Both implementations run on one synthetic state, and the feed JS
   signal for S6, not a measurement: the release build makes the large world's 38 entries in 31 to 33 ms of wall time
   (ten runs, a quiet machine), against the 87 ms Python's derivation took from an empty memo (s2-design section 4):
   about 2.7x, short of the gate's 5x.
-- Earlier: S4.5 (layer 5) done and merged into `romp_fix` from `romp_fix-s45` with its review's fixes. Its review (ship,
+- Before those: S4.5 (layer 5) done and merged into `romp_fix` from `romp_fix-s45` with its review's fixes. Its review (ship,
   no must-fix) is under "The review round" in "S4.5 as built": its 10 edge-set gaps are filled, each shown to catch its
   mutant, and the memo claim is corrected. A Python-side finding from it: `_SUMMARY_ANCHOR_MEMO`'s key leaves out the
   seams, so after a seam splits a turn a later build can serve a stale summary anchor (reproduced with the real kernel
@@ -87,9 +97,10 @@ with no server. Both implementations run on one synthetic state, and the feed JS
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: S6, the measurement (S5, the serde_json::Value variant, stays in the plan and does not block it). The
-  port now builds the whole feed (`layer7::build_feed`), so both sides can time the same region, derivation plus fold.
-  What S6 needs, from the earlier steps:
+- Next action: S6 proper (S5, the serde_json::Value variant, stays in the plan and does not block it). First settle
+  the 87 ms question and the held-aggregate asymmetry ("S6 method", its smoke runs and item 1 of its unfairness list),
+  then the full alternated run on a quiet machine. The harness covers every item of the list below; it is kept as the
+  requirements the harness was built to. What S6 needs, from the earlier steps:
   - CPU: Python's `time.process_time()` in a single-threaded process (`time.thread_time()` under-reports about 42x on
     this Mac, s2-design section 4), and Rust's process CPU through a raw `getrusage` or `clock_gettime` extern (no
     crate), each checked against wall time; the two alternated several times on the same load; Python timed in replay
@@ -164,8 +175,8 @@ kernel, where the memory gain does not depend on interpreter speed.
 | `rust/crates/romp-json` | JSON written exactly as Python's default `json.dumps` writes it (separators, `\uXXXX` escapes, float repr, insertion order) |
 | `rust/crates/romp-transcript` | the transcript store: raw bytes plus a per-line index, the Python cache's identity contract (inode, size, mtime, CRC), positioned reads |
 | `rust/crates/romp-views` | the feed's per-card build only (the spike's slice of the views crate) |
-| `rust/crates/romp-spike` | the standalone binary: load a snapshot and transcripts, build the feed, print canonical JSON and timings |
-| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py` to `dump_layer7.py`), the measurement |
+| `rust/crates/romp-spike` | the standalone binary: load a snapshot and transcripts, build the feed, print canonical JSON; `measure` times the build and the store (`measure.rs`) |
+| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py` to `dump_layer7.py`), the measurement (`measure.py`, and `measure_drive.py`, which alternates it with `romp-spike measure`) |
 
 ## Steps
 
@@ -2044,6 +2055,194 @@ messages and its tint-table reader.
 What this feeds: S6. The whole feed comes out of the port, so a timed region can be the same on both sides (derivation
 plus fold), as s2-design section 4 asks.
 
+## S6 method (2026-11-26)
+
+**The problem.** The gate asks two plain questions: does the port build the feed for at least five times less CPU, and
+does its transcript store hold the same files in at most a third of the resident memory Python's record cache needs?
+Timing each side's "build" naively answers neither. Python's build_feed does work the port never does: it computes a
+memo key per session, serializes each derived entry for the memo and decodes it again in the fold, lists and reads the
+postal log and the notice directory, and assembles a frame of a dozen keys from other subsystems. The port takes all of
+those as recorded inputs. Python's memo also means most production builds derive almost nothing, while the port derives
+every session every time. Python's `time.thread_time()` read about 42x low here (s2-design section 4), and wall time on
+this shared machine moved between 25 and 33 ms for the same Rust build (S4.6, S4.7). Memory measured once after a cold
+read misses the growth S3 found after appends. The method below exists to keep each of those from deciding the answer.
+
+**What runs.** Three tools, each side in a fresh process per run:
+- `python3 tools/rust-spike/measure.py cpu DUMP [--builds K] [--instrumented M]`: Python's build in replay mode.
+- `romp-spike measure cpu DUMP [--builds K]` (`rust/crates/romp-spike/src/measure.rs`): the port's build.
+- `measure.py mem DIR PAYLOAD [--appends K] [--tracemalloc]` and `romp-spike measure mem DIR PAYLOAD [--appends K]`:
+  the record cache and the store over the same files.
+- `measure.py perf --out FILE`: the live kernel's `/perf` `builds.feed` (hit and miss counts, the held-walk counters,
+  build times), read with a GET and the token from its state directory (never printed), nothing else kept.
+- `python3 tools/rust-spike/measure_drive.py --dump DIR [--dump DIR] --runs N --python EXE [--python EXE] --cpu --mem
+  [--builds K] [--instrumented M] [--appends K] [--perf FILE] [--out FILE]`: the alternating driver. Run i measures every
+  side once per dump: even runs Python first (each interpreter in the order given) then Rust, odd runs Rust first then the
+  interpreters reversed, so neither side always meets the machine first. Every run records its load average before and
+  after, its exit status and its whole JSON line; the file (default `<system temp>/romp-s6-measure-<UTC>.json`, never in
+  the repo) keeps every run raw, and `--summarize FILE` recomputes the summary from it. Interpreters are named by
+  version and architecture, dumps by directory name, never by a path under the home directory.
+
+**Which interpreter.** Both, every run: the miniforge CPython 3.12 (x86_64, under Rosetta on this Apple-silicon Mac;
+the interpreter every earlier step used) and the live kernel's own arm64 CPython 3.13.18
+(`~/.local/share/romp-python/cpython-3.13.18/bin/python3.13`), which is what users run. The gate is judged on arm64
+3.13. Rosetta translation slows the x86_64 interpreter and runs a second OS thread beside it, so judging on it would
+flatter the port; its rows are kept for continuity with S2's figures. The smoke runs showed the 42x thread_time
+under-report is Rosetta's: on arm64 3.13, thread_time agrees with the wall clock over the calibration spin.
+
+**CPU: the clocks.** Python reads `time.process_time_ns()`, with `thread_time_ns`, getrusage's user plus system time
+and `perf_counter_ns` beside it. Rust reads `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` through a raw extern, with
+getrusage, `CLOCK_THREAD_CPUTIME_ID` and `Instant` beside it. Every process opens with a 100 ms spin that checks process
+CPU against wall time (a clock that under-reports shows as a ratio far under 1), and every timed build keeps all four
+readings. On macOS the process CPU clock is answered from the same task counters as getrusage at microsecond resolution,
+so those two agree by construction; the independent checks are the wall clock and the thread clock. The process must be
+single-threaded for process CPU to be the build's: measure.py records the OS thread count (task_threads) before and after
+the rows. It is 1 on arm64 3.13 and 2 on the Rosetta interpreter (Rosetta's own thread, idle during the spin).
+
+**CPU: what is timed on each side.**
+- Rust: `layer7::build_feed(snapshot, trees)` (layer 6's `Build::new` and `entries`, the fold, the serving join, the
+  whoWorking stamp, the parked and notice cards from their decoded records, the bell pass, the frame with its passthrough
+  keys cloned from the snapshot). The first build in the process is `cold`; K more are `warm` (the port keeps nothing
+  between builds, so each derives every session); K builds of `Build::new` plus `entries` alone split the derivation from
+  the rest. The returned feed is dropped after the clock stops. Loading the dump (JSON into typed structs) is timed apart
+  as `load`; `validate` and the oracle check are not timed.
+- Python: `km.build_feed(NOW, live_map)` under dump_world's Replay harness (the dumped trees, stores and recorded
+  helper answers; an empty state root; perf-bench's guards, which must record no spawn, thread start or refused write).
+  Four rows, each a separate set of builds:
+  - `cold`: the first build in the process, every memo empty and the interpreter's own caches cold.
+  - `emptyMemo`: K builds, each after clearing the feed memo, the fold's record, the held anchor aggregates
+    (`_FEED_SEG_HELD`), `_SUMMARY_ANCHOR_MEMO` and `_node_anchor_last`. Every session derives and the anchor walk folds
+    every turn, as the port does.
+  - `heldWarm`: K builds, each after clearing only the feed memo and the fold's record. Every session derives, but the
+    walk serves its closed turns from the held aggregates and the landing memo is warm, which is how a production miss
+    re-derives. No seam is stamped between builds, so S4.5's stale warm landing cannot arise (and every row's last build
+    is checked against the oracle, entries included).
+  - `memoServed`: K builds with nothing cleared. Every session is a memo hit (the replay's key is constant), so nothing
+    derives.
+- The region both sides compute is derivation plus fold. On Python's side that is `_feed_session_entry` plus
+  `_feed_fold_session` plus the `_session_working` call inside the key, because the port computes working inside its own
+  derivation. It is measured in M instrumented builds per row, separate from the plain builds whose totals are reported
+  unwrapped. In those builds a wrapper times every function of build_feed's parts by process CPU, and each call is kept
+  under its label and the part it was called from, so the top-level parts add up without double counting:
+  - inside the region, reported as components: the fold's `json.loads` of the entry string (the fold decodes because
+    the memo keeps strings; a memo-less Python would fold the dict, so a no-decode variant is reported too), and the
+    replay's helper stand-ins called from the derivation (deep copies of recorded answers, stores and captions; production
+    runs the real helpers, which read states logs, transcript tails and the postal log, and their live share is not yet
+    measured);
+  - reported apart, charged to neither side: the key's own work (the replay's stand-in key: a deep copy of the store and
+    the recorded `_interrupting` and `_closer_pending` answers; production's key stats files and reads stores), the
+    memo's bookkeeping (get, put, miss attribution, counts, `_feed_key_with_deps`, the fold's kept check, the forgets,
+    and the `json.dumps` of each derived entry), the frame's helpers (`_views_payload`, `_judge_limit_view`,
+    `_state_unknown_names`, `_boards_data`, `_undo_stack_ids`, `_cleared_foreign`, `_session_order`, `_chat_tab_sessions`
+    with `_session_cwd` and `_github_repo_of`, `_boundary_clear_notices`, `_sdk_problem_rows`, `_sync_notice_rows`,
+    `_self_host`, the top-level `_name_color` calls), the pre-loop reads (the replay's lambdas for the alive rows, wait
+    graph, stalls, latches, colormap and bells), and the file work the port does not do: `_parked_handoffs` (the postal
+    log's fold_records cursor and the maildir stats) and `_notice_cards` (the notice directory's listing and memo
+    checks), as S4.7's review asked;
+  - the residual (the build total less every top-level part) is the inline code: the loop, the serving join, the
+    whoWorking pass, the bell pass and the context managers, plus clock quantization.
+  Each wrapper adds a fixed cost per call, calibrated in the same process (a no-op wrapped 20,000 times); the summary
+  subtracts it for the calls made inside the derivation and the fold (`derivationPlusFoldCorrected`).
+- What a memo hit costs is reported as `served`: the key, the memo's bookkeeping and the fold of the kept cards. With the
+  replay's key standing in for production's, it understates production's hit.
+- Python's environment, as production's where it matters: `time.time` returns NOW through a plain function (the S2
+  harness's `mock.patch` costs a MagicMock call each time); after loading, the kernel's own `_gc_gen2_apply` raises the
+  full-collection trigger and `gc.collect(); gc.freeze()` moves the loaded trees out of the collector's walk, as the
+  kernel's gc_freeze does with its loaded heap. The collections each build ran are recorded.
+- A build that differs is never timed. Rust checks its cold build's canonical and wire bytes against the dump's oracle;
+  Python checks the cold build and the last build of every row (canonical, wire and every memo entry) through
+  dump_world's own comparison. Both refuse to report (exit 2) when the oracle is changed by one character (checked on a
+  planted copy of the small dump).
+
+**The memo rows and production.** The port has no memo and no held aggregate, so every Python row is compared with the
+port's warm build. `emptyMemo` against Rust is the same algorithm on both sides (every turn walked). `heldWarm` against
+Rust is Python's production miss against a port without the held aggregate. `memoServed` against Rust is the case
+s2-design warned of: a memo hit derives nothing. To fold in production, the summary takes the live kernel's miss rate
+m = miss / (hit + miss), counted per session per build in `/perf builds.feed.memo`, and blends
+`served + m x (derive - served)` with `derive` from `emptyMemo` and from `heldWarm`; it also reports the production
+share of closed turns the held aggregates served (`segHeld / (segHeld + segWalkTurns)`). The blend is linear and assumes
+a miss costs the world's average session.
+
+**Memory.** For every memory run the driver copies the dump's transcripts into a fresh scratch directory with mtimes
+near now (now - 5 s, a millisecond apart in name order, so nothing reads as quiescent) and computes each file's last
+complete line once (PAYLOAD). Each side reads every file, then for K rounds appends its file's PAYLOAD line to each file
+and reads every file again; both sides append the same bytes.
+- Python: event_model alone (check_store's loader, its state roots in a scratch directory), `_read_jsonl_incremental`
+  over every file, the cache's limits recorded and shown not to bind (the 1,024-entry cap; the byte budget, at least
+  4 GiB of file bytes times 2.85; any eviction or drop is a reported problem). Each run checks that every entry holds its
+  whole file and that every append read kept the entry's generation and grew the held bytes by exactly the appended
+  bytes. Resident size: a run without tracemalloc, the resident size (task_info through ctypes) before the read, after
+  it and after each round, after a `gc.collect()`. Traced bytes: a separate run with tracemalloc (tracing inflates the
+  resident size), the traced delta at the same points; after the last round the cache is cleared and the traced bytes
+  must fall back to the baseline, which shows the delta was the cache's.
+- Rust: the store's process from a fresh start (its baseline is the bare binary), the resident size before, after the
+  cold read and after each round, plus the store's counted bytes (held, index, allocated capacity). Every cold read must
+  be from zero and every round's read an append read (`Grown`).
+- The gate's figure is the resident delta, Rust over Python, cold and after the appends. Rust's allocated capacity over
+  Python's traced bytes is a second view at the allocator level. The record count must be the same on both sides. Both
+  sides also report the footprint and compressed bytes, since macOS compresses pages under pressure and resident size
+  would then under-read.
+- Checked in the smoke runs: the store's counted allocation on the large world equals S3's figures cold and after one
+  append round (96.0 MB and 178.7 MB), and an empty PAYLOAD (an append that adds nothing) is flagged by both sides.
+
+**Ways the comparison can be unfair, known now.** Each is either handled above or open:
+1. The held aggregate (open, the largest). The port walks every turn of every session every build (S4.3 left
+   `_FEED_SEG_HELD` out); a production Python miss walks only the turns since its held entry. `emptyMemo` compares the
+   same algorithm but not production's steady state; `heldWarm` compares production's path with a port that lacks the
+   optimization. Neither alone says whether a port would be 5x cheaper in production. Porting the held aggregate, or
+   timing the port's walk over the open turn only, would close it.
+2. No memo in the port (reported, blended). The blend assumes misses spread like the world's sessions; in production
+   they fall on the active sessions, which are the largest and the ones growing.
+3. The replay's key and helper stand-ins are not production's (reported apart). Production's key stats files and reads
+   stores, and its helpers read files; the replay deep-copies recorded answers. The served row and the stand-ins'
+   share rest on the replay's versions; the live helpers' share of a derivation is not measured yet.
+4. The fold's decode and the memo's serialization are artifacts of Python's memo (reported apart, and a no-decode
+   variant), yet production pays both on every miss.
+5. The frame, the pre-loop reads and the file work are excluded from Python and spliced or decoded in the port (the
+   port's region does clone the passthrough frame keys and builds `Build::new`'s maps, which is a little work Python's
+   region does not carry). Neither world has a postal log or notices, so the file work is near zero here.
+6. Loading is not comparable to production (timed apart): the port parses JSON trees; production Python builds its tree
+   from records (the records-to-tree parse, its real per-append cost, is not measured at all: S4b).
+7. The world is synthetic and covers only the planted shapes: no lazy atoms (em.hydrate is not ported), no split seams,
+   no parked handoffs, notices or bells, one 24,000-record session and 37 of 3,000.
+8. "Cold" differs by side: Python's first build pays lazy initialization in the interpreter and the kernel; the port's
+   first build pays page faults on fresh allocations. Neither is a production boot.
+9. The region figures come from instrumented builds; the per-call wrapper cost is subtracted as an estimate, and the
+   process clock's microsecond resolution makes the small parts noisy (the residual can come out slightly negative).
+10. Rosetta (handled by judging on arm64 3.13; the x86_64 rows include Rosetta's thread in process CPU).
+11. Garbage collection: the harness freezes the loaded heap and applies the kernel's trigger, but production freezes on
+    its own schedule, so a build may meet a collection there that it does not meet here, or the reverse. 3.12 and 3.13
+    also differ in their default first-generation threshold (700 and 2000).
+12. Machine load: a shared machine (load average 5 to 8 of 16 cores during the smoke runs). Alternation spreads drift
+    over both sides but not contention; S6 proper should run on a quiet machine and keep the load readings.
+13. Memory, what the store gives up: the store holds bytes and decodes on demand, so its memory gain comes with a decode
+    on every read that neither gate measures. In the kernel the parse trees share strings with the cache's records, so
+    the kernel-wide resident gain can differ from cache against store.
+14. Memory, process history: both sides are measured in fresh processes, the best case for Python's fragmentation, and
+    the store's appended buffers are measured right after a doubling, the worst case of its growth; the number of append
+    rounds moves the after-appends ratio, so it is reported with K. The append is one duplicated last line per file; a
+    real append is several records of varying size.
+15. Memory, production's own cache: it drops quiescent files' records through its folds and bounds itself by budget, so
+    production may hold fewer files than "every transcript"; the gate's "same files" holds here by construction.
+
+**Smoke runs (2026-11-26).** `measure_drive.py --dump small --dump large --runs 2 --python <3.12 x86_64> --python <3.13
+arm64> --cpu --mem --builds 3 --instrumented 1 --appends 2 --perf <perf.json>`: 32 runs, 0 failed, about 42 s, on fresh
+dumps of both worlds (each `dump_world.py` replay check passing). Every Python row's checked build equaled the oracle
+(canonical, wire and entries), the guards saw nothing, every spin's CPU agreed with its wall time, both sides counted the
+same records after every round, and no cache problem was reported. A shorter `--runs 2` on the small world confirmed the
+alternating order and the isolated (`-I`) interpreters. No figure is quoted from these runs; two things they showed must
+be settled before S6 proper quotes any:
+- s2-design's 87 ms (the large world's derivation from an empty memo, the basis of S4.6's informal 2.7x) matches neither
+  Python row here: the empty-memo derivation came out well above it and the held-warm one well below. A profile of one
+  empty-memo build puts its time in the anchor walk over all 16,877 turns (`_feed_seg_fold`, `_segs_seam`,
+  `_seg_anchors`), and clearing the memos the S2 way (`_feed_memo_forget(set())` and the fold) gives the same figure as
+  `emptyMemo`. So the 2.7x signal cannot be read against either row until the 87 ms is explained.
+- The two derivation rows differ by about an order of magnitude, so item 1 above (the held aggregate) decides how the
+  CPU gate reads more than anything else in the method.
+
+Next for S6 proper: settle the 87 ms; decide item 1 (port the held aggregate, or time the port's open-turn walk); then
+the full run on a quiet machine, `--runs 6` or more, `--builds 10 --instrumented 3 --appends 2`, both interpreters and a
+fresh `/perf` file, both dumps.
+
 ## Log
 
 - 2026-11-25: spike started (lczh: "when we are on the A Fellows org, start working on the rust migration, pace
@@ -2287,3 +2486,16 @@ plus fold), as s2-design section 4 asks.
   - Re-run: the round trip and layers 1 to 7 on both worlds, every number as before (the feed's 17,878 and 114,338
     bytes identical), the harness against both oracles, the fuzz of layers 2 to 6 at seeds 1 to 6 (590,031, 8,059,862,
     30,625,221, 9,054,772 and 3,813,717 values), 0 differences; check_store, mismatches 0. Rust tests: 173 pass.
+- 2026-11-26: S6, the measurement harness (`measure.py`, `romp-spike measure`, `measure_drive.py`), on fresh dumps of
+  both worlds; the method and the known unfairness list are under "S6 method".
+  - Smoke runs only, no figure quoted: 32 alternated runs (2 per side, both worlds, CPython 3.12 x86_64 and 3.13.18
+    arm64, CPU and memory), 0 failed. Every Python row's checked build equaled the oracle (canonical, wire, entries);
+    the guards saw nothing; every calibration spin's CPU agreed with wall time; both sides counted the same records
+    after every append round; the store's counted allocation equals S3's (96.0 MB cold, 178.7 MB after one round).
+  - Planted: an oracle changed by one character makes both sides refuse to time (exit 2); an append that adds nothing is
+    flagged by both memory sides.
+  - Found: the 42x thread_time under-report is Rosetta's (arm64 3.13's thread_time agrees with wall time); s2-design's
+    87 ms empty-memo derivation matches neither Python row (a profile puts the empty-memo build in the walk over all
+    16,877 turns); the held anchor aggregate, which the port lacks, moves Python's derivation by about an order of
+    magnitude. Both are open for S6 proper.
+  - Rust tests: 175 pass (2 new in `measure.rs`: the C struct layouts, the CPU clock against a spin and the memory reads).
