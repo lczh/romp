@@ -19,15 +19,20 @@ the small world, a short fuzz seed. Every agent brief for this spike must say so
   the held aggregate carried across builds. A new oracle (`tools/rust-spike/dump_memo.py`) runs the REAL key in Python
   over scripted and random change sequences. Light checks, all on the small world and short seeds on this Mac: every
   session decision equals Python's (hit, or miss naming the same moved components, raise served or absent) in the
-  70-step scripted sequence (279 decisions) and in 600 random worlds of 8 steps (7,752 decisions), every memo-served and
+  73-step scripted sequence (291 decisions) and in 600 random worlds of 8 steps (7,905 decisions), every memo-served and
   fresh build byte for byte Python's, 0 differences; the six plants are each caught. Tuning: an in-tree FxHash for every
   map of the views crate, fat LTO, one codegen unit, panic = abort; every existing comparison still 0 differences on the
-  small world (round trip, layers 1 to 7, the feed, the edge sets, short fuzz seeds of layers 2 to 7). The heavy checks
-  are ORCD job scripts in `tools/rust-spike/orcd/`, written and not run: the large and large4 worlds' comparisons, the
-  full fuzz seeds, the memo's 46-mutant sweep and S6's measurement re-run with the memo rows. Its review round is
-  applied ("The review round" under "S6.1 memo port and tuning"): a cleared id listed twice made the port re-derive
-  where Python serves (fixed: each slice deduplicated, as Python's set reads it; a new edge step and fuzz variant catch
-  the old code), and the cluster runbook now runs a smoke pass of 1 or 2 tasks per array before any sweep.
+  small world. The heavy checks are ORCD job scripts in `tools/rust-spike/orcd/`. Their first smoke run on ORCD (at
+  d73c655bd) failed in a way that says nothing about the port: the cluster's copy of the code has no .git, so the dump
+  recorded its revision as null and every romp-spike step refused the snapshot at load. The second review round fixed
+  that and the rest of a fresh review ("The smoke run and the second review round" under "S6.1 memo port and tuning"):
+  the dump takes the revision from the REVISION file the runbook writes, every job output names its revision and a
+  refused or failed rerun can no longer leave an older run's outputs that verify, the mutant tasks fail on a build
+  failure, an error or a control that did not pass, a collate tool checks the pool, the cluster's Python comes from a
+  committed explicit spec whose every package is at least a week old, memory requests come from the smoke run's
+  measured peaks, and the memo's checks gained unsorted cleared lists and a 47th mutant (the slice left unsorted, caught
+  by the edge set and fuzz seed 1). Still not run anywhere: the large and large4 worlds' comparisons, the full fuzz
+  seeds, the 47-mutant sweep and S6's measurement re-run with the memo rows.
 - Before it: S6 done and merged into `romp_fix` from `romp_fix-s6`, and independently reproduced (deciding CPU ratio 5.37
   against the reported 5.24; memory ratio 0.249 against 0.248). The full alternated measurement ran on fresh dumps
   (8 runs per configuration, both interpreters, CPU on the small, large and large4 worlds, memory cold and after
@@ -136,17 +141,19 @@ the small world, a short fuzz seed. Every agent brief for this spike must say so
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: run S6.1's cluster jobs (lczh opens the Duo connection; the main session rsyncs and submits, per
-  `tools/rust-spike/orcd/setup.sh`'s header, every srun and sbatch from the pool's logs directory). First setup, then a
-  smoke pass of 1 or 2 tasks per array, as ENGAGING.md requires before any sweep: `sbatch --array=0 worlds.sbatch` (the
-  small world), `sbatch --array=0,6 fuzz.sbatch` (layer 2's and the memo's seed 1) and `sbatch --array=45,46
-  mutants.sbatch` (the dedup regression mutant and the control). Check each smoke task's steps.tsv (every exit 0) and
-  SHA256SUMS on the pool, the control's "controlPasses" and mutant 45's "caught", and read each task's sacct MaxRSS to
-  size the rest's `--mem`. Then the rest: worlds' large and large4, every other fuzz task (the store's after the worlds),
-  the other 45 mutants, and the measurement after the worlds (sized from the large world's MaxRSS). Fill "S6.1 memo
-  port and tuning" with their results (the large worlds at 0 differences, the fuzz seeds, the mutant table, the memo rows
-  against Python's memoKeyed rows, indicative on ORCD's CPU, with the caveat under "What is not done"), merge
-  `romp_fix-memo2` into `romp_fix`, then S7.
+- Next action: run S6.1's cluster jobs at the new revision, by the runbook in `tools/rust-spike/orcd/setup.sh`'s header
+  (lczh opens the Duo connection; the main session ships and submits, every srun and sbatch from the pool's logs
+  directory). Ship one commit: refuse a dirty worktree, `git archive` that commit to the cluster's code directory (no
+  .git, tracked files only) and write its id to REVISION. Remove the scratch Python environment the first smoke run made
+  from an unpinned resolve (setup refuses it), then run setup (8G). Smoke pass: `sbatch --array=0 worlds.sbatch`,
+  `sbatch --array=0,6 fuzz.sbatch`, `sbatch --array=46,47 mutants.sbatch` (the no-sort mutant and the control). Check
+  them with `collate.py outputs` and `collate.py mutants --tasks 46,47` (this revision, every step 0, every file sealed,
+  the control passing) and sacct (COMPLETED, ExitCode 0:0, MaxRSS). Then the large worlds, fuzz seed 1 of layers 3 to 7
+  and the other 46 mutants; seeds 2 to 6 sized per tool from seed 1's MaxRSS; the store's fuzz task and the measurement
+  only after the large worlds have finished, sized from their MaxRSS; `collate.py` over everything at the end. Fill
+  "S6.1 memo port and tuning" with their results (the large worlds at 0 differences, the fuzz seeds, the mutant table,
+  the memo rows against Python's memoKeyed rows, indicative on ORCD's CPU, with the caveat under "What is not done"),
+  merge `romp_fix-memo2` into `romp_fix`, then S7.
   The decision S7 takes to lczh is unchanged in kind: whether the memoized port's steady state against memoized Python
   (hit against hit, and the blend at production's miss rate) changes the recommendation, given the memory gate's fail on
   real transcripts.
@@ -239,8 +246,8 @@ kernel, where the memory gain does not depend on interpreter speed.
 | `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py` to `dump_layer7.py`), the measurement (`measure.py`, and `measure_drive.py`, which alternates it with `romp-spike measure`) |
 | `rust/crates/romp-views/src/memo.rs`, `fxhash.rs` | S6.1: build_feed's per-session memo (the key, the deps, the LRU cache, the loop), and the in-tree FxHash every map of the crate uses |
 | `romp-spike memo` (`memo_cmd.rs`) | S6.1: change sequences against Python's decisions and bytes, or a dump built three times with the memo against its oracle |
-| `tools/rust-spike/dump_memo.py`, `memo_mutants.py` | S6.1: the memo oracle (the real key over scripted and random change sequences) and the memo's 46 source mutants |
-| `tools/rust-spike/orcd/` | the cluster's job scripts (setup, worlds, fuzz, mutants, measure); every heavy check runs there |
+| `tools/rust-spike/dump_memo.py`, `memo_mutants.py` | S6.1: the memo oracle (the real key over scripted and random change sequences) and the memo's 47 source mutants |
+| `tools/rust-spike/orcd/` | the cluster's job scripts (setup, worlds, fuzz, mutants, measure), the pool checks (`collate.py`) and the cluster Python's explicit spec (`python-linux-64.txt`); every heavy check runs there |
 
 ## Steps
 
@@ -2797,26 +2804,30 @@ The review traced the edge set's two skips to `order` and guessed the fuzz's wer
 - The memo bound in the fixtures is an 8 GB box's (128 MB, and 64 MB for the held aggregate), not this machine's, so the
   file reads the same wherever it is made.
 
-**The cluster jobs (`tools/rust-spike/orcd/`; written, not run).** `setup.sh` (through srun on a compute node: rustup
-1.29.3 checked against the archive's published SHA-256 and against the hash pinned in the script for x86_64 Linux, Rust
-1.100.0 with rustup's per-component checks, the vendored crates checked against Cargo.lock, a scratch CPython 3.12.11,
-exactly the interpreter the port's Unicode tables and fixtures came from, the tuned build and the tests);
-`worlds.sbatch` (array over small, large, large4: a fresh dump, then every comparison and the memo's); `fuzz.sbatch`
-(43 tasks: layers 2 to 7 and the memo at seeds 1 to 6, at the record's sizes, and check_store's 6 seeds); `mutants.sbatch`
-(47 tasks: each memo mutant and the control, built under a `mutant` profile, against the memo edge set and fuzz seed 1;
-each task's status caught, missed, crashed, timedOut, buildFailed or error, from `mutant_status.py`, whose self-test
-covers each); `measure.sbatch` (S6's CPU run with the memo rows, 8 runs, both sides, the production window of S6's own
-`/perf` snapshots). Every correctness job first checks that its Python's Unicode version is the tables' (15.0.0), and
-every job refuses to run unless it was submitted from the pool's logs directory, where its log belongs. The runbook in
-setup.sh's header runs a smoke pass of 1 or 2 tasks per array first and sizes the rest's memory from the smoke tasks'
-sacct MaxRSS (the scripts' `--mem` values are guesses until then). ORCD's x86_64 CPUs are not the Mac's M4 Max, so every
-ratio from there is indicative; the gate's numbers stay the Mac's. Results go to the group pool (named in
-`~/manager/ENGAGING.md`, kept out of the repository), each directory checksummed.
+**The cluster jobs (`tools/rust-spike/orcd/`; smoke-run once at d73c655bd, then revised: "The smoke run and the second
+review round" below).** `setup.sh` (through srun on a compute node: rustup 1.29.3 checked against the archive's
+published SHA-256 and against the hash pinned in the script for x86_64 Linux, Rust 1.100.0 with rustup's per-component
+checks, the vendored crates checked against Cargo.lock, a scratch CPython 3.12.11, exactly the interpreter the port's
+Unicode tables and fixtures came from, made since the second review round from the committed explicit spec
+`python-linux-64.txt`, the tuned build and the tests); `worlds.sbatch` (array over small, large, large4: a fresh dump,
+then every comparison and the memo's); `fuzz.sbatch` (43 tasks: layers 2 to 7 and the memo at seeds 1 to 6, at the
+record's sizes, and check_store's 6 seeds); `mutants.sbatch` (48 tasks since the second review round: each memo mutant
+and the control, built under a `mutant` profile, against the memo edge set and fuzz seed 1; each task's status caught,
+missed, crashed, timedOut, buildFailed or error, from `mutant_status.py`, whose self-test covers each; `collate.py
+mutants` tabulates them); `measure.sbatch` (S6's CPU run with the memo rows, 8 runs, both sides, the production window
+of S6's own `/perf` snapshots). Every correctness job first checks that its Python's Unicode version is the tables'
+(15.0.0), and every job refuses to run unless it was submitted from the pool's logs directory, where its log belongs.
+The runbook in setup.sh's header runs a smoke pass of 1 or 2 tasks per array first and sizes the rest's memory from
+measured sacct MaxRSS (the smoke run's peaks now set fuzz's and mutants' 4G; the large worlds' 24G stays a guess until
+they run). ORCD's x86_64 CPUs are not the Mac's M4 Max, so every ratio from there is indicative; the gate's numbers stay
+the Mac's. Results go to the group pool (named in `~/manager/ENGAGING.md`, kept out of the repository), each directory
+checksummed.
 
-**What is not done.** Every cluster job: the large and large4 worlds' comparisons (the memo there is checked only on the
-small world so far), the full fuzz seeds, the mutant sweep and the measurement, so nothing here says what the memo or the
-tuning buys in CPU. The `peers` facts' host and remote name and the `subagents` component stay constant, since the replay
-has neither attached hosts nor subagent trees.
+**What is not done.** Every cluster job at a revision that can pass (the one smoke run, at d73c655bd, could not: below):
+the large and large4 worlds' comparisons (the memo there is checked only on the small world so far), the full fuzz
+seeds, the mutant sweep and the measurement, so nothing here says what the memo or the tuning buys in CPU. The `peers`
+facts' host and remote name and the `subagents` component stay constant, since the replay has neither attached hosts nor
+subagent trees.
 
 When the measurement is written up, its memo rows must say what they leave out on both sides: the key's stats (both
 sides read recorded identities instead of stat'ing files) and the replay's stand-ins (Python's region subtracts them,
@@ -2858,6 +2869,121 @@ so the hit-against-hit ratio will overstate what the port saves per hit in produ
   the memo edge set and its six plants; the small dump's default memo sequence (8 steps, 0 differences); memo fuzz seeds
   1 to 3 at 200 worlds. Not rerun this round: the layer 1 to 5 dump comparisons, the short fuzz seeds of layers 2 to 7
   and check_store, none of whose code changed except the loader's added refusal, which no dump or fixture meets.
+
+**The smoke run and the second review round (2026-11-26).**
+
+*What the smoke run was for, and what it found.* Before any sweep, the runbook runs one or two tasks of each array on
+ORCD, so that a mistake in the job scripts costs minutes rather than a sweep. The main session ran it at d73c655bd.
+Setup passed. The small world's task did not: every romp-spike step exited 2 with `snapshot.json: Snapshot.world:
+World.repoHead: invalid type: null, expected a string`. The cluster gets the code without its .git directory, so
+dump_world.py's read of the checkout's HEAD found nothing and wrote null into the snapshot's provenance field, which the
+port's loader requires to be a string. That field is not a feed input, so the failure says nothing about the port: no
+romp-spike comparison ran on the small world there. It reproduces here exactly: `git archive` of d73c655bd into scratch,
+dumped without .git, gives `"repoHead": null` and the same message from `romp-spike roundtrip`. The smoke run also gave
+the first measured memory peaks (sacct MaxRSS of each job step): the small world's task 0.72 GB in 19 s (the Python
+steps' peak, since every romp-spike step refused at load), memo fuzz seed 1 0.95 GB in 104 s (2,000 worlds of 8 steps),
+the dedup mutant's task 0.82 GB in 45 s, the control's 0.83 GB in 60 s, setup 2.5 GB in 112 s on 8 CPUs; layer 2's fuzz
+seed 1 was still running after 4 minutes. Separately, the Python environment setup made had resolved `python=3.12.11`'s
+dependencies to the newest conda-forge builds, three of them under a week old (libexpat 2.11.0 and packaging 26.4, both
+built 2026-11-25, and ca-certificates 2026.11.20, built 2026-11-21), against lczh's supply-chain rule.
+
+*The revision fix.* dump_world.py now records the checkout's HEAD where there is one and otherwise the revision named in
+`ROMP_SPIKE_REVISION`, which `orcd/common.sh` exports from the REVISION file the runbook writes beside the code (40 hex
+digits, or every job refuses). It never writes null: with neither it refuses before dumping, a malformed value is
+refused, and when both are there and disagree it refuses. One detail would have defeated the obvious fix: dump_world.py
+clears every `ROMP_` variable before it imports the kernel, so the variable is read first. `measure_drive.py`, the only
+other tool in `tools/rust-spike` that records a revision (`git rev-parse`), takes the same fallback and refuses the
+same way (it used to record an empty revision without a checkout). Shown on a `git archive` copy of the working tree, no
+.git: without the variable, refused (exit 2); with it, the small world dumps OK, its repoHead is d73c655bd30e, and the
+round trip is identical; a malformed value refused; in the worktree, a disagreeing value refused.
+
+*The scripts' review (one must-fix, ten should-fix), all done.*
+- Stale results could pass the pool check (must-fix). A job that died in one of its early checks left the previous run's
+  steps.tsv and SHA256SUMS in place, and they still verified; and a code copy re-shipped without rerunning setup ran the
+  old binary and stamped its outputs with the new revision. Now every job moves its earlier outputs into
+  `<pool>/superseded/<time, job, task>/` (nothing is deleted) before any check that can fail; every output names its
+  revision (a run.txt in every directory, `revision` in each mutant JSON); every job refuses unless setup's outputs
+  verify, setup recorded this revision, and the release binary's SHA-256 is the one setup recorded (`need_built`); the
+  store's fuzz and the measurement refuse a dump of another revision (`need_dump`, by the snapshot's repoHead); and the
+  runbook checks the pool with `collate.py outputs` (run.txt's revision, at least one step and every exit status 0,
+  SHA256SUMS covering every file and verifying) and sacct's State and ExitCode. The cargo target directory moved out of
+  the code copy, so each revision replaces the copy whole.
+- The mutant tasks always exited 0. They now exit 1 for buildFailed, error and a control that did not pass (sacct shows
+  FAILED), and `collate.py mutants` checks that all 48 JSONs are there with their checksums, name one revision and have
+  a passing control, and prints the table: each task's status and checks, the counts, every mutant not caught named.
+- `mutant_status.py` counted a check as passed on exit 0 alone; it now also needs the check's clean summary line (`0
+  differences in 0 steps`, `OK, 0 differences`). Its self-test has 21 cases (9 new), 0 wrong.
+- setup.sh's login-node refusal ran after it had truncated its own steps.tsv, and accepted a stale SLURM_JOB_ID. It now
+  comes first, before anything is created, and needs a job step (SLURM_STEP_ID) of a job squeue lists as running.
+- The runbook rsynced the working tree (local edits, untracked and ignored files) but recorded HEAD. It now refuses a
+  dirty worktree and ships `git archive` of one commit; REVISION is that commit.
+- `memo_mutants.py --apply` removed `<tree>/rust` with no guard; it refuses a tree at, inside or above the repository,
+  and an index outside 0 to 47.
+- worlds.sbatch stopped under `set -e` when a failed dump left no directory to hash (now `|| true`, so the status line
+  and the seal are written), compared a padded `wc` count as a string (a fully passing run exited 1 on macOS; now an awk
+  count and `-eq`), and now removes its dump before remaking it, so an earlier revision's dump cannot stand in for a
+  failed one.
+- Dependent submissions waited forever if their upstream failed. None remain: the store's fuzz task and the measurement
+  are submitted after the large worlds finish, sized from their MaxRSS (a dependency on a job Slurm has forgotten is
+  refused anyway); any added later gets `--kill-on-invalid-dep=yes`.
+- Memory: fuzz.sbatch and mutants.sbatch ask 4G (about 4x the measured 0.95 and 0.83 GB); the worlds job keeps 24G for
+  the large worlds, which the small world's peak does not bound; fuzz seed 1 of layers 3 to 7 runs before their other
+  seeds, which are sized per tool from it; setup asks 8G (measured 2.5 GB).
+- The cluster's Python (should-fix, and the supply-chain finding above): `tools/rust-spike/orcd/python-linux-64.txt` is
+  an explicit conda spec, 21 packages each named by URL and MD5, every one built and uploaded on or before 2026-11-19.
+  It is the environment the cluster made, less pip, setuptools, wheel and packaging (no spike tool, no kernel module the
+  oracles load and no tracked Python file imports them; the only pip use in the repository is codex_runtime's
+  installer, which the oracles never reach and whose spawn their guards would refuse), with libexpat 2.9.0 (built
+  2026-10-26) and ca-certificates 2026.10.23 (built 2026-10-23) for the two newer builds. Dates, MD5s and SHA-256s come
+  from anaconda.org's file listing for each package and sit in the file's header; every MD5 equals the URL's, and every
+  dependency each package declares is met inside the list (python needs libexpat >=2.7.0,<3.0a0). conda's own reader
+  parses it as 21 URLs. setup.sh creates the environment from it (no solve, so nothing resolves to a newer build; conda
+  checks each MD5), refuses an existing environment whose explicit spec differs (the one the smoke run made differs in 8
+  lines), and records the spec. Not run here: conda create is a cluster step.
+
+*The memo lens (six should-fix), all done.*
+- The per-slice sort was never exercised: every list the oracle wrote was sorted, so a port that dropped the sort passed
+  every check. The edge set gains three steps: a second id under s003 listed after its first though it sorts before it
+  (s003 derives on `cleared`, s001 on `peers`), the same list reversed (served), and s003's first id listed again at
+  the head, apart from its other copies (served). The fuzz writes cleared lists in no order, puts each new or repeated
+  id at a random place, has a `-order` variant that only reorders, and seeds two or three ids under one session in half
+  the worlds. The new mutant 46 (the sort removed, the dedup kept) is caught by the edge set (10 differences in 2 steps)
+  and by fuzz seed 1 at 200 worlds (29 in 9). The instructive exception: the first version of the fuzz change, with the
+  random order but the old seeding, gave mutant 46 0 differences, because a slice needs two ids before its order can
+  change, the same lesson as mutant 45's duplicates; seeding two or more ids under one session fixed it.
+- `romp-spike measure cpu --memo` ran memo builds without `memo::validate`; it now validates first (compiled and unit
+  tested; not run, since no measurement runs on this Mac).
+- A skip no frame key explains (`(unknown)`) now stops dump_memo.py, and the port counts a skip that names no key as a
+  difference (planting `(unknown)` into the edge fixture gives 1 difference).
+- Python's tally counted a step as stale when the memo build had raised; it now counts one only when the memo build
+  built, and Python's and the port's stale counts agree (seeds 1, 2, 3 and 12: 191, 183, 183 and 173 on both sides;
+  before, seed 1 printed 107 against 105).
+- The `rerecord` kind did something in 1 step of 39; with nothing stashed it now stashes a helper with the transcript
+  moved (the session's derivation raises and its previous cards are served) and puts it back at the next step: at seed
+  1, 20 stashes and 18 returns.
+- When the memo build raised, the fresh comparison was skipped, though a raising build never frames. The oracle now
+  gives the snapshot the fresh build's frame in that case and compares the fresh bytes: 13 such steps over seeds 1 to 3
+  (2, 10 and 1), 0 differences. That removes the third skip cause listed above (a memo build that raised where the
+  fresh build built); the skips left are the session order and stateUnknown.
+
+*Checks run on this Mac (small world, one process at a time; scratch only).* The release build (35 s). The memo edge
+set, regenerated from a small dump and byte for byte the same under PYTHONHASHSEED 0 and 12345 (0.52 MB): 73 steps, 146
+builds, 291 decisions (203 hits, 86 misses, 6 raises), 64 memo-served builds equal to fresh, 7 stale, 0 differences, 2
+skips (order); the six plants caught with the same counts as before (9 in 2, 4 in 1, 4 in 1, 26 in 7, 10 in 4, 13 in 2).
+Memo fuzz seeds 1 to 3 at 200 worlds of 8 steps: 7,905 decisions, 0 differences, 91 skips (order 61, stateUnknown 30),
+none unexplained; seed 12, 0 differences. Mutant 46 compiled and run as above; no other mutant was run (whether fuzz
+seed 1 still catches mutant 45 under the changed generator is the sweep's to show; the edge set's duplicate step,
+unchanged, caught it in the first review round). Rust tests:
+`memo_edge` (2), romp-views' 101 unit tests, romp-spike's 10. The job scripts on a scratch copy of the cluster layout
+(a `git archive` of the tree, the real release binary, this Mac's CPython 3.12.11, setup's outputs as setup writes
+them): worlds.sbatch's 19 small-world steps all 0 and the task exit 0; each refusal (another revision, no REVISION, a
+binary that is not setup's, setup's outputs not verifying, a wrong submit directory, a missing or older dump for the
+store's fuzz and the measurement, setup.sh outside a live job step) exits 2 with the earlier outputs set aside, and
+`collate.py` fails the directory; mutants.sbatch with a stand-in cargo: the control with the real binary passed (exit
+0), mutant 46's real binary caught (exit 0), a control reporting differences failed (exit 1), a build failure
+buildFailed (exit 1), and `collate.py mutants` flagged both; `collate.py --self-test` 22 cases, 0 wrong. Not run here:
+conda create, setup.sh past its refusal, the fuzz and measurement jobs' work, and the full workspace's tests (setup runs
+them on ORCD).
 
 ## Log
 
@@ -3189,3 +3315,21 @@ so the hit-against-hit ratio will overstate what the port saves per hit in produ
     pinned, jobs refused unless submitted from the pool's logs directory, mutant statuses kept apart (crashed, timedOut
     and buildFailed are not caught), 46 mutants (13 for the recorded-fact lookups, the LRU touch and the held forget, 1
     for the dedup regression). Not done: memory requests sized from a measured peak (needs the smoke tasks' MaxRSS).
+- 2026-11-26: S6.1's smoke run on ORCD (at d73c655bd, by the main session) and the second review round ("The smoke run
+  and the second review round" under "S6.1 memo port and tuning"), light checks only on this Mac.
+  - Found: every romp-spike step of the small world's task refused the snapshot (`World.repoHead: invalid type: null`):
+    the cluster's copy has no .git, so the dump recorded a null revision. Reproduced here; nothing about the port was
+    learned from that task. Measured peaks: 0.72 GB (small world), 0.95 GB (memo fuzz seed 1), 0.82 and 0.83 GB (mutant
+    tasks), 2.5 GB (setup). The unpinned conda resolve had pulled three packages under a week old.
+  - Fixed: the revision comes from REVISION (`ROMP_SPIKE_REVISION`) without a checkout, never null; stale or
+    mismatched outputs can no longer pass (earlier outputs set aside first, the revision in every output, setup's
+    revision and binary hash checked by every job, a collate tool and sacct in the runbook); mutant tasks fail on
+    buildFailed, error or a failing control; checks pass only on their clean summary line; setup refuses outside a live
+    job step before creating anything; one commit shipped by `git archive`; no dependent submissions; memory from the
+    measured peaks; the cluster Python from a committed explicit spec, every package built by 2026-11-19. The memo's
+    checks: unsorted cleared lists and a non-adjacent duplicate in the edge set and the fuzz, mutant 46 (no sort; edge
+    set 10 differences, fuzz seed 1 29), validation before the memo rows, unexplained skips refused, stale counted alike
+    on both sides, rerecord doing work, memo-raised steps compared fresh.
+  - Checked: memo edge set 73 steps, 291 decisions, 0 differences (byte for byte under two hash seeds); memo fuzz seeds
+    1 to 3 at 200 worlds, 7,905 decisions, 0 differences; the job scripts' passes and refusals on a scratch copy of the
+    cluster layout.

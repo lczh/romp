@@ -8,13 +8,15 @@
 # outputs, a steps.tsv of exit statuses and SHA256SUMS go to the pool.
 # Smoke first, the small world alone, then the rest (setup.sh's header), from the pool's logs directory:
 #   sbatch --array=0 ~/orcd/scratch/agents/romp_fix/romp/tools/rust-spike/orcd/worlds.sbatch     (after setup.sh)
+# The task exits 1 when any step failed (steps.tsv's second column), 2 when it refused to start.
 #SBATCH --job-name=romp-fix-memo2-worlds
 #SBATCH --account=mit_general
 #SBATCH --partition=mit_normal
 #SBATCH --array=0-2
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
-# --mem: a guess for the large world (its peak was never measured): sacct MaxRSS after it runs
+# --mem: the small world peaked at 0.72 GB (sacct MaxRSS, the ORCD smoke run of d73c655bd, 19 s), which does not bound
+# the large worlds (a 163 MB dump held in one Python process): 24G stays a guess until their MaxRSS is read
 #SBATCH --mem=24G
 #SBATCH --time=03:00:00
 #SBATCH --output=%x_%A_%a.out
@@ -28,15 +30,19 @@ if [ "${1:-}" != "--step" ]; then
 fi
 
 source "$HERE/common.sh"
-need_built
-need_tables_python
 WORLDS=(small large large4)
 W="${WORLDS[${SLURM_ARRAY_TASK_ID:-0}]}"
 D="$ROOT/dumps/$W"
 OUT="$RESULTS/worlds/$W"
-mkdir -p "$OUT" "$ROOT/dumps"
-: > "$OUT/steps.tsv"
+fresh_out "$OUT"
+start_job
+need_built
+need_tables_python
 echo "world $W, revision $REVISION, $(hostname -s), $(date -u +%FT%TZ)" | tee "$OUT/run.txt"
+: > "$OUT/steps.tsv"
+# the dump is remade every run (scratch): an earlier revision's must not stand in for it if the dump step fails
+rm -rf "$D"
+mkdir -p "$ROOT/dumps"
 cd "$CODE"
 
 run dump "$PYTHON" "$SPIKE/dump_world.py" --world "$W" --out "$D"
@@ -53,9 +59,10 @@ run memo-dump "$BIN" memo "$D"
 run memo-sequence "$PYTHON" "$SPIKE/dump_memo.py" --dump "$D" --bin "$BIN" --out "$OUT/memo_sequence.json"
 run store "$PYTHON" "$SPIKE/check_store.py" --dump "$D" --bin "$BIN" --json "$OUT/store.json"
 # the dumps' answer files are large (the large world's layer1.json is 36 MB): keep their sizes and hashes, not copies
-(cd "$D" && sha256sum snapshot.json layer*.json oracle/*.json 2>/dev/null) > "$OUT/dump-files.sha256"
+# (a failed dump leaves no directory: the status line and the seal must still be written)
+(cd "$D" && sha256sum snapshot.json layer*.json oracle/*.json 2>/dev/null) > "$OUT/dump-files.sha256" || true
 
-failed=$(awk -F'\t' '$2 != 0' "$OUT/steps.tsv" | wc -l)
-echo "world $W: $(wc -l < "$OUT/steps.tsv" | tr -d " ") steps, $(echo $failed) failed" | tee -a "$OUT/run.txt"
+failed=$(awk -F'\t' '$2 != 0 {n++} END {print n + 0}' "$OUT/steps.tsv")
+echo "world $W: $(awk 'END {print NR}' "$OUT/steps.tsv") steps, $failed failed" | tee -a "$OUT/run.txt"
 seal
-[ "$failed" = 0 ]
+[ "$failed" -eq 0 ]

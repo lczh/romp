@@ -69,14 +69,32 @@ def interp_label(exe):
 
 
 def git_rev():
-    try:
-        rev = subprocess.run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
-                             timeout=30).stdout.strip()
-        dirty = subprocess.run(["git", "-C", REPO, "status", "--porcelain", "--untracked-files=no"],
-                               capture_output=True, text=True, timeout=30).stdout.strip()
+    """The code's revision: the checkout's HEAD and whether tracked files differ from it; else, for a copy without .git
+    (the cluster, where tools/rust-spike/orcd/setup.sh's runbook ships `git archive` of one commit), the revision
+    orcd/common.sh exports as ROMP_SPIKE_REVISION ("dirty" then unknown: null). Refuses with neither, so no run file
+    goes unattributed, and when the two disagree."""
+    given = os.environ.get("ROMP_SPIKE_REVISION", "").strip()
+    if given and not (12 <= len(given) <= 40 and all(c in "0123456789abcdef" for c in given)):
+        raise DriveError("ROMP_SPIKE_REVISION=%r is not a git revision (12 to 40 lowercase hex digits)" % given)
+    rev = ""
+    if os.path.exists(os.path.join(REPO, ".git")):
+        try:
+            p = subprocess.run(["git", "-C", REPO, "rev-parse", "--short=12", "HEAD"], capture_output=True, text=True,
+                               timeout=30)
+            rev = p.stdout.strip() if p.returncode == 0 else ""
+            if rev:
+                dirty = subprocess.run(["git", "-C", REPO, "status", "--porcelain", "--untracked-files=no"],
+                                       capture_output=True, text=True, timeout=30).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            rev = ""
+    if rev:
+        if given and given[:len(rev)] != rev:
+            raise DriveError("the checkout's HEAD is %s but ROMP_SPIKE_REVISION names %s" % (rev, given))
         return {"rev": rev, "dirty": bool(dirty)}
-    except (OSError, subprocess.SubprocessError):
-        return None
+    if given:
+        return {"rev": given[:12], "dirty": None, "source": "ROMP_SPIKE_REVISION"}
+    raise DriveError("no revision to record: %s has no git checkout and ROMP_SPIKE_REVISION is not set (on the cluster, "
+                     "orcd/common.sh exports it from the REVISION file beside the code)" % REPO)
 
 
 def machine():

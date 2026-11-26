@@ -438,7 +438,13 @@ fn run_case(case: &J, file: &Path, cname: &str, plant: Option<Plant>, t: &mut Ta
             }
         };
         if fw["frameDiffers"] == true {
-            t.fresh_skipped += 1;
+            // a skip must name the frame keys that explain it (dump_memo.py refuses to write one that names none)
+            let keys: Vec<&str> = fw["keys"].as_array().into_iter().flatten().filter_map(J::as_str).collect();
+            if keys.is_empty() || keys.contains(&"(unknown)") {
+                t.diff(format!("{at}: Python's fresh comparison is skipped for no frame key it names ({keys:?})"));
+            } else {
+                t.fresh_skipped += 1;
+            }
         } else if let Some((c, w)) = &fresh_digest {
             if fw["canonSha1"].as_str() != Some(c) || fw["wireSha1"].as_str() != Some(w) {
                 t.diff(format!("{at}: the fresh build's bytes differ from Python's fresh build"));

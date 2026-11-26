@@ -1,19 +1,21 @@
 #!/bin/bash
 # S6's CPU measurement re-run with S6.1's memo rows, on the cluster (rust/SPIKE.md, "S6.1 memo port and tuning"). Uses
-# worlds.sbatch's fresh dumps (submit with --dependency=afterok:<the worlds job>): measure_drive.py alternates
+# worlds.sbatch's fresh dumps of this revision (submit it only after the large worlds tasks have finished and checked
+# out, with --mem from their MaxRSS: setup.sh's header): measure_drive.py alternates
 # measure.py (the held rows as in S6, plus --memo: the real key over the recorded facts) and `romp-spike measure --memo`
 # (the tuned build: FxHash, LTO, one codegen unit; the held rows plus the memo rows), 8 runs on the large, large4 and
 # small worlds, with the production window of S6's own run (rust/notes/s6-runs.json's two /perf snapshots: 7.7% misses,
 # 0.46 a build) for the blend. ORCD's CPUs are not the Mac's (x86_64 Linux, not Apple M4 Max), so every ratio here is
 # indicative; the gate's numbers stay the Mac's (arm64 CPython 3.13.18), and the driver's gate verdict reads
 # "insufficient" for this interpreter by design. Not preemptable: a measurement cut in the middle is wasted.
-#   sbatch --dependency=afterok:<worlds job> ~/orcd/scratch/agents/romp_fix/romp/tools/rust-spike/orcd/measure.sbatch
+#   sbatch --mem=<from the large worlds tasks> ~/orcd/scratch/agents/romp_fix/romp/tools/rust-spike/orcd/measure.sbatch
+# The job exits 1 when a step failed, 2 when it refused to start.
 #SBATCH --job-name=romp-fix-memo2-measure
 #SBATCH --account=mit_general
 #SBATCH --partition=mit_normal
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-# --mem: a guess: size it from the large worlds task's sacct MaxRSS (setup.sh's header)
+# --mem: a guess; the sbatch line overrides it with about 1.5x the large worlds tasks' sacct MaxRSS (setup.sh's header)
 #SBATCH --mem=24G
 #SBATCH --time=06:00:00
 #SBATCH --output=%x_%j.out
@@ -27,13 +29,13 @@ if [ "${1:-}" != "--step" ]; then
 fi
 
 source "$HERE/common.sh"
-need_built
 OUT="$RESULTS/measure"
-mkdir -p "$OUT"
+fresh_out "$OUT"
+start_job
+need_built
+need_dump "$ROOT/dumps/large" "$ROOT/dumps/large4" "$ROOT/dumps/small"
+echo "measure, revision $REVISION, $(hostname -s), $(date -u +%FT%TZ)" | tee "$OUT/run.txt"
 : > "$OUT/steps.tsv"
-for w in large large4 small; do
-    [ -f "$ROOT/dumps/$w/snapshot.json" ] || die "no dump of $w: run worlds.sbatch first"
-done
 {
     echo "revision $REVISION, $(hostname -s), $(date -u +%FT%TZ)"
     uname -a

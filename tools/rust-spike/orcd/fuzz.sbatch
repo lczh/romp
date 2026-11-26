@@ -1,9 +1,11 @@
 #!/bin/bash
 # The full fuzz seeds of every layer and of the memo on the cluster (rust/SPIKE.md, S6.1): one array task per
 # (tool, seed), at the sizes every step's record used: layers 2 to 5 at 10,000 cases a seed, layers 6 and 7 at 4,000
-# worlds, the memo at 2,000 worlds of 8 steps, seeds 1 to 6; and the transcript store's 6 fuzz seeds over the small and
-# large dumps (task 42; needs worlds.sbatch's dumps: submit with --dependency=afterok:<the worlds job>). Each task's
-# output and exit status go to the pool. Restartable (a task redoes its seed), so the preemptable partition.
+# worlds, the memo at 2,000 worlds of 8 steps, seeds 1 to 6 (task 7 * (seed - 1) + t, t = 0 layer2, 1 layer3, 2 layer4,
+# 3 layer5, 4 layer6, 5 layer7, 6 memo); and the transcript store's 6 fuzz seeds over the small and large dumps (task
+# 42; it reads worlds.sbatch's dumps: submit it only after the large worlds tasks have finished, with --mem sized from
+# their MaxRSS, setup.sh's header). Each task's output and exit status go to the pool. Restartable (a task redoes its
+# seed), so the preemptable partition. The task exits 1 when its fuzz step failed, 2 when it refused to start.
 # Smoke first, tasks 0 and 6 (layer 2's and the memo's seed 1), then the rest (setup.sh's header), from the pool's
 # logs directory:
 #   sbatch --array=0,6 ~/orcd/scratch/agents/romp_fix/romp/tools/rust-spike/orcd/fuzz.sbatch     (after setup.sh)
@@ -13,8 +15,10 @@
 #SBATCH --array=0-42%16
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
-# --mem: a guess: size the rest from the smoke tasks' sacct MaxRSS (setup.sh's header)
-#SBATCH --mem=8G
+# --mem: about 4x the measured peak: memo fuzz seed 1 peaked at 0.95 GB (sacct MaxRSS, the ORCD smoke run of
+# d73c655bd, 104 s); layers 3 to 7 are measured by their seed-1 tasks before seeds 2 to 6 go in, and task 42 (the store,
+# over the large dump) gets --mem on its sbatch line from the large worlds tasks' MaxRSS (setup.sh's header)
+#SBATCH --mem=4G
 #SBATCH --time=03:00:00
 #SBATCH --requeue
 #SBATCH --output=%x_%A_%a.out
@@ -32,8 +36,6 @@ if [ "${1:-}" != "--step" ]; then
 fi
 
 source "$HERE/common.sh"
-need_built
-need_tables_python
 TASKS=()
 for seed in 1 2 3 4 5 6; do
     TASKS+=("layer2 $seed dump_layer2.py --fuzz 10000 --seed $seed")
@@ -49,10 +51,13 @@ I="${SLURM_ARRAY_TASK_ID:-0}"
 [ "$I" -lt "${#TASKS[@]}" ] || die "task $I: only ${#TASKS[@]} tasks"
 read -r tool seed script args <<< "${TASKS[$I]}"
 OUT="$RESULTS/fuzz/$tool-seed$seed"
-rm -rf "$OUT"
-mkdir -p "$OUT"
-: > "$OUT/steps.tsv"
+fresh_out "$OUT"
+start_job
+need_built
+need_tables_python
+[ "$tool" != store ] || need_dump "$ROOT/dumps/small" "$ROOT/dumps/large"
 echo "task $I: $tool seed $seed, revision $REVISION, $(hostname -s), $(date -u +%FT%TZ)" | tee "$OUT/run.txt"
+: > "$OUT/steps.tsv"
 cd "$CODE"
 # shellcheck disable=SC2086  # $args is the tool's flags, split on purpose
 run fuzz "$PYTHON" "$SPIKE/$script" $args --bin "$BIN"

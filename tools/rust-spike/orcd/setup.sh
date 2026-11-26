@@ -3,45 +3,73 @@
 # ~/manager/ENGAGING.md). Idempotent: each part is skipped when already in place, and checked either way.
 #
 # Before it, from the Mac (the main session, after lczh opens the Duo connection; light, no build), with CLUSTER the ssh
-# alias ENGAGING.md names:
-#   cd <worktree>/rust && ~/.cargo/bin/cargo vendor --offline --locked --versioned-dirs /tmp/romp-fix-vendor
+# alias ENGAGING.md names and A the worktree. The code goes over as ONE commit's tracked files (git archive: no .git, no
+# untracked or ignored file, no local edit), and REVISION names exactly that commit:
+#   [ -z "$(git -C A status --porcelain)" ] || { echo "A has local changes: commit them or stash them first"; false; }
+#   REV=$(git -C A rev-parse HEAD)
+#   cd A/rust && ~/.cargo/bin/cargo vendor --offline --locked --versioned-dirs /tmp/romp-fix-vendor
 #   rsync -a --delete /tmp/romp-fix-vendor/ CLUSTER:orcd/scratch/agents/romp_fix/vendor/
-#   rsync -a --delete --exclude .git --exclude rust/target <worktree>/ CLUSTER:orcd/scratch/agents/romp_fix/romp/
-#   git -C <worktree> rev-parse HEAD | ssh CLUSTER 'cat > orcd/scratch/agents/romp_fix/REVISION'
+#   git -C A archive --format=tar "$REV" | ssh CLUSTER 'set -e; cd orcd/scratch/agents/romp_fix; rm -rf romp.new;
+#       mkdir romp.new; tar -x -f - -C romp.new; rm -rf romp; mv romp.new romp'
+#   echo "$REV" | ssh CLUSTER 'cat > orcd/scratch/agents/romp_fix/REVISION'
 #   echo <the pool's agent-runs/romp_fix, ENGAGING.md> | ssh CLUSTER 'cat > orcd/scratch/agents/romp_fix/RESULTS'
 #   rm -rf /tmp/romp-fix-vendor
 # Then, on the cluster. Every srun and sbatch below runs from the results' logs directory: each job script's --output is
-# relative to the submit directory, and common.sh refuses a job submitted from anywhere else, so no log lands in $HOME.
-#   cd "$(cat ~/orcd/scratch/agents/romp_fix/RESULTS)/logs"
-#   O=~/orcd/scratch/agents/romp_fix/romp/tools/rust-spike/orcd
+# relative to the submit directory, and every job refuses to run when submitted from anywhere else, so no log lands in
+# $HOME. No submission carries a dependency (sbatch refuses one on a job Slurm has already forgotten, and a job whose
+# upstream failed would wait forever; any dependency added later gets --kill-on-invalid-dep=yes).
+#   R=~/orcd/scratch/agents/romp_fix; mkdir -p "$(cat $R/RESULTS)/logs"; cd "$(cat $R/RESULTS)/logs"
+#   O=$R/romp/tools/rust-spike/orcd; REV=$(cat $R/REVISION); P=$R/py/bin/python3
 #   srun --account=mit_general --partition=mit_normal --job-name=romp-fix-memo2-setup --ntasks=1 --cpus-per-task=8 \
-#        --mem=16G --time=01:00:00 bash $O/setup.sh                     (on a compute node, never the login node)
+#        --mem=8G --time=01:00:00 bash $O/setup.sh                      (on a compute node, never the login node)
+#   $P $O/collate.py outputs --revision "$REV" ../setup
+# (setup peaked at 2.5 GB in 112 s on 8 CPUs, sacct MaxRSS of the ORCD smoke run of d73c655bd.) The Python environment
+# that smoke run made came from an unpinned resolve; setup refuses it (step 4): remove $R/py once (scratch) before it.
 # The jobs name the partitions ENGAGING.md assigns: mit_normal for the worlds and the measurement, which must not be cut,
 # mit_preemptable for the restartable fuzz and mutant tasks.
 #
 # First a smoke pass, one or two tasks of each array (ENGAGING.md: test with 1-2 jobs before any sweep):
 #   sbatch --array=0 $O/worlds.sbatch            the small world: a fresh dump and every comparison on it
 #   sbatch --array=0,6 $O/fuzz.sbatch            layer 2's fuzz seed 1 and the memo's fuzz seed 1 (neither reads a dump)
-#   sbatch --array=45,46 $O/mutants.sbatch       mutant 45 (the review's dedup regression, caught on the Mac by the
-#                                                edge set and fuzz seed 1) and task 46, the unmutated control
-# Check them on the pool before anything else is submitted:
-#   - worlds/small, fuzz/layer2-seed1 and fuzz/memo-seed1: every row of steps.tsv has exit status 0 (its 2nd column), and
-#     `(cd <dir> && sha256sum -c --quiet SHA256SUMS)` prints nothing;
-#   - mutants/46.json says "controlPasses": true and mutants/45.json "status": "caught" (each with its .sha256 verifying);
-#   - each smoke task's peak memory: `sacct -j <job> --format=JobID%20,JobName%28,MaxRSS,Elapsed,State`. Give each array's
-#     remaining tasks about 1.5x its smoke task's MaxRSS with `--mem=` on the sbatch line (it overrides the script's
-#     guess; keep it near a proportional share for the job's --cpus-per-task). The small world's peak does not bound the
-#     large world's, so the worlds job keeps its 24G for the large tasks; measure.sbatch, which holds the large world in
-#     one Python process as the large worlds task does, is sized from that task's MaxRSS once it has run.
-# Then the rest:
-#   W=$(sbatch --parsable --array=1-2 $O/worlds.sbatch)                       the large and large4 worlds
-#   sbatch --mem=<from the smoke> --array=1-5,7-41%16 $O/fuzz.sbatch         every other fuzz seed
-#   sbatch --mem=<from the smoke> --dependency=afterok:$W --array=42 $O/fuzz.sbatch   the store's fuzz (reads the dumps)
-#   sbatch --mem=<from the smoke> --array=0-44%12 $O/mutants.sbatch          the other 45 mutants
-#   sbatch --mem=<from the large worlds task> --dependency=afterok:$W $O/measure.sbatch
-# Cancel by name if anything goes wrong: scancel -u "$USER" --name=romp-fix-memo2-<worlds|fuzz|mutants|measure>.
+#   sbatch --array=46,47 $O/mutants.sbatch       mutant 46 (each cleared slice left unsorted, caught on the Mac by the
+#                                                edge set and fuzz seed 1) and task 47, the unmutated control
+# Check them on the pool before anything else is submitted (each check names what fails):
+#   $P $O/collate.py outputs --revision "$REV" ../worlds/small ../fuzz/layer2-seed1 ../fuzz/memo-seed1
+#       (run.txt names this revision, steps.tsv has rows and every exit status is 0, SHA256SUMS covers every file
+#       and verifies)
+#   $P $O/collate.py mutants --revision "$REV" --tasks 46,47 ../mutants
+#       (each JSON and its .sha256 there, this revision, the control passing; mutant 46 should read caught)
+#   sacct -j <job> --format=JobID%20,JobName%28,State,ExitCode,MaxRSS,Elapsed     for each smoke job: every line
+#       COMPLETED with ExitCode 0:0 (a task that refused or failed exits 2 or 1), and the MaxRSS of each task's step
+# Memory (sacct MaxRSS of the ORCD smoke run of d73c655bd): worlds small 0.72 GB, memo fuzz seed 1 0.95 GB, the mutant
+# tasks 0.82 and 0.83 GB; so fuzz.sbatch and mutants.sbatch ask 4G (about 4x), and the worlds job keeps 24G for the large
+# worlds, whose peak the small world's does not bound. Layer 2's fuzz seed 1 ran past 4 minutes there; layers 3 to 7
+# were not measured: their seed-1 tasks go in first.
+# Then the rest (each wave checked as above before the next that depends on its numbers):
+#   sbatch --array=1-2 $O/worlds.sbatch                      the large and large4 worlds
+#   sbatch --array=1-5 $O/fuzz.sbatch                        seed 1 of layers 3 to 7 (4G)
+#   sbatch --array=0-45%12 $O/mutants.sbatch                 the other 46 mutants
+# When fuzz tasks 0 to 6 have finished and check out, read each tool's seed-1 MaxRSS: tool t's other seeds are tasks
+# t+7, t+14, t+21, t+28 and t+35 (t: 0 layer2, 1 layer3, 2 layer4, 3 layer5, 4 layer6, 5 layer7, 6 memo). Submit them
+# at 4G when every seed-1 peak is under 1 GB:
+#   sbatch --array=7-41%16 $O/fuzz.sbatch
+# else give a tool above 1 GB its own line with about 4x its peak (sbatch --mem=<4x>G --array=<its five tasks>) and the
+# others the line above without those tasks.
+# When the large worlds tasks have finished and check out ($P $O/collate.py outputs --revision "$REV" ../worlds/large
+# ../worlds/large4; sacct COMPLETED 0:0), take M = about 1.5x the larger of their two MaxRSS, in whole G, and submit what
+# reads their dumps:
+#   sbatch --mem=<M>G --array=42 $O/fuzz.sbatch               the store's fuzz (the small and large dumps)
+#   sbatch --mem=<M>G $O/measure.sbatch                       the measurement (holds the large world, as those tasks do)
+# At the end, with sacct COMPLETED 0:0 for every task:
+#   $P $O/collate.py outputs --revision "$REV" ../fuzz/* ../measure        (43 fuzz directories and the measurement)
+#   $P $O/collate.py mutants --revision "$REV" ../mutants                  (all 48 JSONs: the table, each missed one named)
+# Earlier outputs a rerun replaced are under ../superseded/ (nothing is deleted). Cancel by name if anything goes wrong:
+#   scancel -u "$USER" --name=romp-fix-memo2-<worlds|fuzz|mutants|measure>
 #
 # What it does:
+#   0. Refuses to run anywhere but a live srun step (SLURM_STEP_ID set, and squeue lists the job as RUNNING), before it
+#      creates or changes anything: a login-node shell can carry a stale SLURM_JOB_ID (a shell that outlived its srun) or
+#      an salloc's (no step). Then it sets the last setup's outputs aside, so a failed setup leaves none that verify.
 #   1. rustup 1.29.3, pinned: rustup-init for this machine's triple from the release archive
 #      (static.rust-lang.org/rustup/archive/1.29.3/<triple>/), checked against the archive's published .sha256 and
 #      against the SHA-256 pinned below for that triple (x86_64-unknown-linux-gnu's taken from the archive on 2026-11-26;
@@ -53,24 +81,39 @@
 #      each file against it, and the crate against Cargo.lock's checksum, at every build); CARGO_HOME/config.toml
 #      replaces crates.io with that directory and turns the network off, so every build is offline and --locked.
 #   4. Python: ROMP_FIX_PYTHON when set; else CPython 3.12.11 exactly, in scratch, made with lczh's existing
-#      ~/miniforge3 conda (read-only use: the package cache is redirected to scratch and the base environment is
-#      untouched; conda checks each package's hash from the channel's repodata; HOME points at scratch for the conda
-#      calls, so conda's registration of the new prefix in ~/.conda/environments.txt lands there, not in $HOME). 3.12.11
+#      ~/miniforge3 conda from the committed explicit spec python-linux-64.txt (every package named by URL and MD5, each
+#      built on or before 2026-11-19, a week before it was pinned; conda checks each download's MD5; no solve, so no
+#      dependency resolves to a newer build), read-only use of that conda: the package cache is redirected to scratch,
+#      the base environment is untouched, and HOME points at scratch for the conda calls, so conda's registration of the
+#      new prefix in ~/.conda/environments.txt lands there, not in $HOME. An existing environment whose explicit spec is
+#      not the committed one is refused (remove it and run setup again), so a stale environment is never used. 3.12.11
 #      because the port's regex and str.upper tables (pyre_tables.rs, pystr_tables.rs) and every committed fixture were
 #      generated under it, with Unicode 15.0.0; a later Python's Unicode tables could turn a cluster difference into an
 #      environment artifact. Its Unicode version is checked against the tables' here and by every correctness job
-#      (common.sh's need_tables_python); its exact spec is recorded.
-#   5. The release build of romp-spike (LTO, one codegen unit: rust/Cargo.toml) and the workspace's tests, once, logged.
-# Results: <RESULTS>/setup/ (versions, the conda spec, the test log, checksums).
+#      (common.sh's need_tables_python); the spec it used is recorded.
+#   5. The release build of romp-spike (LTO, one codegen unit: rust/Cargo.toml) and the workspace's tests, once, logged;
+#      the binary's SHA-256 and the revision recorded last, which every job checks (common.sh's need_built).
+# Results: <RESULTS>/setup/ (run.txt, versions, the Python spec, the test log, the binary's SHA-256, checksums).
+
+# 0. a live srun step, before anything is created or truncated
+if [ -z "${SLURM_JOB_ID:-}" ] || [ -z "${SLURM_STEP_ID:-}" ] \
+   || [ "$(squeue -h -j "$SLURM_JOB_ID" -o %T 2>/dev/null)" != RUNNING ]; then
+    echo "romp_fix: run setup.sh on a compute node through srun (its header), not on a login node (SLURM_JOB_ID" \
+         "'${SLURM_JOB_ID:-}', SLURM_STEP_ID '${SLURM_STEP_ID:-}': no live job step)" >&2
+    exit 2
+fi
 source "$(dirname "$(realpath "$0")")/common.sh"
 
 RUSTUP_VERSION=1.29.3
 RUST_VERSION=1.100.0
 PY_VERSION=3.12.11
 OUT="$RESULTS/setup"
-mkdir -p "$OUT" "$CARGO_HOME" "$RUSTUP_HOME"
+fresh_out "$OUT"
+start_job
+[ "$REVISION" != unknown ] || die "no revision: $ROOT/REVISION must hold the 40-digit commit id the runbook shipped"
+echo "setup, revision $REVISION, $(hostname -s), $(date -u +%FT%TZ)" | tee "$OUT/run.txt"
 : > "$OUT/steps.tsv"
-[ -n "${SLURM_JOB_ID:-}" ] || die "run this on a compute node through srun (see the header), not on a login node"
+mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
 
 # 1. rustup
 triple="$(uname -m)-unknown-linux-gnu"
@@ -132,23 +175,29 @@ EOF
 ls "$VENDOR" > "$OUT/vendored-crates.txt"
 
 # 4. Python
+SPEC="$CODE/tools/rust-spike/orcd/python-linux-64.txt"
 CONDA="$HOME/miniforge3/bin/conda"
-mkdir -p "$ROOT/home"
-if [ -z "${ROMP_FIX_PYTHON:-}" ] && [ ! -x "$PYTHON" ]; then
-    [ -x "$CONDA" ] || die "no Python: set ROMP_FIX_PYTHON to a CPython $PY_VERSION (no $CONDA to make one)"
-    HOME="$ROOT/home" CONDA_PKGS_DIRS="$ROOT/conda-pkgs" "$CONDA" create -y -p "$ROOT/py" --override-channels \
-        -c conda-forge "python=$PY_VERSION"
+spec_urls() { grep '^https://' "$1" | sort; }
+if [ -z "${ROMP_FIX_PYTHON:-}" ]; then
+    [ "$(uname -sm)" = "Linux x86_64" ] || die "the pinned Python spec is linux-64's: set ROMP_FIX_PYTHON on $(uname -sm)"
+    [ -x "$CONDA" ] || die "no $CONDA to make the pinned Python: set ROMP_FIX_PYTHON to a CPython $PY_VERSION"
+    mkdir -p "$ROOT/home"
+    if [ ! -e "$ROOT/py" ]; then
+        HOME="$ROOT/home" CONDA_PKGS_DIRS="$ROOT/conda-pkgs" "$CONDA" create -y -p "$ROOT/py" --file "$SPEC"
+    fi
+    [ -d "$ROOT/py/conda-meta" ] || die "$ROOT/py is not a conda environment: remove it and run setup again"
+    HOME="$ROOT/home" "$CONDA" list -p "$ROOT/py" --explicit --md5 > "$OUT/python-conda-spec.txt"
+    diff <(spec_urls "$SPEC") <(spec_urls "$OUT/python-conda-spec.txt") > "$OUT/python-spec.diff" \
+        || die "the environment at $ROOT/py is not the committed $SPEC (see $OUT/python-spec.diff): remove $ROOT/py and run setup again"
+    rm -f "$OUT/python-spec.diff"
+    cp "$SPEC" "$OUT/python-linux-64.txt"
 fi
 "$PYTHON" -c 'import platform, unicodedata; print("python", platform.python_version(), "unicode", unicodedata.unidata_version)' \
     | tee -a "$OUT/versions.txt"
 if [ -z "${ROMP_FIX_PYTHON:-}" ]; then
-    grep -q "^python $PY_VERSION " "$OUT/versions.txt" \
-        || die "$PYTHON is not CPython $PY_VERSION (an older environment there? remove $ROOT/py and run setup again)"
+    grep -q "^python $PY_VERSION " "$OUT/versions.txt" || die "$PYTHON is not CPython $PY_VERSION"
 fi
 need_tables_python
-if [ -x "$CONDA" ] && [ -d "$ROOT/py/conda-meta" ]; then
-    HOME="$ROOT/home" "$CONDA" list -p "$ROOT/py" --explicit --md5 > "$OUT/python-conda-spec.txt"
-fi
 
 # 5. the build and the tests
 cd "$CODE/rust"
@@ -157,6 +206,6 @@ run cargo-test cargo test --offline --locked -j "$JOBS" -- --test-threads="$JOBS
 grep -q $'^cargo-build\t0\t' "$OUT/steps.tsv" || die "the release build failed (see $OUT/cargo-build.txt)"
 grep -q $'^cargo-test\t0\t' "$OUT/steps.tsv" || die "the tests failed (see $OUT/cargo-test.txt)"
 sha256sum "$BIN" | tee "$OUT/romp-spike.sha256.txt"
-echo "revision $REVISION" >> "$OUT/versions.txt"
 uname -a >> "$OUT/versions.txt"
+echo "revision $REVISION" >> "$OUT/versions.txt"     # last: need_built reads it as setup having finished this revision
 seal

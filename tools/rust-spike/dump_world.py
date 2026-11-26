@@ -63,6 +63,7 @@ COVERAGE_SCHEMA = "romp-spike-coverage/1"
 MARKER = ".romp-spike-dump"      # an output directory this tool made, and so may clear
 RUN_FILE = "run.json"            # the one output that differs between two runs by design
 SIZE_CAP = 1 << 30               # nothing over ~1 GB (the spike's rule)
+REVISION_ENV = "ROMP_SPIKE_REVISION"   # the revision of a copy without .git (the cluster; tools/rust-spike/orcd/common.sh)
 
 # The two designed sizes (s2-design.md "Sizes"): the four designed sessions, small at 80 records with s001's chat at
 # 10 turns; large at 3,000 records with s001 at 24,000 (3,000 chat turns of 8 records) plus 34 fillers of 3,000 records,
@@ -1136,8 +1137,36 @@ def census(feed, sids):
     return checks
 
 
+def revision_given():
+    """The revision named in ROMP_SPIKE_REVISION, read before clean_env drops every ROMP_ variable, or None. The cluster
+    gets a copy of the code without .git (tools/rust-spike/orcd/setup.sh's runbook ships `git archive` of one commit),
+    so its jobs export the commit's id from the REVISION file written beside the copy (orcd/common.sh)."""
+    v = os.environ.get(REVISION_ENV, "").strip()
+    if not v:
+        return None
+    if not (12 <= len(v) <= 40 and all(c in "0123456789abcdef" for c in v)):
+        raise DumpError("%s=%r is not a git revision (12 to 40 lowercase hex digits)" % (REVISION_ENV, v))
+    return v
+
+
+def repo_head(pb, given):
+    """The snapshot's `world.repoHead` (dump provenance, never a feed input): the checkout's HEAD (12 hex digits), else
+    the revision ROMP_SPIKE_REVISION names. Never null: with neither the dump refuses, and with both they must agree."""
+    head = pb.git_head(REPO)
+    if head is not None and given is not None and given[:12] != head[:12]:
+        raise DumpError("the checkout's HEAD is %s but %s names %s" % (head, REVISION_ENV, given))
+    if head is None and given is None:
+        raise DumpError("no revision to record: %s has no readable .git and %s is not set (on the cluster, "
+                        "orcd/common.sh exports it from the REVISION file beside the code)" % (REPO, REVISION_ENV))
+    return head if head is not None else given[:12]
+
+
 def dump(world, out, keep_world=False, replay=True):
     spec = WORLDS[world]
+    given = revision_given()
+    if given is None and not os.path.exists(os.path.join(REPO, ".git")):
+        raise DumpError("no revision to record: %s is a copy without .git and %s is not set (on the cluster, "
+                        "orcd/common.sh exports it from the REVISION file beside the code)" % (REPO, REVISION_ENV))
     t_start = time.time()
     out = prepare_out(out)
     os.makedirs(os.path.join(out, "work"))
@@ -1244,7 +1273,7 @@ def dump(world, out, keep_world=False, replay=True):
     snap = {
         "schema": SCHEMA,
         "world": {"name": world, "now": NOW, "mintClock": T_MINT, "colormap": recd.reads.get("_colormap"),
-                  "hostName": HOST, "repoHead": pb.git_head(REPO), "python": platform.python_version(),
+                  "hostName": HOST, "repoHead": repo_head(pb, given), "python": platform.python_version(),
                   "sizes": {"sessions": spec["sessions"], "fillers": spec["fillers"], "records": spec["records"],
                             "chatTurns": spec["chatTurns"], "chatRecords": spec["chatTurns"] * 8 + 1}},
         "alive": [{"sid": s["sid"], "name": s["name"], "anchor": s["anchor"], "mtime": s["mtime"],

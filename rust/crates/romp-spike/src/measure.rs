@@ -61,7 +61,7 @@ use serde_json::{Value as J, json};
 
 use romp_transcript::{Growth, ReadKind, Store};
 use romp_views::layer3::SegHeld;
-use romp_views::memo::FeedMemo;
+use romp_views::memo::{self, FeedMemo};
 use romp_views::{layer6, layer7, load};
 
 mod sys {
@@ -466,6 +466,9 @@ fn cpu(dir: &Path, builds: usize, memo_rows: bool) -> Result<(bool, J), String> 
         .unwrap_or_default();
     let mut memo_checks = Vec::new();
     if memo_rows {
+        // the shapes the memo's key would read differently from Python's, or panic on, are refused as `romp-spike memo`
+        // refuses them (keyFacts the S2 dumps do not carry; a hand-made one could)
+        memo::validate(snap).map_err(|e| format!("snapshot.json (memo): {e}"))?;
         for what in ["memo (cold)", "memo (peers settle)", "memo (served)"] {
             let b = layer6::Build::new(snap, &dump.trees, None).with_held(&memo_held).with_memo(&memo);
             let f = layer7::build_feed_on(&b, None).map_err(|r| format!("the memo build raised {}", r.exc))?;

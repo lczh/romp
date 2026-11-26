@@ -115,6 +115,10 @@ MUTANTS = [
     # the review's must-fix, as a regression mutant
     ("cleared: an id listed twice kept twice (Python's key reads the cleared set)", MEMO,
      "            v.sort_unstable();\n            v.dedup();\n", "            v.sort_unstable();\n"),
+    # the second review: the slice is sorted as kernel._cleared_by_sid sorts it, so the list's order moves nothing (the
+    # cleared log's order is not sorted in production); without the sort, dedup collapses only adjacent copies
+    ("cleared: each slice left in the list's order (Python's key sorts it)", MEMO,
+     "            v.sort_unstable();\n            v.dedup();\n", "            v.dedup();\n"),
 ]
 
 
@@ -132,8 +136,22 @@ def check_all(root=REPO):
     return bad
 
 
+def check_tree(tree):
+    """The scratch tree a mutant is applied in: never the repository, inside it or above it (apply removes tree/rust
+    first, so --tree at the repository's root would delete its rust/)."""
+    t, r = os.path.realpath(tree), os.path.realpath(REPO)
+    if t == r or t.startswith(r + os.sep) or r.startswith(t.rstrip(os.sep) + os.sep):
+        raise SystemExit("memo_mutants: --tree %s is the repository, inside it or above it (%s): give a scratch "
+                         "directory elsewhere" % (t, r))
+    return t
+
+
 def apply(n, tree):
     """Copy rust/ to tree/rust and apply mutant n there; n == len(MUTANTS) is the control: the copy, unmutated."""
+    if not 0 <= n <= len(MUTANTS):
+        raise SystemExit("memo_mutants: mutant %d: there are %d mutants (0 to %d) and the control (%d)" % (
+            n, len(MUTANTS), len(MUTANTS) - 1, len(MUTANTS)))
+    tree = check_tree(tree)
     dst = os.path.join(tree, "rust")
     if os.path.exists(dst):
         shutil.rmtree(dst)
@@ -167,7 +185,7 @@ def main(argv=None):
         print("%d mutants, %d that do not apply exactly once%s" % (len(MUTANTS), len(bad), (": %r" % bad) if bad else ""))
         return 1 if bad else 0
     if a.apply is not None and a.tree:
-        name = apply(a.apply, os.path.realpath(a.tree))
+        name = apply(a.apply, a.tree)
         print(json.dumps({"mutant": "control" if name == "control" else a.apply,
                           "name": "the unmutated memo" if name == "control" else name}))
         return 0
