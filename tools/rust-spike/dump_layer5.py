@@ -831,6 +831,11 @@ def edge_cases(km):
                                                captions={tail_id + "#p": {"caption": "after work"}}))
     add("card: a seam tail placed", sess(tree(seam_turn), store(g1, seams=seam_st()["seams"],
                                                               placements={tail_id: g1["id"]})))
+    noted = turn([u("u1", 100, "ask"), asst("a1", 101, "on it"), tool("t1", 102),
+                  u("n1", 106, "background note", author="system"), tool("t2", 107), asst("a2", 108, "more")],
+                 ended=False)
+    add("card: a seam tail whose prompt is not empty shows the prompt, not Working past",
+        sess(tree(noted), store(seams=[{"segs": [km._seg_key(seg_ids(noted)[0])], "t": 103}])))
     # trigger lookups
     add("card: no trigger: the first atom without a uuid is the trigger (a human system notice)",
         sess(tree(turn([asst("a1", 100, "x"), att(None, 101, author="human", content=[
@@ -974,6 +979,8 @@ def edge_cases(km):
         sess(tree(t_d), deleg({"promptUuid": "h1", "askAnchor": "human", "origin": {"peer": "s8"}})))
     add("delegation: a userAsk dict exempts", sess(tree(t_d), deleg({"userAsk": {"text": "x"}})))
     add("delegation: a userAsk that is not a dict does not", sess(tree(t_d), deleg({"userAsk": "x"})))
+    add("delegation: an empty userAsk dict still exempts (isinstance, not truthiness)",
+        sess(None, deleg({"userAsk": {}})))
     add("delegation: an empty promptUuid is no anchor", sess(tree(t_d), deleg({"promptUuid": ""})))
     add("delegation: a top that is itself a handoff",
         sess(tree(t_d), store(nd("t", handoff=hand, promptUuid="h1", userAsk={"a": 1}))))
@@ -1000,7 +1007,8 @@ def edge_cases(km):
                  "No terminal punctuation at all here", "Stop at end?", "a.b.c.d.e.f.g.h. done", "Ünïcödé text "
                  "here. Then", "\u00e9" * 8 + ". rest. end", "1.\n \nFixed the thing. More",
                  "This is the first part!\u00a0Then more.", "This is the first part?\u3000Then more.",
-                 "This is the first part.\u001cThen more.", "This is the first part.\u0085Then more."):
+                 "This is the first part.\u001cThen more.", "This is the first part.\u0085Then more.",
+                 "abcdefghijkl. rest of it here."):
         call("opening %r" % (line[:30] if line else line,), "opening_sentence", line)
     for text, q in (("hello world", "world"), ("café world", "world"), ("x", None), (None, "x"), ("", "x"),
                     ("x", ""), ("x", "  \n "), ("Hello   World", "hello world"), ("Hello\nWorld", " hello  world "),
@@ -1013,7 +1021,7 @@ def edge_cases(km):
                     ("tab\there", "TAB here"), ("x y z", "y  z"), ("ab", "b"), ("日本語のテキスト", "テキスト"),
                     ("Hello world, then hello world", "hello world"), ("HELLO there; hello  there", "hello there"),
                     ("x y", "x\u3000y"), ("one two", "one\u001ctwo"), ("one two", "ONE\u0085TWO"),
-                    ("\u01c6ungla", "\u01c5UNGLA"), ("x\u01c4y", "X\u01c5Y")):
+                    ("\u01c6ungla", "\u01c5UNGLA"), ("x\u01c4y", "X\u01c5Y"), ("\u001cab", "\u001cab")):
         call("locate %r in %r" % (q, text), "locate_quote", text, q)
     for text in ("plain", "  spaced  ", "", "<system-reminder>only</system-reminder>",
                  "a<system-reminder>r</system-reminder>b", "a <system-reminder>r</system-reminder> b",
@@ -1023,7 +1031,8 @@ def edge_cases(km):
                  "a<system-reminder>unclosed", "a<system-reminder> </system-reminder>b",
                  "a<system-reminder>r1</system-reminder>m<system-reminder>r2</system-reminder>n",
                  "</system-reminder>a<system-reminder>r</system-reminder>", "a\u001c<system-reminder>r</system-reminder>　b",
-                 "<system-reminder>a<task-notification>b</task-notification>c</system-reminder>d"):
+                 "<system-reminder>a<task-notification>b</task-notification>c</system-reminder>d",
+                 "a<system-reminder>\u001cctx\u001c</system-reminder>b"):
         call("split %r" % text[:40], "split_reminders", text)
     for text in ("", "plain", "<!-- romp-msg-id: m1 -->", "<!--romp-msg-id:m1-->", "<!-- romp-msg-id: m1 --> <!-- "
                  "romp-msg-kind: question -->", "<!-- romp-msg-kind: delegate --><!-- romp-msg-id: m2 -->",
@@ -1034,6 +1043,8 @@ def edge_cases(km):
                  "<!-- romp-msg-id: a<!-- romp-msg-id: b -->", "x<!--<!-- romp-msg-id: z -->",
                  "<!-- romp-msg-id: a-->b -->"):
         call("postal %r" % text[:40], "postal_pairs", text)
+    call("postal: a second kind does not rebind an id that has one", "postal_pairs",
+         "<!-- romp-msg-id: a --><!-- romp-msg-kind: question --><!-- romp-msg-kind: delegate -->")
     for text in ("/compact", "/model opus", "/a", "/1", "/", "", "/Users/x/y.py", "/a:b-c_d", "/a\tb", "/a b\nc",
                  "/a b\n", "/a\n", "/ab\n\n", "/é", "/aé", "/aा", "/x²", "/xⅠ", " /x", "/x ",
                  "/x y", "/x.y", "/xͅ"):
@@ -1060,7 +1071,11 @@ def edge_cases(km):
             ("zero seg time", nd("g", distilledMt=1), [["s:9:z"]]), ("key absent", nd("g", distilledMt=1), [["s:9:q"]]),
             ("negative cover", nd("g", distilledMt=-5.5, briefedMt=-1), [["s:1:h"]]),
             ("big cover", nd("g", distilledMt=1e20), [["s:1:h"]]),
-            ("big followup", nd("g", briefedMt=7, followupAt=1e300), [])):
+            ("big followup", nd("g", briefedMt=7, followupAt=1e300), []),
+            ("int() truncates a negative cover toward zero",
+             nd("g", distilledMt=-2.5, briefedMt=-7, followupAt=-2.5), []),
+            ("a trail key missing from seg_best reads 0, above a negative cover",
+             nd("g", distilledMt=-5, briefedMt=-3, followupAt=-10), [["k:1:h"]])):
         call("outrun %s" % label, "summary_outrun", node, trails, best)
     nodes_g = {"a": nd("a", cleared=True), "b": nd("b", parentId="a"), "c": nd("c", parentId="zz"),
                "d": nd("d", parentId="e"), "e": nd("e", parentId="d"), "f": nd("f", cleared=False, parentId=None)}
@@ -1084,6 +1099,12 @@ def edge_cases(km):
     call("text anchor: an empty segment searches the turn", "text_anchor",
          turn([u("u1", 100), asst("d1", 101, s1)]), [], s1, True)
     call("text anchor: no line, stub", "text_anchor", turn([u("u1", 100), asst("d1", 101, "x")]), [1], None, True)
+    call("text anchor: the stub tier takes the segment's last stub, not the rest of the turn's", "text_anchor",
+         turn([u("u1", 100, "x"), asst("c1", 101, "tiny one"), u("u2", 110, "y"), asst("c2", 111, "tiny two")]),
+         [0, 1], "Nothing matches.", True)
+    e160 = "\u00e9" * 159 + "."
+    call("text anchor: a non-ASCII span of 160 code points (320 bytes) is kept whole", "text_anchor",
+         turn([u("u1", 100), asst("e1", 101, e160)]), [0, 1], e160, False)
 
     # ── refused at load where Python answers or raises
     add("REFUSE an atom text that is a list (Python reads its repr)",

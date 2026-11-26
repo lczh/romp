@@ -103,7 +103,7 @@ fn every_case_answers_as_python_does() {
         }
     }
     assert!(diffs.is_empty(), "{} differences:\n{}", diffs.len(), diffs.join("\n"));
-    assert_eq!((loaded, sessions, refused, refused_raises), (404, 161, 11, 3));
+    assert_eq!((loaded, sessions, refused, refused_raises), (414, 163, 11, 3));
 }
 
 #[test]

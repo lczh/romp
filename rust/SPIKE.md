@@ -6,7 +6,9 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
-- Step: S4.5 (layer 5) done on branch `romp_fix-s45`, not yet reviewed or merged into `romp_fix`. S3 and S4.1 to
+- Step: S4.5 (layer 5) done on branch `romp_fix-s45` with its review's fixes, not yet merged into `romp_fix`. Its
+  review (no must-fix) is under "The review round" in "S4.5 as built": its 10 edge-set gaps are filled, each shown to
+  catch its mutant, and the memo claim is corrected. S3 and S4.1 to
   S4.4 done, merged into `romp_fix` from `romp_fix-s3`, `romp_fix-s4a`, `romp_fix-s42`, `romp_fix-s43` and
   `romp_fix-s44`, each with its review's fixes. S4.4's review (ship, no must-fix) is under "The
   review round" in "S4.4 as built"; its 11 edge-set gaps are filled, each shown to catch its mutant. S4.3's review
@@ -36,17 +38,18 @@ with no server. Both implementations run on one synthetic state, and the feed JS
   - S4.5: landing, delegation and provisional (_summary_text_anchor with _opening_sentence and jd._locate_quote,
     _summary_outrun, _dictated_prompt_uuid with jd._human_prompt_record, _pure_delegation_top, _provisional_card with
     its placement, caption, prompt and segment helpers) match Python's own answers with zero differences on both worlds
-    (1,735 values small, 624,750 large; every call the replay's body makes, 7 and 41), on 415 Python-made edge cases
-    (14,856 values; 11 more are refused at load, as built to be) and on 60,000 random sessions and calls (9,054,772
-    values, `dump_layer5.py --fuzz`). Python's regex classes and `re.I` fold come from tables generated from its own
-    engine, checked on every code point. 6 planted mistakes and 58 source mutants are each caught by the edge set; fuzz
-    seed 1 catches all but four; 4 more mutants are equivalent (see "S4.5 as built").
+    (1,735 values small, 624,750 large; every call the replay's body makes, 7 and 41), on 425 Python-made edge cases
+    (414 load and match on 14,985 values; the other 11 are refused at load, as built to be) and on 60,000 random
+    sessions and calls (9,054,772 values, `dump_layer5.py --fuzz`). Python's regex classes and `re.I` fold come from
+    tables generated from its own engine, checked on every code point. 6 planted mistakes and 68 source mutants are each
+    caught by the edge set; fuzz seed 1 catches all but seven; 4 more mutants are equivalent (see "S4.5 as built").
   - S2 done before them (byte-identical oracle dumps across seeds and roots, "S2 as built"); S1 before that
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
 - Next action: S4.6, layer 6 (the body and its closures), scoped in "What layer 6 needs" below, which carries the
-  body's call order for _node_anchor_uuids forward from S4.4. S4.5 waits for its review and merge.
+  body's call order for _node_anchor_uuids forward from S4.4 and the summary-anchor memo's seam staleness from S4.5's
+  review. S4.5 waits for its merge.
   - Inputs: `python3 tools/rust-spike/dump_world.py --world small` (or `large`), then
     `python3 tools/rust-spike/dump_layer1.py DUMP`, `python3 tools/rust-spike/dump_layer2.py DUMP`,
     `python3 tools/rust-spike/dump_layer3.py DUMP`, `python3 tools/rust-spike/dump_layer4.py DUMP` and
@@ -117,6 +120,9 @@ Each step lands as its own commit(s) with tests green. The status above is updat
   porting dict-shaped code as dict-shaped data.
 - **S6 measurement.** CPU per build (warm and cold), cold load, and the store's resident size. Python's side uses
   tracemalloc over the record cache plus its RSS difference. Alternate the two several times on the same load.
+  Warm builds: Python's _SUMMARY_ANCHOR_MEMO survives across builds and its key leaves out the segment's atoms, so a
+  warm Python build after a seam is stamped can serve a landing a memo-less port does not compute (S4.5's review,
+  "What layer 6 needs"). A warm comparison stamps no seam between builds, or clears that memo first.
 - **S7 report.** Numbers against the gate, what replicated, what did not, and the recommendation.
 
 ## Revisions from the S2 map (2026-11-25)
@@ -676,7 +682,7 @@ notes flagged, as built:
   across a dump and across a world's sessions; the oracle clears the kernel's table first. The feed passes no sid, so
   _node_anchor_rev is not ported. Which nodes write the table, and in what order, is not this layer's: the body calls
   _node_anchor_uuids only inside its `flatten`, so the port's per-node calls in store order are a test harness, not
-  the body's sequence (see "Carried forward for layer 6" under "What layer 5 needs").
+  the body's sequence (see the first bullet of "What layer 6 needs", carried forward there from S4.4's review).
 - Recursion: every walk is iterative. _agent_open_set and _open_leaves recurse in Python and raise RecursionError near
   1,000 levels, so the loader refuses a parent chain past `MAX_NODE_DEPTH` (500 nodes, counting a cycle's distinct
   members), and `body_children` refuses a healed forest past it. _goal_awaiting_stamp_full and the body's `_subtree`
@@ -921,7 +927,8 @@ The first round of this table was weaker, and each check found what the other mi
   differences).
 - The loader read an integer of 2**64 or more as a float (pre-existing, reachable through layer 4); it is now refused
   on the input side (see the loader paragraph above). Not done: trees are not checked, for the load time.
-- SPIKE.md now carries the body's call order for _node_anchor_uuids forward to layer 6 ("What layer 5 needs"), and the
+- SPIKE.md now carries the body's call order for _node_anchor_uuids forward to layer 6 (then under "What layer 5
+  needs", now the first bullet of "What layer 6 needs"), and the
   nits are fixed (jd._seg_command_worked; layer4.rs's header now lists only readings the edge set pins with a mutant).
 
 **Findings beyond the port.**
@@ -961,31 +968,45 @@ writes into the fixture. What the notes flagged, as built:
   at a time: an uncased pattern character matches only itself, a cased one any character whose simple lowercase
   (`_sre.unicode_tolower`) is its own, or one listed for it in `re._casefix._EXTRA_CASES`. So the long s matches `s`,
   the dotless ı `i`, the final ς `σ`, the micro sign `μ`, and `İ` (whose simple lowercase is `i`) `i`. A comparison
-  of lowercased characters gets all of these wrong; it gets the Kelvin sign right, because K lowercases to `k`. One
-  reading in the notes did not hold: `ß` and `ẞ` match each other both ways (sre takes `ß` as cased, its uppercase
-  being the first letter of "SS"), and no pair is asymmetric.
+  of lowercased characters gets all of these wrong; it gets the Kelvin sign right, because K lowercases to `k`. So
+  one reading in the notes did not hold: their example of what a lowercase comparison misses was the Kelvin sign,
+  which it does not miss; the characters above are the real cases. (`ß` and `ẞ` match each other both ways: sre takes
+  `ß` as cased, its uppercase being the first letter of "SS".) The quote is stripped the Python way first, so a
+  quote that begins with U+001C is found without it.
 - _opening_sentence: paragraphs split at `\n\s*\n` (a whitespace run holding two newlines, Unicode whitespace
   included); a leading list marker whose digits are any Unicode decimal (`١.` and `１.` are markers, `².` is not, and
   the marker needs whitespace after it); the first line; the cut after the first `.`, `!` or `?` past 12 code points
-  that Unicode whitespace or the end follows; `[:200]` then `strip()`. `str(span)[:300]` and the offset `find`
-  returns count code points too.
+  that Unicode whitespace or the end follows (a stop at index 12 counts); `[:200]` then `strip()`. `str(span)[:300]`
+  and the offset `find` returns count code points too: a located span of 160 two-byte code points (320 bytes) is kept
+  whole.
 - _summary_text_anchor searches jd._atom_text, which reads a bare-string content as "", while _text_atoms admits that
   atom through em.atom_has_text; such an atom can only be the stub. The turn's other text atoms leave out the
-  segment's by identity (`a is s`), so a second atom with a repeated uuid is still searched. The memo is left out (a
-  cache: a hit returns what a miss computes), as layer 3 left out the held aggregate; the oracle checks it.
+  segment's by identity (`a is s`), so a second atom with a repeated uuid is still searched. The stub tier takes the
+  segment's last text atom, and the rest of the turn's only when the segment has none. The memo is left out, as layer
+  3 left out the held aggregate, and the oracle checks that a hit answers as a miss within one build. It is a pure
+  cache only within one build, or across builds of the same parse and seams, which is all the spike's fresh-process
+  comparisons meet: its key, `(fsid, nid, seg key, hash(line), the turn's end or t, stub_ok)`, leaves out the
+  segment's atoms, and only eviction clears it. A seam stamped between two builds keeps the head segment's key and the
+  turn's end, so the second build's hit serves the landing found over the unsplit segment (see "The review round"
+  below and "What layer 6 needs").
 - _summary_outrun compares with `max(int(distilledMt or 0), int(briefedMt or 0))`, so 100.9 covers a segment at
-  100.5 only as far as 100: that segment outruns it. A coverage past i64 compares exactly (an integral float).
+  100.5 only as far as 100: that segment outruns it. `int()` truncates toward zero (-2.5 reads -2, not -3), and a
+  trail key missing from `seg_best` reads 0, which outruns a negative coverage. A coverage past i64 compares exactly
+  (an integral float).
 - The segment predicates find the trigger atom by `uuid == seg["trigger"]`: with no trigger, the first atom without a
   uuid is the trigger, before `atoms[0]`. _seg_prompt instead searches only for a truthy trigger, so a trigger of ""
   falls to the first user atom.
 - em.postal_pairs is a findall: a `romp-msg-kind` marker whose lazy value runs over a `romp-msg-id` marker consumes it,
-  and no pair is made, so such an attachment is still a dictated record.
+  and no pair is made, so such an attachment is still a dictated record. A kind binds only to an id that has none yet,
+  so a second kind after it is dropped. _pure_delegation_top's userAsk test is `isinstance(..., dict)`: an empty `{}`
+  still exempts the top.
 - _provisional_card reads `_captions(fsid)` before it looks at whether the segment is a system notice: an unrecorded
   caption read fails even where the caption is never shown (the port returns `NotRecorded`, as the oracle's reader
   raises). `pre + g` raises TypeError on a truthy caption that is not a string, with Python's message. The turn is open
-  only if no atom anywhere in it is an idle span, unlike _session_working's trailing test. BARE_SLASH_RE's `\w` is
-  Python's (a combining vowel sign is not one, so `/kaा` is not slash-shaped), and its `$` matches before a final
-  newline.
+  only if no atom anywhere in it is an idle span, unlike _session_working's trailing test. A seam tail shows its own
+  prompt when it has one (a system-authored note, say); "Working past" is only for a seam tail whose prompt is empty.
+  BARE_SLASH_RE's `\w` is Python's (a combining vowel sign is not one, so `/kaा` is not slash-shaped), and its `$`
+  matches before a final newline. _split_reminders strips each reminder the Python way (U+001C included).
 - Not pinned, because no input the loader admits shows a difference. Four were tried as mutants and moved nothing on
   any check: the `$` in the cut's `(?=\s|$)` (a stop at the very end cuts nothing off, the same as no stop, and the
   first line holds no newline; M58); the `endswith("#p")` test in _seg_caption's drift scan (a key whose jd._seg_key
@@ -1034,14 +1055,15 @@ same session, node, key, line and stub_ok.
   of 38 sessions' provisional card reads captions the dump never recorded (both sides raise `NotRecorded` there).
 
 **The edge set.** `dump_layer5.py --edge-cases` writes `rust/crates/romp-views/tests/fixtures/layer5_edge.json`
-(synthetic, 0.56 MB, Python's tables included). Its 415 cases: 170 sessions (every gate of the provisional card,
+(synthetic, 0.57 MB, Python's tables included). Its 425 cases: 172 sessions (every gate of the provisional card,
 follow-ups over standing, cleared, absent and replanned targets, every placement phase and drift, retired and
 cleared-out placements, captions of every shape, seam tails, every trigger lookup, landings by quote, by fold, by
 substantive and stub atoms, identity against uuid, outrun stamps, every latch and anchor of the delegation test) and
-245 direct calls (opening sentences, quote location, reminders, postal pairs, BARE_SLASH_RE, FOLLOWUP_RE, the comment
-strip, prompt records, outrun, card_gone, placements, captions, the landing over hand-made segments).
+253 direct calls (opening sentences, quote location, reminders, postal pairs, BARE_SLASH_RE, FOLLOWUP_RE, the comment
+strip, prompt records, outrun, card_gone, placements, captions, the landing over hand-made segments). 10 of them (2
+sessions, 8 direct calls) came in the review round, each aimed at a mutant the first 415 missed.
 
-Result: 404 cases load and match on every value (14,856), 0 differences. The other 11 are refused at load, exactly
+Result: 414 cases load and match on every value (14,985), 0 differences. The other 11 are refused at load, exactly
 the cases named REFUSE: Python raises on 3 and answers 8. Python's line trace ran 263 of the 275 lines of the 23
 ported functions. The 12 it did not run cannot run in the port's input set: the memo's key, hit and put, the
 lazy-body read and its fault (the loader refuses lazy atoms), `if not segs: return None` (em.segments always answers a
@@ -1067,12 +1089,23 @@ refusal fails the run, and the same seed makes the same file.
   cleared-out segments.
 
 **Planted mistakes, each caught.** The six plants are romp-spike's `--plant` options (`dump_layer5.py --fuzz ... --plant NAME` passes only
-when the plant is caught). The 62 source mutants were edits to `layer5.rs` and `pyre.rs`, each built, run on all four
-inputs and reverted by a scratch script (not committed); 58 are below and 4 are the equivalent ones named above (M58,
-N1 to N3), which no check can catch because no admitted input tells them apart. The table is the run on the final
-bytes: the 415-case edge set and fuzz seed 1. Each cell is differences, then the sessions or cases they fell in.
+when the plant is caught). The 72 source mutants were edits to `layer5.rs` and `pyre.rs`, each built, run on all four
+inputs and reverted by a scratch script (not committed): the first round's 62, of which 58 are below and 4 are the
+equivalent ones named above (M58, N1 to N3), which no check can catch because no admitted input tells them apart, and
+the review round's 10 (the last rows). Each cell is differences, then the sessions or cases they fell in. The
+edge-set column is the final 425-case set (414 loaded) for the plants (`tests/layer5_edge.rs` checks each is caught
+on exactly the cases built for it), for the review's 10, and for the 25 first-round rows the review round rebuilt from
+their descriptions (M01, M04, M08 to M15, M18 to M20, M24, M25, M29, M31, M32, M40, M44, M45, M47, M49, M55, M56).
+Each rebuild gives its row's first-round cells on the 415-case set and fuzz seed 1, so it is the same edit in effect
+(M19 took two tries: coverage from distilledMt alone gives other cells, briefedMt read as 0 gives the row's). Five of
+them catch more on the 425-case set: M10 (the 160-code-point span), M19 (the missing trail key), and M40, M47 and M49
+(the seam tail's segment rows and card). The other 33 rows are the 415-case run. Read against the 10 added cases (not
+rebuilt), none of their edits changes an answer there: the cases hold no list marker or paragraph break, no settle
+reply or API error, no string-content or attachment prompt, interrupt, command, slash text, comment, unclosed or
+spaced reminder, caption, unrecorded captions, placement, cleared node, follow-up, latch or promptUuid, no quote that
+only the regex finds, and no postal value that runs into a `-->` (N4). Added cases can only add differences.
 
-| Mistake | Small | Large | Edge set (404) | Fuzz, seed 1 (10,000) |
+| Mistake | Small | Large | Edge set (414) | Fuzz, seed 1 (10,000) |
 |---|---|---|---|---|
 | `--plant lowercase` (`re.I` as Rust's lowercase) | 0 | 0 | 28 in 9 | 797 in 247 |
 | `--plant em-text` (the quote searched in em._text_of) | 0 | 0 | 3 in 1 | 385 in 77 |
@@ -1089,7 +1122,7 @@ bytes: the 415-case edge set and fuzz seed 1. Each cell is differences, then the
 | a list marker needs no whitespace after it (M07) | 0 | 0 | 4 in 4 | 58 in 26 |
 | the sentence cut searches from 0, not past 12 (M08) | 0 | 0 | 6 in 6 | 1,483 in 462 |
 | the cut's lookahead takes ASCII whitespace only (M09) | 0 | 0 | 4 in 4 | 136 in 55 |
-| the 200 cap counts UTF-8 bytes (M10) | 0 | 0 | 1 in 1 | 1 in 1 |
+| the 200 cap counts UTF-8 bytes (M10) | 0 | 0 | 2 in 2 | 1 in 1 |
 | the located span is not cut at 300 (M11) | 0 | 0 | 2 in 1 | 0 |
 | the turn's other atoms searched before the segment's (M12) | 0 | 0 | 2 in 1 | 146 in 35 |
 | the quote search runs oldest first (M13) | 0 | 0 | 18 in 6 | 472 in 115 |
@@ -1098,7 +1131,7 @@ bytes: the 415-case edge set and fuzz seed 1. Each cell is differences, then the
 | _text_atoms keeps the settle reply (M16) | 0 | 0 | 7 in 2 | 1,465 in 671 |
 | _text_atoms keeps API errors (M17) | 0 | 0 | 2 in 1 | 1,571 in 656 |
 | outrun compares with >= (an equal stamp outruns) (M18) | 0 | 0 | 4 in 2 | 634 in 571 |
-| outrun ignores briefedMt (M19) | 0 | 0 | 4 in 4 | 1,211 in 1,071 |
+| outrun ignores briefedMt (M19) | 0 | 0 | 5 in 5 | 1,211 in 1,071 |
 | outrun has no zero-coverage return (M20) | 10 in 3 | 78 in 37 | 32 in 20 | 7,466 in 4,060 |
 | a string prompt record is stripped (M21) | 0 | 0 | 47 in 47 | 902 in 788 |
 | the interrupt record counts as dictated (M22) | 0 | 0 | 96 in 49 | 413 in 375 |
@@ -1119,16 +1152,16 @@ bytes: the 415-case edge set and fuzz seed 1. Each cell is differences, then the
 | an unclosed reminder is dropped (M37) | 0 | 0 | 1 in 1 | 809 in 757 |
 | no drift match for placements (exact only) (M38) | 0 | 0 | 8 in 7 | 741 in 630 |
 | _card_gone checks the node only, not its ancestors (M39) | 0 | 0 | 6 in 4 | 1,319 in 804 |
-| an absent caption reads null, not "" (M40) | 11 in 1 | 376 in 1 | 385 in 144 | 24,897 in 5,537 |
+| an absent caption reads null, not "" (M40) | 11 in 1 | 376 in 1 | 387 in 145 | 24,897 in 5,537 |
 | captions read after the system check (M41) | 0 | 0 | 1 in 1 | 15 in 15 |
 | the follow-up resurrect ignores whether the turn is open (M42) | 0 | 0 | 1 in 1 | 428 in 428 |
 | an absent follow-up target counts as gone without clear evidence (M43) | 0 | 0 | 1 in 1 | 43 in 43 |
 | the seam text is not cut at 100 (M44) | 0 | 0 | 1 in 1 | 1 in 1 |
 | an empty seam text is kept (no "a completed goal") (M45) | 0 | 0 | 2 in 2 | 5 in 5 |
 | a command that put the model to work gets no card (M46) | 0 | 0 | 2 in 2 | 28 in 28 |
-| judging is the turn being open (inverted) (M47) | 1 in 1 | 1 in 1 | 67 in 67 | 1,043 in 1,043 |
+| judging is the turn being open (inverted) (M47) | 1 in 1 | 1 in 1 | 68 in 68 | 1,043 in 1,043 |
 | a non-string caption is formatted, not a TypeError (M48) | 0 | 0 | 6 in 6 | 6 in 6 |
-| the card's t is the turn's, not the held segment's (M49) | 0 | 0 | 26 in 13 | 1,080 in 540 |
+| the card's t is the turn's, not the held segment's (M49) | 0 | 0 | 28 in 14 | 1,080 in 540 |
 | the placed gate resurrects on an ended turn too (M50) | 0 | 0 | 1 in 1 | 32 in 32 |
 | re.I without re._casefix's extra cases (M51) (the table test passes) | 0 | 0 | 21 in 7 | 797 in 247 |
 | cased read from Rust's is_lowercase/is_uppercase (M52) (the table test fails) | 0 | 0 | 4 in 2 | 20 in 4 |
@@ -1138,14 +1171,27 @@ bytes: the 415-case edge set and fuzz seed 1. Each cell is differences, then the
 | the sentence cut starts past 12 bytes, not 12 code points (M56) | 0 | 0 | 1 in 1 | 43 in 21 |
 | list-marker digits are any numeric character (is_numeric) (M57) | 0 | 0 | 1 in 1 | 915 in 258 |
 | em.postal_pairs' value group is greedy (N4) | 0 | 0 | 1 in 1 | 1 in 1 |
+| the stub tier takes the rest of the turn's last stub before the segment's (R09) | 0 | 0 | 1 in 1 | 259 in 105 |
+| `int()` floors instead of truncating (R40) | 0 | 0 | 1 in 1 | 10 in 10 |
+| a trail key missing from seg_best is skipped, not read as 0 (R43) | 0 | 0 | 1 in 1 | 4 in 4 |
+| an empty userAsk `{}` does not exempt (truthiness, not isinstance) (R48) | 0 | 0 | 1 in 1 | 20 in 19 |
+| a seam tail says "Working past" even when its prompt is not empty (R52) | 0 | 0 | 1 in 1 | 2 in 2 |
+| the sentence cut starts past 13 code points, not 12 (R70) | 0 | 0 | 1 in 1 | 175 in 62 |
+| the located span is cut at 300 UTF-8 bytes (R76) | 0 | 0 | 1 in 1 | 0 |
+| a second kind rebinds an id that already has one (R33) | 0 | 0 | 1 in 1 | 1 in 1 |
+| the quote is stripped with Rust's `trim` (U+001C kept) (R37) | 0 | 0 | 2 in 1 | 0 |
+| a closed reminder's text is stripped with Rust's `trim` (R65) | 0 | 0 | 1 in 1 | 0 |
 
-The worlds catch 3 of the 64: a zero coverage no longer stops _summary_outrun (every node with a trail outruns), an
+The worlds catch 3 of the 74: a zero coverage no longer stops _summary_outrun (every node with a trail outruns), an
 absent caption read as null (s004's recorded captions are `{}`, so every segment row of it changes), and `judging`
-inverted (s004's provisional card). The edge set catches every row. Fuzz seed 1 catches every row but four: the
+inverted (s004's provisional card). The edge set catches every row. Fuzz seed 1 catches every row but seven: the
 paragraph split (M05: only a list marker whose `\s+` would run across a whitespace-only line into the next paragraph
 shows it), the 300 cut (M11: no fuzz span reaches 300 code points), the postal findall's consumption (M24: the fuzz
 makes no kind marker whose value runs into an id marker) and `$` before a final newline (M34: _seg_slash_shaped strips
-its text, so only a direct call on an unstripped line shows it, and the fuzz drew none). M52, the case table read from
+its text, so only a direct call on an unstripped line shows it, and the fuzz drew none), and three of the review's:
+the 300 cut in bytes (R76: no fuzz span is over 150 code points of two-byte text) and Rust's `trim` on a quote or a
+reminder (R37, R65: they show only where a U+001C to U+001F sits at the edge of a quote or of a reminder's text, and
+seeds 1 and 101 put none there). M52, the case table read from
 Rust's `is_lowercase` and `is_uppercase`, is caught by the edge set through the titlecase `ǅ` (cased to sre, neither
 case to Rust) and fails `tests/layer5_edge.rs`'s every-code-point table test; M51 (no extra cases) passes that test, as
 it changes no table, and fails the comparisons.
@@ -1158,10 +1204,48 @@ gate on a closed turn (no follow-up named a cleared card) and the case table; th
 cleared or cleared-logged cards on open and closed turns and draws the titlecase digraph. The cut's `$`, which the
 notes' reading suggested, turned out to be equivalent (M58).
 
-Tests: 17 new, 148 pass in the workspace: 7 unit tests in `layer5.rs`, 3 in `pyre.rs`, 1 in `tree.rs` (the `text`
-refusal), `tests/layer5_edge.rs` (5: every case answers as Python does, each plant is caught on exactly the cases built
-for it, every code point against Python's tables, the line trace's missed lines, the schema) and 1 in romp-spike for
-the comparison's messages.
+**The review round.** The review had no must-fix. Its should-fix items, all applied:
+- Six semantics the notes flag were caught only by the fuzz (R09, R40, R43, R48, R52, R70), and four by no committed
+  check: R76, and three nits that only direct calls or the oracle's segment rows show (R33, R37, R65). Each now has an
+  edge case, and each mutant gives 0 on the old 415 cases and fails the new set on exactly its added case:
+
+| Mutant (the review's number) | Edge set, 415 | Edge set, 425 | The case that catches it |
+|---|---|---|---|
+| the stub tier prefers the rest of the turn (R09) | 0 | 1 in 1 | turn [u1, c1 "tiny one", u2, c2 "tiny two"], the segment atoms 0 and 1, line "Nothing matches.", stub_ok (Python: c1) |
+| `int()` floors (R40) | 0 | 1 in 1 | _summary_outrun with distilledMt -2.5, briefedMt -7, followupAt -2.5 (Python: False) |
+| a missing trail key is skipped (R43) | 0 | 1 in 1 | distilledMt -5, briefedMt -3, followupAt -10, a trail key not in seg_best (Python: True) |
+| an empty userAsk does not exempt (R48) | 0 | 1 in 1 | a top with userAsk `{}` over two handoff leaves, no parse (Python: not pure) |
+| a seam tail with a prompt says "Working past" (R52) | 0 | 1 in 1 | an open turn [u1 "ask", a1, t1, n1 "background note" authored system at 106, t2, a2], a seam at 103 on the head (Python: the card says "background note") |
+| the cut starts past 13 (R70) | 0 | 1 in 1 | `_opening_sentence("abcdefghijkl. rest of it here.")` (Python: "abcdefghijkl.") |
+| the span cut at 300 bytes (R76) | 0 | 1 in 1 | the landing on a reply of "é" * 159 + "." with that line (Python keeps all 160 code points, 320 bytes) |
+| a second kind rebinds (R33) | 0 | 1 in 1 | postal_pairs of an id `a`, a question kind, then a delegate kind (Python: [[a, question]]) |
+| the quote trimmed by Rust (R37) | 0 | 2 in 1 | `jd._locate_quote("\x1cab", "\x1cab")` (Python: [1, "ab"]) |
+| a reminder trimmed by Rust (R65) | 0 | 1 in 1 | `_split_reminders("a<system-reminder>\x1cctx\x1c</system-reminder>b")` (Python: ["ab", ["ctx"]]) |
+
+- R76 is the one claim the header made with no mutant behind it: M11 pinned only that a cut exists, and the edge set's
+  long span was ASCII. The case makes the claim true instead of rewording it. A real card can show the difference: the
+  anchorQuote of a non-ASCII opening sentence of 151 to 200 code points.
+- R09, R40, R43, R48, R52, R70 and R33 also fail fuzz seed 1; seed 101, the review's, catches the first six. R76, R37
+  and R65 fail neither seed.
+- The memo claim was wrong across builds. Reproduced with the real kernel functions (kernel._segs_seam and
+  _summary_text_anchor, in a scratch script): one segment [u1, a1 carrying the line, t1, a2, t2 at 107, a3 at 108
+  carrying the line and more]; build 1, with the memo key `(fsid, nid, head key)`, lands on a3. A seam at 105 on the
+  head's key then splits off [t2, a3]; the head keeps its key and the turn its end. Build 2's call hits the memo and
+  answers a3, while the same call without the memo answers a1, the head's own atom. Within one build, and in the
+  spike's fresh-process comparisons, nothing changes; the wording is fixed in `layer5.rs`, above, in "What layer 6
+  needs" and in step S6. It is also a Python-side stale landing (after the seam, a click on the head's brief lands on a
+  reply that now belongs to the tail), flagged for lczh in the round's report; nothing is filed upstream.
+- Nits: the `ß` sentence now names the reading that failed (the notes' Kelvin example); S4.4's two pointers to
+  "Carried forward for layer 6" now point at "What layer 6 needs"; _brief_landing's last resort is described there by
+  its real order (the kernel docstring's "the newest trail segment's work anchor" is loose).
+- Not done: the fuzz generator is unchanged, so R76, R37 and R65 stay caught by the edge set alone. A generator change
+  redraws every seed and would void the table's fuzz column for the 33 first-round rows that were not rebuilt (their
+  scratch mutants are gone).
+
+Tests: 17 new, 148 pass in the workspace (the review round added cases, not tests): 7 unit tests in `layer5.rs`, 3 in
+`pyre.rs`, 1 in `tree.rs` (the `text` refusal), `tests/layer5_edge.rs` (5: every case answers as Python does, each
+plant is caught on exactly the cases built for it, every code point against Python's tables, the line trace's missed
+lines, the schema) and 1 in romp-spike for the comparison's messages.
 
 What this feeds: layer 6's `_brief_landing` calls _summary_outrun and _summary_text_anchor with the walk's maps, the
 card loop calls _pure_delegation_top per top, and the session's tail calls _provisional_card; "What layer 6 needs"
@@ -1194,10 +1278,22 @@ the body from the current source:
   `_summary_text_anchor(seg_turn.get(sk), line, memo_key=(fsid, nid, sk))`, where sk is the newest trail segment over
   the subtree with `k in seg_turn` by `t >= skt` from `skt = -1` (the last of equal times wins, and a segment whose
   `seg_best` time is below -1 never qualifies); else the latest-prose walk by `(bsub, bt) > (best[0], best[1])` (a tuple
-  compare: substantive first, strict); else the stub call (`stub_ok=True`); else the newest trail segment's work anchor.
-  It returns `(u, q or None)`. flatten asks it for each row with `_landing_inputs("completed" if st == "done" else
-  "blocked" if st == "question" else None, "", nd)` and skips handoff rows and rows without a line; the card top asks
-  with its own state and column (about 56805).
+  compare: substantive first, strict); else the stub call (`stub_ok=True`, the same memo key); else the last resort: the
+  first node in `_subtree`'s order (the node itself first, then a stack pre-order that visits each node's children last
+  to first) whose trail, read from its end, names a segment with a work anchor (`seg_uuid.get(_seg_key(s))` truthy),
+  and that anchor. That is not necessarily the newest segment across the subtree, though the kernel's docstring says
+  "the newest trail segment's work anchor"; layer 6 must keep the code's order. It returns `(u, q or None)`. flatten
+  asks it for each row with `_landing_inputs("completed" if st == "done" else "blocked" if st == "question" else None,
+  "", nd)` and skips handoff rows and rows without a line; the card top asks with its own state and column (about
+  56805).
+- The summary-anchor memo across builds (S4.5's review): `_summary_text_anchor`'s memo key, `(fsid, nid, sk,
+  hash(line), the turn's end or t, stub_ok)`, leaves out the segment's atoms, and the memo lives for the kernel run
+  (only eviction clears it). A seam stamped between two builds keeps the head segment's key and the turn's end, so a
+  warm Python build serves the landing found over the unsplit segment, where a memo-less port searches the head's own
+  atoms first and can land on an older atom (reproduced under "The review round" in "S4.5 as built"). The spike's
+  comparisons run fresh processes and layer 5's oracle clears the memo, so they never meet it; layer 6's oracle should
+  do the same, a warm comparison (S6) stamps no seam between builds or clears the memo first, and a port that adds the
+  memo with this key inherits the staleness.
 - `_fsubmax` is `cn.get("mt", cn.get("t", 0))` then `max(m, child)`, so the first of equal values (and its int/float
   tag) stays. Row fields read the Python way: `"mt": nd.get("mt", nd["t"])` (a present null stays null, and `nd["t"]` is
   evaluated first), `"who": _name_of(sid) or sid[:8]` (code points), `"auth": (nd.get("agentTask") or {}).get("status")`,
@@ -1363,10 +1459,29 @@ the body from the current source:
   - `dump_layer5.py --fuzz`: seeds 1 to 6 at 10,000 cases, 9,054,772 values, 0 differences, 0 refused.
   - Planted: 6 `--plant` options and 58 source mutants, every one caught by the edge set; fuzz seed 1 misses 4; the
     worlds catch 3. 4 more source mutants are equivalent (no admitted input tells them apart) and are documented as not
-    pinned. One reading in the notes did not hold: `ß` and `ẞ` match each other both ways under `re.I`.
+    pinned. One reading in the notes did not hold: their example of what a lowercase comparison misses, the Kelvin
+    sign, is one it gets right (corrected in the review round; this line first named `ß`, which the notes never
+    mention).
   - Python's `\d`, `\w` and case tables generated from its engine (`dump_layer5.py --tables`, `pyre_tables.rs`) and
     checked on every code point.
   - Loader: placements may be null or hold null values, nodes type askAnchor, userAsk, followupAt and briefedMt,
     captions are typed, a truthy non-string atom `text` is refused. Re-run: the round trip and layers 1 to 4 match on
     both worlds (6,370 and 2,499,514 layer-1 values, 336 and 135,016 layer-2, 1,801 and 695,672 layer-3, 864 and 6,406
     layer-4) and on the layer 2 to 4 edge sets, 0 differences. Rust tests: 148 pass.
+- 2026-11-26: S4.5 review follow-ups (no must-fix), on fresh dumps.
+  - Edge set: 425 cases (10 added: 2 sessions, 8 direct calls); 414 load and match on 14,985 values, 0 differences; 11
+    refused at load (every REFUSE case). Each of the 10 mutants the review showed the edge set missing (R09, R40, R43,
+    R48, R52, R70, R76, R33, R37, R65) gives 0 on the old 415 cases and fails the new set on exactly its added case.
+    The same file under PYTHONHASHSEED=7.
+  - Mutant table: 6 plants and 68 source mutants, every one caught by the edge set; fuzz seed 1 misses 7 (M05, M11,
+    M24, M34, R76, R37, R65); the worlds catch 3. 25 first-round mutants rebuilt from their descriptions (each gives
+    its first-round cells on the 415-case set and seed 1); on the 425-case set five catch more (M10 2 in 2, M19 5 in 5,
+    M40 387 in 145, M47 68 in 68, M49 28 in 14).
+  - Re-run: the round trip and layers 1 to 5 on both worlds (6,370 and 2,499,514 layer-1 values, 336 and 135,016
+    layer-2, 1,801 and 695,672 layer-3, 864 and 6,406 layer-4, 1,735 and 624,750 layer-5; build check 7 and 41 calls,
+    0 mismatches; memo check 12 of 12 per world), the layer 2 to 4 edge sets, and `dump_layer5.py --fuzz` seeds 1 to 6
+    at 10,000 cases (9,054,772 values) and seed 101 (1,490,668), 0 differences, 0 refused. Rust tests: 148 pass.
+  - The summary-anchor memo is a pure cache only within one build or across builds of the same parse and seams: a seam
+    stamped between builds makes a warm hit serve the pre-seam landing (reproduced with the real kernel functions).
+    Reworded in `layer5.rs` and SPIKE.md, carried into "What layer 6 needs" and step S6; flagged for lczh as a
+    Python-side stale landing.

@@ -32,9 +32,15 @@
 //!   unrecorded caption read fails even where the caption is never shown; `pre + g` raises TypeError on a truthy
 //!   caption that is not a string; the turn is open only if no atom anywhere in it is an idle span.
 //!
-//! The summary-anchor memo (_SUMMARY_ANCHOR_MEMO) and _pure_delegation_top's per-derivation memo are caches (a hit
-//! returns what a miss computes) and are left out: _pure_delegation_top's children index and _dictated_prompt_uuid's
-//! prompt index are built per call here (`PromptIndex` is built once per session, as the memo does). Body reads that
+//! The summary-anchor memo (_SUMMARY_ANCHOR_MEMO) and _pure_delegation_top's per-derivation memo are left out.
+//! _pure_delegation_top's memo lives for one derivation, where a hit returns what a miss computes; its children index
+//! and _dictated_prompt_uuid's prompt index are built per call here (`PromptIndex` is built once per session, as the
+//! memo does). _SUMMARY_ANCHOR_MEMO returns what a miss computes only within one build, or across builds of the same
+//! parse and seams: its key, `(fsid, nid, seg key, hash(line), the turn's end or t, stub_ok)`, leaves out the
+//! segment's atoms, and only eviction clears it. A seam stamped between two builds keeps the head segment's key and
+//! the turn's end, so the second build's hit serves the landing found over the whole unsplit segment, while this port
+//! (no memo) searches the head's own atoms first and can land on an older atom. The spike compares fresh processes, so
+//! it never meets this; a warm build after a seam can (SPIKE.md, "What layer 6 needs"). Body reads that
 //! fault (a lazy atom's unreadable body) cannot happen on a tree the loader admits (it refuses lazy atoms), so the
 //! fault count is always 0. `str(a.get("text") or "")` is ported for strings and falsy values; the loader refuses a
 //! truthy `text` that is not a string (`tree::validate_atom`).
