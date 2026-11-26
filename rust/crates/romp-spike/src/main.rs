@@ -3,6 +3,8 @@
 //!
 //!     romp-spike roundtrip DUMP [--plant float-tag]   # typed load, re-serialize through romp-json, compare bytes
 //!     romp-spike layer1 DUMP [--plant bytes]          # layer 1 against DUMP/layer1.json (dump_layer1.py)
+//!     romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]
+//!         Layer 2 (segmentation) against DUMP/layer2.json, or against an edge set (both by dump_layer2.py).
 //!     romp-spike store DUMP [--records] [--plant NAME]
 //!         Read every file of DUMP/transcripts/ through the transcript store and print the canonical summary
 //!         (romp_transcript::canon): per file one line, then one line per record. --records prints each record's
@@ -13,7 +15,9 @@
 //!
 //! `--plant` makes one deliberate mistake, to show the comparison catches it: `float-tag` drops the int/float tag of
 //! the alive rows' mtime (1781099940.0 written as 1781099940) and gives the first tree's first atom a float `t`,
-//! `bytes` counts atom_prose_chars in UTF-8 bytes; the store's plants are no-tool-result, vt-strip and skip-held-crc.
+//! `bytes` counts atom_prose_chars in UTF-8 bytes; layer2's `end` ends each segment at its own last atom and its
+//! `bytes` counts the seam prose floor in UTF-8 bytes; the store's plants are no-tool-result, vt-strip and
+//! skip-held-crc.
 //! Exit status: 0 when everything matched, 1 on any difference, 2 on a usage or load error.
 
 use romp_transcript::canon::{self, RecordMode};
@@ -26,13 +30,14 @@ use std::time::Instant;
 
 use romp_json::Value as Out;
 use romp_views::layer1::{self, ATOM_COLUMNS, SEG_COLUMNS, TURN_KEYS};
+use romp_views::layer2::{self, Plant as Plant2, Probe};
 use romp_views::load;
 use romp_views::record::{Num, OMap, ToJson};
-use romp_views::snapshot::Snapshot;
-use romp_views::tree::{Atom, Content, Tree};
+use romp_views::snapshot::{Snapshot, Store as GoalStore};
+use romp_views::tree::{self, Atom, Content, Tree, Turn};
 
 const USAGE: &str =
-    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
+    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
 const MAX_SHOWN: usize = 10;
 
 fn store_usage() -> ExitCode {
@@ -186,6 +191,9 @@ fn main() -> ExitCode {
     let result = match (cmd, plant) {
         ("roundtrip", None | Some("float-tag")) => roundtrip(&dir, plant.is_some()),
         ("layer1", None | Some("bytes")) => layer1_cmd(&dir, plant.is_some()),
+        ("layer2", None) => layer2_cmd(&dir, None),
+        ("layer2", Some("end")) => layer2_cmd(&dir, Some(Plant2::EndAtLastAtom)),
+        ("layer2", Some("bytes")) => layer2_cmd(&dir, Some(Plant2::FloorInBytes)),
         _ => return usage(),
     };
     match result {
@@ -311,11 +319,11 @@ fn seg_inputs(snap: &Snapshot, trees: &[(String, Option<Tree>)]) -> Vec<Option<S
         if let Some(Some(last)) = &st.last_node {
             out.push(Some(last.clone()));
         }
-        for sm in st.seams.iter().flatten() {
+        for sm in st.seams.iter().flatten().flatten() {
             if let Some(Some(top)) = &sm.top {
                 out.push(Some(top.clone()));
             }
-            out.extend(sm.segs.iter().flatten().cloned().map(Some));
+            out.extend(sm.segs.iter().flatten().flatten().cloned().map(Some));
         }
     }
     out
@@ -467,6 +475,312 @@ fn layer1_cmd(dir: &Path, plant_bytes: bool) -> Result<bool, String> {
     Ok(d.count == 0)
 }
 
+/// A field-by-field comparison of layer-2 answers (Python's, read from JSON, against the port's), counting values.
+#[derive(Default)]
+struct Cmp {
+    values: usize,
+    diffs: usize,
+    shown: Vec<String>,
+}
+
+fn count_str(v: Option<u64>) -> String {
+    v.map_or_else(|| "absent".to_string(), |n| n.to_string())
+}
+
+fn dumps_short(v: Option<&Out>) -> String {
+    let Some(v) = v else { return "<absent>".to_string() };
+    let s = romp_json::dumps(v);
+    if s.chars().count() > 160 { format!("{}...", s.chars().take(160).collect::<String>()) } else { s }
+}
+
+fn member<'a>(o: &'a Out, key: &str) -> Option<&'a Out> {
+    match o {
+        Out::Object(m) => m.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+        _ => None,
+    }
+}
+
+fn keys_of(o: &Out) -> Vec<&str> {
+    match o {
+        Out::Object(m) => m.iter().map(|(k, _)| k.as_str()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+impl Cmp {
+    fn diff(&mut self, what: String) {
+        self.diffs += 1;
+        if self.shown.len() < MAX_SHOWN {
+            self.shown.push(what);
+        }
+    }
+
+    /// One answer: a list of segments (one value for the count, then per segment its key order and each key), or
+    /// anything else (an exception, a null split) as one value. Texts are compared as romp-json writes them, so an
+    /// int/float tag or a negative zero counts.
+    fn answer(&mut self, got: &Out, want: &Out, at: &dyn Fn() -> String) {
+        self.values += 1;
+        let (Out::Array(g), Out::Array(w)) = (got, want) else {
+            if romp_json::dumps(got) != romp_json::dumps(want) {
+                self.diff(format!("{}: rust {} python {}", at(), dumps_short(Some(got)), dumps_short(Some(want))));
+            }
+            return;
+        };
+        if g.len() != w.len() {
+            self.diff(format!("{}: {} segments here, {} in python", at(), g.len(), w.len()));
+            return;
+        }
+        for (i, (gs, ws)) in g.iter().zip(w).enumerate() {
+            let (kg, kw) = (keys_of(gs), keys_of(ws));
+            self.values += 1;
+            if kg != kw {
+                self.diff(format!("{} segment {i}: keys rust {kg:?} python {kw:?}", at()));
+            }
+            for k in kw {
+                self.values += 1;
+                let (a, b) = (member(gs, k), member(ws, k));
+                if a.map(romp_json::dumps) != b.map(romp_json::dumps) {
+                    self.diff(format!("{} segment {i} {k}: rust {} python {}", at(), dumps_short(a), dumps_short(b)));
+                }
+            }
+        }
+    }
+}
+
+/// The coverage counts both sides keep (dump_layer2.py's `coverage`, the port's `Probe` plus its own counts).
+const COVERAGE_KEYS: [&str; 9] =
+    ["turns", "segments", "seamTails", "keyHits", "raises", "pieces", "splitCalls", "splits", "seams"];
+
+#[derive(Default)]
+struct Coverage {
+    turns: usize,
+    segments: usize,
+    seam_tails: usize,
+    key_hits: usize,
+    raises: usize,
+    seams: usize,
+}
+
+impl Coverage {
+    fn count(&mut self, got: &Result<Vec<layer2::Segment<'_>>, layer2::Raise>, store: Option<&GoalStore>) {
+        self.turns += 1;
+        match got {
+            Ok(segs) => {
+                self.segments += segs.len();
+                self.seam_tails += segs.iter().filter(|s| s.seam).count();
+                self.key_hits += segs.iter().filter(|s| layer2::key_listed(s, store)).count();
+            }
+            Err(_) => self.raises += 1,
+        }
+    }
+
+    fn get(&self, probe: &Probe, key: &str) -> usize {
+        match key {
+            "turns" => self.turns,
+            "segments" => self.segments,
+            "seamTails" => self.seam_tails,
+            "keyHits" => self.key_hits,
+            "raises" => self.raises,
+            "pieces" => probe.pieces,
+            "splitCalls" => probe.split_calls,
+            "splits" => probe.splits,
+            "seams" => self.seams,
+            _ => unreachable!("a coverage key"),
+        }
+    }
+}
+
+fn plant_name(plant: Option<Plant2>) -> &'static str {
+    match plant {
+        None => "",
+        Some(Plant2::EndAtLastAtom) => " [planted: end]",
+        Some(Plant2::FloorInBytes) => " [planted: bytes]",
+    }
+}
+
+fn check_floor(doc: &serde_json::Value, file: &str) -> Result<(), String> {
+    let floor = doc["constants"]["SEAM_PROSE_FLOOR"].as_u64();
+    if floor != Some(layer2::SEAM_PROSE_FLOOR as u64) {
+        return Err(format!("{file}: SEAM_PROSE_FLOOR is {floor:?} in Python, {} here", layer2::SEAM_PROSE_FLOOR));
+    }
+    Ok(())
+}
+
+/// Layer 2 against Python's answers: DUMP/layer2.json for a dump directory, or an edge set file.
+fn layer2_cmd(path: &Path, plant: Option<Plant2>) -> Result<bool, String> {
+    if path.is_dir() { layer2_dump(path, plant) } else { layer2_edge(path, plant) }
+}
+
+fn layer2_dump(dir: &Path, plant: Option<Plant2>) -> Result<bool, String> {
+    let dump = load::load_dump(dir)?;
+    let expect: serde_json::Value =
+        serde_json::from_slice(&read(&dir.join("layer2.json"))?).map_err(|e| format!("layer2.json: {e}"))?;
+    if expect["schema"] != "romp-spike-layer2/1" {
+        return Err(format!("layer2.json: schema {}, expected romp-spike-layer2/1", expect["schema"]));
+    }
+    check_floor(&expect, "layer2.json")?;
+    let sessions = expect["sessions"].as_array().ok_or("layer2.json: no sessions")?;
+    if sessions.len() != dump.trees.len() {
+        return Err(format!("layer2.json has {} sessions, the dump {}", sessions.len(), dump.trees.len()));
+    }
+    let t0 = Instant::now();
+    let (mut cmp, mut cov, mut probe) = (Cmp::default(), Coverage::default(), Probe { plant, ..Probe::default() });
+    let facts = dump.snapshot.sessions.as_ref().ok_or("snapshot.json: no sessions")?;
+    for ((sid, tree), sess) in dump.trees.iter().zip(sessions) {
+        if sess["sid"].as_str() != Some(sid.as_str()) {
+            return Err(format!("layer2.json's sessions are out of order at {sid}"));
+        }
+        let store: Option<&GoalStore> = facts.get(sid).and_then(|f| f.store.as_ref()).and_then(Option::as_ref);
+        cov.seams += store
+            .and_then(|s| s.seams.as_ref())
+            .and_then(Option::as_ref)
+            .map_or(0, |v| v.iter().filter(|s| matches!(&s.segs, Some(Some(k)) if !k.is_empty())).count());
+        let turns: &[Turn] = tree.as_ref().and_then(|t| t.turns.as_deref()).unwrap_or_default();
+        let rows = sess["turns"].as_array().ok_or("layer2.json: a session without turns")?;
+        if rows.len() != turns.len() {
+            return Err(format!("{sid}: {} turns here, {} in layer2.json", turns.len(), rows.len()));
+        }
+        for (ti, (turn, want)) in turns.iter().zip(rows).enumerate() {
+            let got = layer2::segs_seam_with(turn, store, &mut probe);
+            cov.count(&got, store);
+            cmp.answer(&layer2::answer_json(&got, &layer2::atom_index(turn)), &want.to_json(), &|| {
+                format!("{sid} turn {ti} ({})", turn.id.as_deref().unwrap_or("-"))
+            });
+        }
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    let mut cov_diffs = Vec::new();
+    for k in COVERAGE_KEYS {
+        let (r, p) = (cov.get(&probe, k), expect["coverage"][k].as_u64());
+        if p != Some(r as u64) {
+            cov_diffs.push(format!("{k} rust {r} python {}", count_str(p)));
+        }
+    }
+    for s in &cmp.shown {
+        println!("  {s}");
+    }
+    println!(
+        "layer2 {}{}: {} sessions, {} turns, {} segments ({} seam tails), {} values compared, {} differences ({:.0} \
+         ms; python {})",
+        world_name(&dump.snapshot),
+        plant_name(plant),
+        dump.trees.len(),
+        cov.turns,
+        cov.segments,
+        cov.seam_tails,
+        cmp.values,
+        cmp.diffs,
+        ms,
+        expect["python"].as_str().unwrap_or("?")
+    );
+    println!(
+        "  coverage: {} seams, {} segments whose key a seam lists, {} pieces examined, {} split calls, {} splits, {} \
+         raises; python's counts {}",
+        cov.seams,
+        cov.key_hits,
+        probe.pieces,
+        probe.split_calls,
+        probe.splits,
+        cov.raises,
+        if cov_diffs.is_empty() { "the same".to_string() } else { format!("DIFFER: {}", cov_diffs.join(", ")) }
+    );
+    Ok(cmp.diffs == 0 && cov_diffs.is_empty())
+}
+
+/// One edge case loaded through the port's loader: the turn, then the store (null is no store).
+fn load_case(case: &serde_json::Value) -> Result<(Turn, Option<GoalStore>), String> {
+    let turn: Turn = serde_json::from_value(case["turn"].clone()).map_err(|e| format!("turn: {e}"))?;
+    tree::validate_turn(&turn).map_err(|e| format!("turn{e}"))?;
+    let store = match &case["store"] {
+        serde_json::Value::Null => None,
+        v => Some(serde_json::from_value::<GoalStore>(v.clone()).map_err(|e| format!("store: {e}"))?),
+    };
+    Ok((turn, store))
+}
+
+fn layer2_edge(file: &Path, plant: Option<Plant2>) -> Result<bool, String> {
+    let name = file.display().to_string();
+    let doc: serde_json::Value = serde_json::from_slice(&read(file)?).map_err(|e| format!("{name}: {e}"))?;
+    if doc["schema"] != "romp-spike-layer2-edge/1" {
+        return Err(format!("{name}: schema {}, expected romp-spike-layer2-edge/1", doc["schema"]));
+    }
+    check_floor(&doc, &name)?;
+    let cases = doc["cases"].as_array().ok_or_else(|| format!("{name}: no cases"))?;
+    let mut cmp = Cmp::default();
+    let (mut loaded, mut refused, mut raised, mut raised_refused, mut counts) = (0, 0, 0, 0, 0);
+    let mut probe_total = Probe::default();
+    for case in cases {
+        let cname = case["name"].as_str().ok_or("a case without a name")?;
+        let want = case["expect"].to_json();
+        let python_raises = case["expect"].get("raises").is_some();
+        let (turn, store) = match load_case(case) {
+            Ok(x) => x,
+            Err(e) => {
+                if cname.starts_with("REFUSE ") {
+                    refused += 1;
+                    raised_refused += usize::from(python_raises);
+                } else {
+                    cmp.diff(format!("{cname}: the loader refused it: {e}"));
+                }
+                continue;
+            }
+        };
+        if cname.starts_with("REFUSE ") {
+            cmp.diff(format!("{cname}: the loader accepted it"));
+            continue;
+        }
+        loaded += 1;
+        raised += usize::from(python_raises);
+        let index = layer2::atom_index(&turn);
+        let mut probe = Probe { plant, ..Probe::default() };
+        let got = match case["kind"].as_str() {
+            Some("segs") => layer2::answer_json(&layer2::segs_seam_with(&turn, store.as_ref(), &mut probe), &index),
+            Some("split") => {
+                let t: Num = serde_json::from_value(case["t"].clone()).map_err(|e| format!("{cname}: t: {e}"))?;
+                layer2::split_answer_json(&layer2::split_first_with(&turn, t, &mut probe), &index)
+            }
+            k => return Err(format!("{cname}: unknown kind {k:?}")),
+        };
+        cmp.answer(&got, &want, &|| cname.to_string());
+        for (k, r) in [("pieces", probe.pieces), ("splitCalls", probe.split_calls), ("splits", probe.splits)] {
+            counts += 1;
+            let p = case["counts"][k].as_u64();
+            if p != Some(r as u64) {
+                cmp.diff(format!("{cname}: {k} rust {r} python {}", count_str(p)));
+            }
+        }
+        probe_total.pieces += probe.pieces;
+        probe_total.split_calls += probe.split_calls;
+        probe_total.splits += probe.splits;
+    }
+    for s in &cmp.shown {
+        println!("  {s}");
+    }
+    println!(
+        "layer2 edge set{}: {} cases, {} loaded and compared ({} values, {} counts), {} refused at load (every REFUSE \
+         case), {} differences (python {})",
+        plant_name(plant),
+        cases.len(),
+        loaded,
+        cmp.values,
+        counts,
+        refused,
+        cmp.diffs,
+        doc["python"].as_str().unwrap_or("?")
+    );
+    println!(
+        "  Python raises on {} cases: {} matched as the same exception here, {} refused at load; over the loaded \
+         cases {} pieces examined, {} split calls, {} splits",
+        raised + raised_refused,
+        raised,
+        raised_refused,
+        probe_total.pieces,
+        probe_total.split_calls,
+        probe_total.splits
+    );
+    Ok(cmp.diffs == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,6 +791,34 @@ mod tests {
         assert_eq!(first_difference(b"\"mtime\": 1.0}", b"\"mtime\": 1}").unwrap(),
                    "byte 10: python ...\"mtime\": 1.0}... rust ...\"mtime\": 1}...");
         assert_eq!(first_difference(b"ab", b"abc").unwrap(), "byte 2: python ...ab... rust ...abc...");
+    }
+
+    #[test]
+    fn the_layer2_comparison_names_each_differing_field() {
+        let seg = |end: Out, extra: bool| {
+            let mut m = vec![("t".to_string(), Out::Int(1)), ("end".to_string(), end)];
+            if extra {
+                m.push(("seam".to_string(), Out::Bool(true)));
+            }
+            Out::Object(m)
+        };
+        let mut c = Cmp::default();
+        let one = |end: Out, extra: bool| Out::Array(vec![seg(end, extra)]);
+        c.answer(&one(Out::Int(2), false), &one(Out::Int(2), false), &|| "a".into());
+        assert_eq!((c.values, c.diffs), (4, 0), "the count, the key order and two keys");
+        c.answer(&one(Out::Int(2), false), &one(Out::Float(2.0), true), &|| "b".into());
+        assert_eq!(c.shown, [
+            "b segment 0: keys rust [\"t\", \"end\"] python [\"t\", \"end\", \"seam\"]",
+            "b segment 0 end: rust 2 python 2.0",
+            "b segment 0 seam: rust <absent> python true",
+        ]);
+        c.answer(&Out::Array(vec![]), &Out::Array(vec![seg(Out::Int(2), false)]), &|| "c".into());
+        assert_eq!(c.shown[3], "c: 0 segments here, 1 in python");
+        let raise = layer2::Raise { exc: "KeyError", arg: "'t'".into() }.to_json();
+        c.answer(&Out::Null, &raise, &|| "d".into());
+        assert_eq!(c.shown[4], "d: rust null python {\"raises\": \"KeyError\", \"arg\": \"'t'\"}");
+        assert_eq!(c.diffs, 5);
+        assert_eq!(count_str(None), "absent");
     }
 
     #[test]

@@ -39,7 +39,9 @@ record! {
         ended: bool = "ended",
         id: String = "id",
         trigger: Option<Trigger> = "trigger",
-        placed_echoes: Option<Vec<String>> = "placedEchoes",
+        /// The uuids of stale echoes placed into this turn (kernel._turn_sans_placed_echoes drops them); an atom
+        /// without a uuid matches a null entry, as `None in set(placed)` does.
+        placed_echoes: Option<Vec<Option<String>>> = "placedEchoes",
         echo_turn: serde_json::Value = "echoTurn",
         /// Set on a restored pre-cut turn (refused by `validate`; em.turn_scalar reads it).
         pre: serde_json::Value = "pre",
@@ -288,15 +290,23 @@ const TURN_UNPORTED: &[&str] = &["segs"];
 pub fn validate(tree: &Tree) -> Result<(), String> {
     let turns = tree.turns.as_deref().unwrap_or_default();
     for (ti, turn) in turns.iter().enumerate() {
-        if turn.pre.as_ref().is_some_and(py_truthy) {
-            return Err(format!("turns[{ti}]: a restored pre-cut turn (`pre`): its stored spans are not ported"));
-        }
-        if let Some(k) = turn.unported_key(TURN_UNPORTED) {
-            return Err(format!("turns[{ti}]: key {k:?} is read by the per-card code but not typed"));
-        }
-        for (ai, atom) in turn.atoms.as_deref().unwrap_or_default().iter().enumerate() {
-            validate_atom(atom).map_err(|e| format!("turns[{ti}].atoms[{ai}]: {e}"))?;
-        }
+        validate_turn(turn).map_err(|e| format!("turns[{ti}]{e}"))?;
+    }
+    Ok(())
+}
+
+/// Refuse a turn the port would read differently from Python: a restored pre-cut turn (em.segments' first branch
+/// returns its stored spans, which are not ported), a key the per-card code reads but `Turn` does not type, or a
+/// refused atom. `Err` starts with the path inside the turn (`""`, or `.atoms[i]`) and a colon.
+pub fn validate_turn(turn: &Turn) -> Result<(), String> {
+    if turn.pre.as_ref().is_some_and(py_truthy) {
+        return Err(": a restored pre-cut turn (`pre`): its stored spans are not ported".to_string());
+    }
+    if let Some(k) = turn.unported_key(TURN_UNPORTED) {
+        return Err(format!(": key {k:?} is read by the per-card code but not typed"));
+    }
+    for (ai, atom) in turn.atoms.as_deref().unwrap_or_default().iter().enumerate() {
+        validate_atom(atom).map_err(|e| format!(".atoms[{ai}]: {e}"))?;
     }
     Ok(())
 }

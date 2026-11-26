@@ -151,7 +151,8 @@ record! {
         placements: OMap<String> = "placements",
         status: OMap<String> = "status",
         last_node: Option<String> = "lastNode",
-        seams: Vec<Seam> = "seams",
+        /// May be null (`store.get("seams") or []`).
+        seams: Option<Vec<Seam>> = "seams",
         confirming: Vec<serde_json::Value> = "confirming",
         rev: Num = "rev",
     }
@@ -203,7 +204,8 @@ record! {
         t: Num = "t",
         top: Option<String> = "top",
         text: Option<String> = "text",
-        segs: Vec<String> = "segs",
+        /// The timestamp-invariant keys (jd._seg_key) of the segments the top owned; null or empty skips the seam.
+        segs: Option<Vec<String>> = "segs",
     }
 }
 
