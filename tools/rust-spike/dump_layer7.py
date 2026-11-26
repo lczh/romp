@@ -15,7 +15,11 @@ dump_layer6's stubs (the live backend's recorded `current_ask`, the derivation's
 the real fold through em.serve_records, the maildir files and notice files written into the replay's empty state root
 for the real readers (the notice memo cleared first), and the held-mail backfill stubbed (a writer that posts and
 retires held-mail notice rows from the hold directory; its effect is in the rows a case gives). _node_anchor_last and
-the build memos are cleared first, so a case starts as a fresh process does. The clock is the case's `world.now`.
+the build memos are cleared first, so a case starts as a fresh process does. The clock is the case's `world.now`. The
+port reads `mailNew` as exact (recipient, id) pairs where Python asks the filesystem, so the harness answers no world
+whose `mailNew` this filesystem contradicts for a parked candidate (its file exists() here and is not listed, or the
+reverse: APFS ignores letter case, so a send `M1` finds a file `m1`), as it answers none whose notice files collide;
+the loader refuses the ids a path lookup reads as another path (kernel._safe_id).
 
 The frame keys build_feed passes through (`views`, `judgeLimit`, `stateUnknown`, `sessions`, ...) come from the same
 build: a case's `frameKeys` are the feed's keys minus `servingFoldedIds` and `absentSids` (the port decides those two and
@@ -134,9 +138,43 @@ class Lines:
 
 
 # ───────────────────────────── the harness ─────────────────────────────
-def answer_feed(l6, dw, km, snap, trees, lines=None):
+class Unfaithful(Exception):
+    """The world's mailNew does not say what this filesystem says: a parked candidate's maildir file exists() here and
+    is not listed, or is listed and does not exist here (APFS ignores letter case, so `M1` finds a file `m1`; a path
+    lookup also drops `.` components and trailing slashes, which the loader refuses with kernel._safe_id). The port
+    reads mailNew as exact pairs, so such a world has no answer to compare."""
+
+
+def parked_unfaithful(km, board, alive, postal):
+    """The parked candidates whose maildir test on this filesystem disagrees with their mailNew membership, each
+    (mid, to_id, exists here, listed): the real fold (_parked_fold_step over the postal log's dict rows, as fold_records
+    steps them), then the stat _parked_handoffs makes for a candidate whose recipient is not alive."""
+    state = {}
+    try:
+        for o in board.get("postalLog") or []:
+            if isinstance(o, dict):
+                state = km._parked_fold_step(state, o)
+    except Exception:                                  # noqa: BLE001 (the build meets the same raise in its own fold)
+        return []
+    listed = {(to, mid) for to, mid in board.get("mailNew") or []}
+    out = []
+    for mid, c in state.items():
+        to = c["toId"]
+        if not (isinstance(mid, str) and isinstance(to, str)) or to in alive:
+            continue
+        try:
+            there = (postal / "mail" / to / "new" / mid).exists()
+        except (OSError, ValueError):                  # Python's build reads an OSError as no file; NUL raises there
+            there = False
+        if there != ((to, mid) in listed):
+            out.append((mid, to, there, (to, mid) in listed))
+    return out
+
+
+def answer_feed(l6, dw, km, snap, trees, lines=None, faithful=True):
     """One replay build_feed over a world, the real fold and passes included: (feed, None), or (None, the raise) when
-    build_feed itself raised."""
+    build_feed itself raised. With `faithful`, a world whose mailNew this filesystem contradicts raises Unfaithful
+    (only a REFUSE case, which the loader refuses on other grounds, is answered as Python reads it)."""
     jd = km.jd
     board, now = snap["board"], snap["world"]["now"]
     notices_dir, postal = km._notice_dir(), jd.STATE / "postal"
@@ -155,6 +193,12 @@ def answer_feed(l6, dw, km, snap, trees, lines=None):
         p = postal / "mail" / to / "new" / mid
         os.makedirs(p.parent, exist_ok=True)
         p.write_text("")
+    bad = parked_unfaithful(km, board, {r["sid"] for r in snap["alive"]}, postal) if faithful else []
+    if bad:
+        for d in (notices_dir, postal):
+            shutil.rmtree(d, ignore_errors=True)
+        raise Unfaithful("dump_layer7: mailNew disagrees with this filesystem's maildir test for parked candidates "
+                         "(mid, to_id, exists here, listed): %r" % (bad,))
     rp = dw.Replay(km, snap, trees)
     dw.clear_build_memos(km)
     km._node_anchor_last.clear()
@@ -267,7 +311,7 @@ def answer_cases(l6, dw, km, specs, lines=None):
     for spec in specs:
         name, snap, trees = spec[:3]
         try:
-            feed, raised = answer_feed(l6, dw, km, snap, trees, lines)
+            feed, raised = answer_feed(l6, dw, km, snap, trees, lines, faithful=not name.startswith("REFUSE "))
         except Exception as e:                         # noqa: BLE001 (only a refused world may break the harness)
             if not name.startswith("REFUSE "):
                 raise
@@ -406,6 +450,12 @@ def edge_cases(km, l6):
     for age in (28675.670495616596, 10594.720899223195):     # aurora: 50.5 reads 50; 168.5 and 188.5 read 168, 188
         add("tint: an age whose channel lands on an exact half rounds it to even (the clock %r, the card at 0)" % age,
             with_now(W(idle_s(0, g(0, "g1", t=0))), age))
+    add("tint: an int clock minus a float time is float arithmetic, the time not truncated (a card and its row at "
+        "NOW - 121.5)", W(idle_s(0, g(0, "g1", t=NOW - 121.5), g(0, "c1", parentId="g1", t=NOW - 121.5))))
+    add("tint: an age where ramp's float order shows: a + (b - a) * fr, not a * (1 - fr) + b * fr (the clock "
+        "146335.799933855, the card at 0)", with_now(W(idle_s(0, g(0, "g1", t=0))), 146335.799933855))
+    add("tint: a float clock past i64 (1e19) with no parked send is admitted: every age a float, the darkest stop",
+        with_now(W(idle_s(0, g(0, "g1", t=NOW - 3000), g(0, "c1", parentId="g1", t=NOW - 30))), 1e19))
     big = 2 ** 60 + 1
     add("tint: a clock past 2**53: the age is int arithmetic, exact, then rounded (1000 s, where floats read 1024)",
         with_now(W(idle_s(0, g(0, "g1", t=big - 1000), g(0, "c1", parentId="g1", t=big - 1001, nodeComplete=True))), big))
@@ -443,6 +493,12 @@ def edge_cases(km, l6):
     add("bell: a card override 0 and \"\": falsy, not None: mutes", two(board={"notifyCards": {"*": True, "g1": 0, "g2": ""}}))
     add("bell: a card override false beats the session's flag true",
         two(board={"notifyCards": {"g1": False}}, flags0={"notify": True}))
+    add("bell: card overrides 1 and \"yes\", the master off: truthy, so armed and an explicit true",
+        two(board={"notifyCards": {"g1": 1, "g2": "yes"}}))
+    add("bell: a card whose itemId is \"\" muted, the master on: notify reads the override, notifyRaw skips it "
+        "(Python's `if item_id:`)", W(idle_s(0, g(0, "", t=NOW - 100)), board={"notifyCards": {"": False, "*": True}}))
+    add("bell: a card whose itemId is \"\" armed, its session's flag false: notifyRaw is the flag, not the override",
+        W(idle_s(0, g(0, "", t=NOW - 100), flags={"notify": False}), board={"notifyCards": {"": True}}))
     add("bell: a card override null is no override (the session's flag decides)",
         two(board={"notifyCards": {"g1": None, "*": True}}, flags0={"notify": False}))
     for v in (True, False, None, 0, "yes"):
@@ -512,6 +568,13 @@ def edge_cases(km, l6):
     add("serving: the joined rows' handoff rows take the whoWorking stamp",
         W(sender(0), idle_s(1, g(1, "w1", serving=srv("h1"), promptUuid="u1"),
                             hand("wh", SIDS[2], parentId="w1")), open_s(2, g(2, "g1"))))
+    add("serving: a second candidate aimed at a joined row of the first keeps its own card (the tracker rows are "
+        "indexed once, before the join)",
+        W(sender(0), idle_s(1, g(1, "w1", serving=srv("h1"), promptUuid="u1"), hand("wh", PEER, parentId="w1")),
+          idle_s(2, g(2, "x1", serving=srv("wh"), t=NOW - 100))))
+    add("serving: a later candidate aimed at a kept candidate's handoff row keeps its own card",
+        W(idle_s(0, g(0, "w1", serving=srv("h9"), promptUuid="u1"), hand("wh", PEER, parentId="w1")),
+          idle_s(1, g(1, "x1", serving=srv("wh"), t=NOW - 100))))
     add("serving: a tracker row whose children already list ids gets the candidate's first row appended",
         W(idle_s(0, g(0, "g1", promptUuid="u1", t=NOW - 400), hand("h1", PEER, parentId="g1", t=NOW - 300),
                  g(0, "k1", parentId="h1", t=NOW - 250)), worker(1)))
@@ -569,9 +632,23 @@ def edge_cases(km, l6):
         pk([sent("z1", DEAD, PEER, t=300), sent("z2", DEAD2, PEER, t=100), sent("z3", DEAD, PEER, t=300),
             sent("z4", DEAD, PEER, t=200), sent("z5", DEAD2, PEER, t=100)],
            [[DEAD, "z1"], [DEAD2, "z2"], [DEAD, "z3"], [DEAD, "z4"], [DEAD2, "z5"]]))
-    add("parked: names from the registry, else the sid's first 8 code points (an empty name, a non-ASCII sid)",
-        pk([sent("n1", DEAD, SIDS[0], t=5), sent("n2", DEAD2, UNI, t=6), sent("n3", UNI, "zz-unknown-sender", t=7)],
-           [[DEAD, "n1"], [DEAD2, "n2"], [UNI, "n3"]]))
+    add("parked: names from the registry, else the sid's first 8 code points (an empty name, a non-ASCII sender, an "
+        "unknown recipient)",
+        pk([sent("n1", DEAD, SIDS[0], t=5), sent("n2", DEAD2, UNI, t=6),
+            sent("n3", "zz-unknown-recipient", "zz-unknown-sender", t=7)],
+           [[DEAD, "n1"], [DEAD2, "n2"], ["zz-unknown-recipient", "n3"]]))
+    add("parked: a 128-character id (kernel._safe_id's cap) is admitted and shows",
+        pk([sent("m" * 128, DEAD, PEER, t=NOW - 60)], [[DEAD, "m" * 128]]))
+    add("parked: ids a path lookup misreads pass the loader on rows the fold does not park (not parked, recalled, "
+        "bounced, another event) and as a sender",
+        pk([sent(".", DEAD, PEER, park=False), sent("m1/", DEAD + "/", PEER, park=0), {"ev": "recall", "id": "../x"},
+            {"ev": "bounced", "id": "M1"}, {"ev": "exec", "id": ".", "to_id": UNI}, sent("ok2", UNI, PEER, park=None),
+            sent("ok", DEAD, UNI + "/.", t=5)], [[DEAD, "ok"]]))
+    add("parked and notice: a recipient and a notice file's owner alive but absent (its derivation raised) count as "
+        "alive: no parked card, the notice live",
+        pk([sent("a1", SIDS[1], PEER, t=NOW - 300)], [[SIDS[1], "a1"]], idle_s(0, g(0, "g1")),
+           idle_s(1, g(1, "g1"), rec=REC(drop=("interrupting",))),
+           board={"notices": {SIDS[1]: [notice(t=NOW - 50, title="for the absent one")]}}))
     add("parked: a cleared parked id is skipped",
         pk([sent("c1", DEAD, PEER, t=5), sent("c2", DEAD, PEER, t=6)], [[DEAD, "c1"], [DEAD, "c2"]],
            board={"cleared": ["parked:c1"]}))
@@ -713,8 +790,27 @@ def refuse_cases(km, l6):
                       ("a parked send whose time is a string", sent("m1", DEAD, PEER, t="1781099000")),
                       ("a parked send whose time is past i64", sent("m1", DEAD, PEER, t=1e20)),
                       ("a parked send whose body is a dict", sent("m1", DEAD, PEER, body={"x": 1})),
-                      ("a recall whose id is a list", {"ev": "recall", "id": ["m1"]})):
+                      ("a recall whose id is a list", {"ev": "recall", "id": ["m1"]}),
+                      # kernel._safe_id's rule on a parked send's id and to_id (Python looks the mail up by path)
+                      ("a parked send whose id is '.' (the path is the recipient's new/ directory itself)",
+                       sent(".", DEAD, PEER, t=5)),
+                      ("a parked send whose id ends in a slash (pathlib drops it: m1/ finds m1)",
+                       sent("m1/", DEAD, PEER, t=5)),
+                      ("a parked send whose to_id ends in a slash", sent("m1", DEAD + "/", PEER, t=5)),
+                      ("a parked send whose id starts with a dot", sent(".m1", DEAD, PEER, t=5)),
+                      ("a parked send whose id holds a backslash", sent("m\\1", DEAD, PEER, t=5)),
+                      ("a parked send whose id holds NUL (pathlib's exists() reads it as no file)",
+                       sent("m\x001", DEAD, PEER, t=5)),
+                      ("a parked send whose id is 129 characters (past kernel._safe_id's cap)",
+                       sent("m" * 129, DEAD, PEER, t=5)),
+                      ("a parked send whose id holds a space (outside [A-Za-z0-9._-])", sent("m 1", DEAD, PEER, t=5)),
+                      ("a parked send whose id starts with a hyphen", sent("-m1", DEAD, PEER, t=5)),
+                      ("a parked send whose to_id is not ASCII (APFS also folds Unicode normalization)",
+                       sent("m1", UNI, PEER, t=5))):
         add(name, one(board={"postalLog": [row], "mailNew": [[DEAD, "m1"]]}))
+    for now in (1e19, -1e19):
+        add("a float clock whose int() is past i64 (%r) while a parked send has no time" % now,
+            with_now(one(board={"postalLog": [sent("m1", DEAD, PEER)], "mailNew": [[DEAD, "m1"]]}), now))
     for name, rows in (("a notice post whose key is a number", [notice(key=5)]),
                        ("a notice expire whose key is a list", [notice("expire", key=["a"])]),
                        ("a notice rev that is a string", [notice(rev="2")]),
@@ -801,8 +897,8 @@ FZ_TRUTHY = (True, True, False, False, 0, 1, "", "x", None, [], {"a": 1})
 
 
 def fz_postal(rng, sids, now):
-    pool_to = [DEAD, DEAD2, UNI, "eeeeeeee-dead-0001"] + sids
-    pool_from = [DEAD, PEER, "zz-sender", ""] + sids
+    pool_to = [DEAD, DEAD2, "eeeeeeee-dead-0001"] + sids     # safe ids (kernel._safe_id): the loader refuses others
+    pool_from = [DEAD, PEER, "zz-sender", "", UNI] + sids
     mids = ["m%d" % i for i in range(6)]
     log, mail = [], []
     for _ in range(rng.choice((0, 0, 1, 2, 3, 5, 8))):
@@ -824,13 +920,14 @@ def fz_postal(rng, sids, now):
         elif r < 0.85:
             log.append({"ev": rng.choice(("recall", "bounced")), "id": mid})
         elif r < 0.95:
-            log.append({"ev": rng.choice(("exec", "unexec", "read", None)), "id": mid, "to_id": rng.choice(pool_to)})
+            log.append({"ev": rng.choice(("exec", "unexec", "read", None)), "id": mid,
+                        "to_id": rng.choice(pool_to + [UNI])})
         else:
             log.append(rng.choice((5, "x", [1], None)))
     if rng.random() < 0.15:
         # a re-send around another parked send of the same time: the fold keeps the first send's place, and the sort by
         # time keeps the fold's order on the tie
-        a, b, to = rng.sample(mids, 2) + [rng.choice((DEAD, DEAD2, UNI))]
+        a, b, to = rng.sample(mids, 2) + [rng.choice((DEAD, DEAD2, "eeeeeeee-dead-0001"))]
         t = rng.choice((now - 600, 100))
         log += [{"ev": "sent", "id": a, "to_id": to, "from_id": PEER, "park": True, "t": t},
                 {"ev": "sent", "id": b, "to_id": to, "from_id": PEER, "park": True, "t": t},

@@ -120,7 +120,7 @@ fn every_case_builds_pythons_feed_byte_for_byte() {
             }
         }
     }
-    assert_eq!((loaded + refused, refused), (all.len(), 24), "every REFUSE case is refused, every other loads");
+    assert_eq!((loaded + refused, refused), (all.len(), 36), "every REFUSE case is refused, every other loads");
     assert_eq!(raised, 1, "the one admitted build that raises: a null card in an entry's asks");
     assert!(cards >= 380, "{cards} cards");
 }
@@ -167,6 +167,8 @@ fn each_plant_is_caught_on_the_cases_built_for_it() {
             "bell: a card override false, the master on: an explicit mute (never the master)",
             "bell: a card override 0 and \"\": falsy, not None: mutes",
             "bell: a card override false beats the session's flag true",
+            "bell: a card whose itemId is \"\" muted, the master on: notify reads the override, notifyRaw skips it \
+             (Python's `if item_id:`)",
             "parked: bells: a card override, the recipient's own flag",
             "frame: every producer at once: session cards, a kept candidate, parked and notice cards, all belled",
         ]),
@@ -190,6 +192,8 @@ fn each_plant_is_caught_on_the_cases_built_for_it() {
             "fold: a raising session is absent; the others fold around it",
             "fold: two raising sessions, absentSids in alive order",
             "who: the recipient's derivation raised (absent): dark",
+            "parked and notice: a recipient and a notice file's owner alive but absent (its derivation raised) count as \
+             alive: no parked card, the notice live",
             "frame: servingFoldedIds and absentSids both made: right after now, in that order",
         ]),
     ];
@@ -204,10 +208,12 @@ fn each_plant_is_caught_on_the_cases_built_for_it() {
 }
 
 #[test]
-fn the_line_trace_missed_only_lines_a_fresh_replay_cannot_run() {
+fn the_line_trace_missed_only_lines_an_admitted_world_cannot_run_in_a_fresh_replay() {
     // build_feed's memo and key arms (a held entry, a hit, a raise served from the memo, the live map read when the
-    // caller passes none, the subagent reads), the fold's kept-record path, the maildir stat that raises, and
-    // _notice_rows' absent, memoized, unreadable, blank and undecodable lines (a decoded snapshot holds none)
+    // caller passes none, the subagent reads), the fold's kept-record path, the maildir stat that raises (an id past
+    // the filesystem's name limit raises OSError 63, file name too long; the loader refuses ids over kernel._safe_id's
+    // 128 characters), and _notice_rows' absent, memoized, unreadable, blank and undecodable lines (a decoded snapshot
+    // holds none)
     let f = fixture();
     let missed = f["lineCoverage"]["missed"].as_object().expect("missed lines");
     let counts: Vec<(String, usize)> =
@@ -219,4 +225,37 @@ fn the_line_trace_missed_only_lines_a_fresh_replay_cannot_run() {
         ("kernel._notice_rows".to_string(), 11),
     ]);
     assert_eq!((f["lineCoverage"]["ran"].as_u64(), f["lineCoverage"]["lines"].as_u64()), (Some(371), Some(414)));
+}
+
+#[test]
+fn the_review_rounds_refusals_name_their_rule() {
+    // S4.7's review round: kernel._safe_id on a parked send's id and to_id (Python looks the mail up by path), and a
+    // clock whose int() is past i64 while the postal log holds a parked send (a parked send with no time reads int(now))
+    let unsafe_at = |k: &str| {
+        format!("snapshot: board.postalLog[0].{k}: not a safe path component (kernel._safe_id): Python looks the parked \
+                 mail up by path")
+    };
+    let clock = "snapshot: world.now: int() past i64 while the postal log holds a parked send (a parked send with no \
+                 time reads int(now))"
+        .to_string();
+    let want: Vec<(&str, String)> = vec![
+        ("REFUSE a parked send whose id is '.' (the path is the recipient's new/ directory itself)", unsafe_at("id")),
+        ("REFUSE a parked send whose id ends in a slash (pathlib drops it: m1/ finds m1)", unsafe_at("id")),
+        ("REFUSE a parked send whose to_id ends in a slash", unsafe_at("to_id")),
+        ("REFUSE a parked send whose id starts with a dot", unsafe_at("id")),
+        ("REFUSE a parked send whose id holds a backslash", unsafe_at("id")),
+        ("REFUSE a parked send whose id holds NUL (pathlib's exists() reads it as no file)", unsafe_at("id")),
+        ("REFUSE a parked send whose id is 129 characters (past kernel._safe_id's cap)", unsafe_at("id")),
+        ("REFUSE a parked send whose id holds a space (outside [A-Za-z0-9._-])", unsafe_at("id")),
+        ("REFUSE a parked send whose id starts with a hyphen", unsafe_at("id")),
+        ("REFUSE a parked send whose to_id is not ASCII (APFS also folds Unicode normalization)", unsafe_at("to_id")),
+        ("REFUSE a float clock whose int() is past i64 (1e+19) while a parked send has no time", clock.clone()),
+        ("REFUSE a float clock whose int() is past i64 (-1e+19) while a parked send has no time", clock),
+    ];
+    let all = cases();
+    for (name, why) in &want {
+        let got = all.iter().find(|(n, _, _)| n == name).unwrap_or_else(|| panic!("{name}: not in the fixture"));
+        assert_eq!(got.1.as_ref().err(), Some(why), "{name}");
+    }
+    assert_eq!(want.len(), 12);
 }

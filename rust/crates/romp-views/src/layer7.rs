@@ -28,8 +28,10 @@
 //! - The tint is `ramp(1 - f)` with `f` the log position of the age, each channel `round()`ed half to even (59.5 reads
 //!   60, 50.5 reads 50), and the colormap's name lowercased with Python's `lower()`; an unknown or null name is
 //!   colormap.DEFAULT, "aurora" (the module docstring's "default hawaii" is stale). The age is `now - _ageT` in Python
-//!   arithmetic (int minus int exactly, then `float()`: past 2**53 an age of 1000 s reads 1024 s through floats), and a
-//!   null `_ageT` is the clock itself (age 0, the brightest stop). Not pinned, because no feed shows a difference:
+//!   arithmetic (int minus int exactly, then `float()`: past 2**53 an age of 1000 s reads 1024 s through floats; an int
+//!   clock minus a float time is float arithmetic, the time never truncated), and a null `_ageT` is the clock itself
+//!   (age 0, the brightest stop). ramp mixes `a + (b - a) * fr`, which rounds differently from `a * (1 - fr) + b * fr`
+//!   on some ages. Not pinned, because no feed shows a difference:
 //!   age_rgb clamps the age to [120, 345600] s and ramp clamps `v` to [0, 1], and the two clamps overlap, so taking out
 //!   either one alone changes no tint of an age (ramp's own clamp shows on a direct call outside [0, 1], which the
 //!   fixture's tint table makes).
@@ -40,10 +42,13 @@
 //! - A bell override is read with `is None`: a stored `false` or `0` on a card is an explicit mute (`notify` null,
 //!   `notifyRaw` false) and never falls through to the session flag or the master. `notify` is `true` or null, never
 //!   false; `notifyRaw` is the card's override, else the session's flag, else null, and the master is never read there.
+//!   A truthy override that is not a bool (1, "yes") arms; a card whose itemId is "" reads its override in `notify` but
+//!   not in `notifyRaw` (Python's `if item_id:`).
 //! - The serving join keys the tracker rows by id with the LAST handoff row of that id winning, appends the candidate's
 //!   first row id to the tracker row's children and every candidate row to the tracker card's tree; a candidate with
 //!   no rendered tracker row lands as its own card after every session card and takes its bells from the bell pass.
-//!   `servingFoldedIds` lists the folded candidates' item ids.
+//!   `servingFoldedIds` lists the folded candidates' item ids. The tracker rows are indexed once, before the join, so
+//!   neither a joined row nor a kept candidate's handoff row is a tracker for a later candidate.
 //! - `whoWorking` on a handoff row is its recipient's (`whoSid` among the sids whose fold added a `working` name), not
 //!   the card owner's, and only handoff rows take the stamp: a working session whose name is "" adds no name, so a
 //!   handoff to it stays dark while its own ask rows keep the bit layer 6 gave them.
@@ -56,7 +61,7 @@
 //! - Parked handoffs: the fold keeps a re-sent message id in its first place, a recall or bounce removes it (a later
 //!   send re-adds it at the end); a candidate counts only while its recipient is not alive and its maildir file stands;
 //!   names fall back to the sid's first 8 code points; a missing time is `int(now)`; the list is sorted by time,
-//!   stably.
+//!   stably. The alive set the parked and notice cards read is every alive session, the absent ones included.
 //! - Notices: the newest revision per key wins on `>=` (a later post of an equal rev replaces); an expire or acted row
 //!   applies to its exact (key, rev); an acted card ships no actions and `acted: true`; an expiry applies when
 //!   `now >= int(expiresAt)`; the cap of 50 counts only cards that are not held mail; cards sort by (t, key) within a
@@ -67,12 +72,21 @@
 //! Refused at load (`validate`), each where Python would raise, or read a shape the port does not mirror: an alive row
 //! whose name is not a string, a world without a colormap key, a bells store that is not a dict, a node whose serving
 //! `goalId` is a list or a dict (the join hashes it), postal log rows whose id, recipient or sender is not a string on a
-//! parked send (or not hashable on a recall), whose truthy time is a string (Python's `int(str)` is not ported) or whose
-//! truthy body is neither a string nor a list (the fold slices it), a time past i64, notice rows (op post, expire or
-//! acted) whose key is not a string, whose truthy rev, time or expiry is not a number or a bool (or truncates past
-//! i64), whose truthy actions are not a list of dicts, or whose action carries a truthy non-string kind or route or a
-//! truthy non-dict body; a notice file sid that is empty or holds `/`; frame keys without `now`, or naming a
-//! passthrough key the frame lacks.
+//! parked send (or not hashable on a recall), whose truthy time is a string (Python's `int(str)` is not ported) or
+//! truncates past i64, or whose truthy body is neither a string nor a list (the fold slices it); a parked send whose id
+//! or recipient fails kernel._safe_id's rule (empty, over 128 characters, or not `[A-Za-z0-9][A-Za-z0-9._-]*`, which
+//! also rules out `/`, `\`, NUL and a leading dot): Python asks `Path(base/"mail"/to/"new"/mid).exists()`, a path
+//! lookup that drops `.` components and trailing slashes, while the port looks the exact pair up in `mailNew`; a clock
+//! whose `int()` is past i64 while the postal log holds a parked send (a parked send with no time reads `int(now)`,
+//! which Python keeps exact); notice rows (op post, expire or acted) whose key is not a string, whose truthy rev, time
+//! or expiry is not a number or a bool (or truncates past i64), whose truthy actions are not a list of dicts, or whose
+//! action carries a truthy non-string kind or route or a truthy non-dict body; a notice file sid that is empty or holds
+//! `/`; frame keys without `now`, or naming a passthrough key the frame lacks.
+//!
+//! What the loader cannot see: whether two different safe names reach one file on the filesystem Python runs on (APFS,
+//! the macOS default, ignores letter case: `M1` finds `m1`). `mailNew` is a record of which maildir files stand, and
+//! the port reads it as exact pairs; dump_layer7.py refuses to answer a world where a parked candidate's `exists()`
+//! disagrees with its `mailNew` membership on the filesystem it runs on, as it refuses notice files that collide.
 
 use std::collections::{HashMap, HashSet};
 
@@ -324,15 +338,18 @@ fn sid_of(card: &Obj) -> &str {
     str_of(get(card, "sid")).unwrap_or("")
 }
 
+/// `int(f)` of a float (truncated toward zero), or None when the integer is past i64 (2**63 and beyond, either sign;
+/// refused at load wherever the port would read it).
+fn float_int(f: f64) -> Option<i64> {
+    Some(f.trunc()).filter(|t| t.abs() < 9.223_372_036_854_776e18).map(|t| t as i64)
+}
+
 /// `int(x)` of a JSON number or bool (Python truncates a float toward zero; `True` is 1); None for anything else, or a
 /// float whose integer is past i64 (refused at load).
 pub fn py_int(v: &J) -> Option<i64> {
     match v {
         J::Bool(b) => Some(i64::from(*b)),
-        J::Number(n) => n.as_i64().or_else(|| {
-            n.is_f64().then(|| n.as_f64().expect("a float")).map(f64::trunc).filter(|t| t.abs() < 9.223_372_036_854_776e18)
-                .map(|t| t as i64)
-        }),
+        J::Number(n) => n.as_i64().or_else(|| n.as_f64().filter(|_| n.is_f64()).and_then(float_int)),
         _ => None,
     }
 }
@@ -345,12 +362,27 @@ fn int_or0(v: Option<&J>) -> i64 {
     }
 }
 
-/// `int(now)`.
+/// `int(now)`, which only a parked send with no time reads; `validate` refuses a clock past i64 while the postal log
+/// holds a parked send.
 fn int_now(now: Num) -> i64 {
     match now {
         Num::Int(i) => i,
-        Num::Float(f) => f.trunc() as i64,
+        Num::Float(f) => float_int(f).expect("validated at load: a clock within i64 when a parked send reads it"),
     }
+}
+
+/// kernel._safe_id(s): a single path component the maildir lookup reads as itself. `[A-Za-z0-9]` in Python's pattern is
+/// a literal ASCII range, so every admitted id is ASCII and its length in code points is its length in bytes.
+pub fn safe_id(s: &str) -> bool {
+    if s.is_empty() || s.chars().count() > 128 {
+        return false;
+    }
+    if s.contains(['/', '\\', '\0']) || s.starts_with('.') {
+        return false;
+    }
+    let mut cs = s.chars();
+    cs.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && cs.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 // ───────────────────────────── the feed ─────────────────────────────
@@ -944,8 +976,8 @@ fn is_text(v: &J) -> bool {
     v.is_string()
 }
 
-/// The shapes layer 7 refuses at load (see the module's last paragraph). Run after `snapshot::validate` and
-/// `layer6::validate`.
+/// The shapes layer 7 refuses at load (see the module's paragraph "Refused at load"). Run after `snapshot::validate`
+/// and `layer6::validate`.
 pub fn validate(snap: &Snapshot) -> Result<(), String> {
     for (i, r) in snap.alive().iter().enumerate() {
         if !matches!(&r.name, Some(Some(_))) {
@@ -971,6 +1003,7 @@ pub fn validate(snap: &Snapshot) -> Result<(), String> {
             }
         }
     }
+    let mut parked_send = false;
     for (i, o) in board.postal_log.iter().flatten().enumerate() {
         let Some(o) = o.as_object() else { continue };
         let at = format!("board.postalLog[{i}]");
@@ -981,8 +1014,15 @@ pub fn validate(snap: &Snapshot) -> Result<(), String> {
                 if !(o.get("park").is_some_and(py_truthy) && to.is_some_and(py_truthy) && from.is_some_and(py_truthy)) {
                     continue;
                 }
+                parked_send = true;
                 if !is_text(mid) || !to.is_some_and(is_text) || !from.is_some_and(is_text) {
                     return Err(format!("{at}: a parked send whose id, to_id or from_id is not a string"));
+                }
+                for (k, v) in [("id", mid), ("to_id", to.expect("checked above"))] {
+                    if !safe_id(v.as_str().expect("checked above")) {
+                        return Err(format!("{at}.{k}: not a safe path component (kernel._safe_id): Python looks the \
+                                            parked mail up by path"));
+                    }
                 }
                 if let Some(t) = o.get("t").filter(|v| py_truthy(v)) {
                     if t.is_string() {
@@ -1001,6 +1041,14 @@ pub fn validate(snap: &Snapshot) -> Result<(), String> {
             }
             _ => {}
         }
+    }
+    if let Num::Float(f) = snap.now()
+        && parked_send
+        && float_int(f).is_none()
+    {
+        return Err("world.now: int() past i64 while the postal log holds a parked send (a parked send with no time \
+                    reads int(now))"
+            .into());
     }
     for (sid, lines) in board.notices.iter().flat_map(|m| m.iter()) {
         if sid.is_empty() || sid.contains('/') || sid.contains('\0') {
@@ -1122,6 +1170,29 @@ mod tests {
         assert_eq!(py_int(&j("1e300")), None, "past i64: refused at load");
         assert_eq!(py_int(&j("\"5\"")), None);
         assert_eq!(int_or0(Some(&j("[]"))), 0, "a falsy value reads 0");
+    }
+
+    #[test]
+    fn safe_ids_are_the_kernels() {
+        // each checked against kernel._safe_id
+        let long = |n: usize| "m".repeat(n);
+        for ok in ["m1", "M1", "a.b_c-d", "0", "m1.", "m..1", long(128).as_str()] {
+            assert!(safe_id(ok), "{ok:?} is safe");
+        }
+        for bad in ["", ".", "..", ".m1", "m1/", "a/b", "m\\1", "m\u{0}1", "-m1", "_m1", "m 1", "\u{fc}1", "m1\n",
+                    "\u{212a}1", long(129).as_str()] {
+            assert!(!safe_id(bad), "{bad:?} is not safe");
+        }
+    }
+
+    #[test]
+    fn int_of_a_clock_past_i64_is_none() {
+        assert_eq!(float_int(-2.9), Some(-2));
+        assert_eq!(float_int(9.2e18), Some(9_200_000_000_000_000_000));
+        assert_eq!(float_int(1e19), None);
+        assert_eq!(float_int(-1e19), None);
+        assert_eq!(float_int(-9.223_372_036_854_776e18), None, "-2**63 itself is refused too (conservative)");
+        assert_eq!(int_now(Num::Float(1781100000.75)), 1781100000);
     }
 
     #[test]
