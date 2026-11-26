@@ -151,6 +151,13 @@ record! {
         awaiting_task_descs: serde_json::Value = "awaitingTaskDescs",
         cap_switch_offer: serde_json::Value = "capSwitchOffer",
         warm_wanted: serde_json::Value = "warmWanted",
+        /// kernel._bg_owner_tops (reached only with live background tasks): top to `{since, descs}`.
+        bg_owner_tops: serde_json::Value = "bgOwnerTops",
+        /// kernel._bg_service_descs (live tasks on a live session): the service chip's descriptions.
+        bg_service_descs: serde_json::Value = "bgServiceDescs",
+        /// The live backend's `current_ask(fsid)` (_blocked_placeholder's question; dump_layer6.py records it, the
+        /// S2 dumper does not, since no world reaches it).
+        current_ask: serde_json::Value = "currentAsk",
     }
 }
 
@@ -226,6 +233,27 @@ record! {
         /// the loader refuses.
         followup_at: Option<Num> = "followupAt",
         briefed_mt: Option<Num> = "briefedMt",
+        /// Layer 6's card and row fields, passed through as Python reads them: `background`, `followupPending` and
+        /// `summaryQuote` raw (`nd.get(k)`); `briefParts`, `summaryParts`, `relayCarried`, `stallSummary`, `warns` and
+        /// `failLog` as `nd.get(k) or None`; `umbrella` for its truthiness (_closure_done); `serving` as a dict whose
+        /// truthy `goalId` folds the card (the serving fold).
+        background: serde_json::Value = "background",
+        followup_pending: serde_json::Value = "followupPending",
+        summary_quote: serde_json::Value = "summaryQuote",
+        brief_parts: serde_json::Value = "briefParts",
+        summary_parts: serde_json::Value = "summaryParts",
+        relay_carried: serde_json::Value = "relayCarried",
+        stall_summary: serde_json::Value = "stallSummary",
+        warns: serde_json::Value = "warns",
+        fail_log: serde_json::Value = "failLog",
+        umbrella: serde_json::Value = "umbrella",
+        serving: serde_json::Value = "serving",
+        /// The unblocker's watermark: `int(nd.get("blockCheckT") or 0)` in _block_check_floor, `blockCheckT or 0` in the
+        /// re-judging latch. A number or null; Python would also take a bool, and `int()` a numeric string, which the
+        /// loader refuses.
+        block_check_t: Option<Num> = "blockCheckT",
+        /// The per-paragraph citations: a list of `{a, q}` (or falsy items); layer 6 refuses any other truthy shape.
+        summary_anchors: serde_json::Value = "summaryAnchors",
     }
     required: [id]
 }
@@ -280,6 +308,10 @@ record! {
         peer: Option<String> = "peer",
         msg_id: Option<String> = "msgId",
         goal_id: Option<String> = "goalId",
+        /// A report-back handoff (truthiness: the card's delegTracked).
+        tracked: serde_json::Value = "tracked",
+        /// The recipient's host as the courier recorded it (no ported reader; kept typed for the round trip).
+        peer_host: serde_json::Value = "peerHost",
     }
 }
 
@@ -290,20 +322,26 @@ record! {
         goal_id: Option<String> = "goalId",
         peer_name: Option<String> = "peerName",
         msg_id: Option<String> = "msgId",
+        /// The planted copy of a tracked handoff (truthiness: the card's `satellite`).
+        tracked: serde_json::Value = "tracked",
+        /// The sender's host (`o.get("peerHost") or ""`, passed through when truthy).
+        peer_host: serde_json::Value = "peerHost",
     }
 }
 
 /// Keys the per-card code reads on a node (an ast scan grouped by receiver: `nd`, `nodes[x]`, `nodes[nid]`, `root`)
 /// that `Node` does not type yet. No node in either world carries one; the layer that ports its reader types it.
-pub const NODE_UNPORTED: &[&str] = &[
-    "background", "blockCheckT", "briefParts", "failLog", "followupPending", "relayCarried", "serving", "stallSummary",
-    "summaryAnchors", "summaryParts", "summaryQuote", "umbrella", "warns",
-];
-/// The same for a handoff (`nd['handoff']`, `nodes[x]['handoff']`) and an origin (`o`).
-pub const HANDOFF_UNPORTED: &[&str] = &["tracked", "peerHost"];
-pub const ORIGIN_UNPORTED: &[&str] = &["tracked", "peerHost"];
-/// The same for a log row (`e`, `r`).
-pub const LOG_UNPORTED: &[&str] = &["a", "q", "login", "fsid"];
+/// Layer 6 typed the last 13 (S4.6); an ast scan of the body and layers 1 to 5 found no other untyped node key read.
+pub const NODE_UNPORTED: &[&str] = &[];
+/// The same for a handoff (`nd['handoff']`, `nodes[x]['handoff']`) and an origin (`o`): `tracked` and `peerHost`, typed
+/// by layer 6.
+pub const HANDOFF_UNPORTED: &[&str] = &[];
+pub const ORIGIN_UNPORTED: &[&str] = &[];
+/// The same for a log row. The scan grouped by receiver name had listed `a`, `q`, `login` and `fsid` under `e` and
+/// `r`, but those are reads of other dicts under the same names: a summaryAnchors item (`e["a"]`, `e.get("q")`), a
+/// debug row (`r.get("fsid")`), and build_feed's judge-auth entries (`e.get("login")`, outside the body). No ported
+/// function reads them from a log row.
+pub const LOG_UNPORTED: &[&str] = &[];
 
 /// The longest parent chain a store may hold (nodes, counting the node itself). _agent_open_set and _open_leaves
 /// recurse once per level, and Python raises RecursionError near 1,000 levels (the exact depth moves with the stack
@@ -466,13 +504,23 @@ mod tests {
     }
 
     #[test]
-    fn a_node_key_the_build_reads_but_the_port_does_not_type_is_refused() {
-        let warns = SNAP.replace(r#""why": "x", "log""#, r#""why": "x", "warns": ["y"], "log""#);
-        let e = crate::load::snapshot_from_slice(warns.as_bytes()).unwrap_err();
-        assert_eq!(e, "sessions.s-1.store.nodes.s-1:g1: key \"warns\" is read by the per-card code but not typed");
+    fn a_node_key_the_build_reads_is_typed_and_a_truthy_non_dict_task_is_refused() {
+        // layer 6 typed the last keys the per-card code reads (NODE_UNPORTED is empty): each loads into its field and
+        // round-trips in place; a log row's `login` (a judge-auth entry's key, never a log row's) stays untyped
+        let keys = r#""warns": ["y"], "umbrella": true, "blockCheckT": 150.5, "summaryAnchors": [{"a": "u"}], "#;
+        let typed = SNAP.replace(r#""why": "x", "log""#, &format!(r#""why": "x", {keys}"log""#));
+        let snap = crate::load::snapshot_from_slice(typed.as_bytes()).unwrap();
+        assert_eq!(romp_json::dumps(&snap.to_json()), typed);
+        let nd = snap.sessions.as_ref().unwrap().get("s-1").unwrap().store.as_ref().unwrap().as_ref().unwrap();
+        let nd = nd.nodes.as_ref().unwrap().get("s-1:g1").unwrap();
+        assert_eq!(nd.block_check_t, Some(Some(Num::Float(150.5))));
+        assert!(nd.extra.is_empty(), "every key typed");
+        assert!(NODE_UNPORTED.is_empty() && HANDOFF_UNPORTED.is_empty() && ORIGIN_UNPORTED.is_empty());
         let row = SNAP.replace(r#""kind": "done", "seg""#, r#""kind": "done", "login": "x", "seg""#);
-        let e = crate::load::snapshot_from_slice(row.as_bytes()).unwrap_err();
-        assert_eq!(e, "sessions.s-1.store.nodes.s-1:g1.log[0]: key \"login\" is read but not typed");
+        assert!(crate::load::snapshot_from_slice(row.as_bytes()).is_ok(), "a log row's login is no read of the build");
+        let bct = SNAP.replace(r#""why": "x", "log""#, r#""why": "x", "blockCheckT": "5", "log""#);
+        let e = crate::load::snapshot_from_slice(bct.as_bytes()).unwrap_err();
+        assert!(e.contains("Node.blockCheckT"), "{e}");
         let task = SNAP.replace(r#""why": "x", "log""#, r#""why": "x", "agentTask": "open", "log""#);
         let e = crate::load::snapshot_from_slice(task.as_bytes()).unwrap_err();
         assert_eq!(e, "sessions.s-1.store.nodes.s-1:g1.agentTask: a truthy non-dict (\"open\"): Python's \

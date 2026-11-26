@@ -6,7 +6,14 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
-- Step: S4.5 (layer 5) done and merged into `romp_fix` from `romp_fix-s45` with its review's fixes. Its review (ship,
+- Step: S4.6 (layer 6, the body and its closures) built on `romp_fix-s46`, not yet reviewed or merged. Every alive
+  session's entry (the dict _feed_session_entry returns, written through romp-json) equals Python's real memo entry byte
+  for byte on both worlds (the S2 dump's `oracle/entries/`), on 262 synthetic worlds and on 24,000 random ones; 6 plants
+  and 59 of the 60 source mutants are each caught by the edge set (the 60th is equivalent). See "S4.6 as built". An early
+  signal for S6, not a measurement: the release build makes the large world's 38 entries in 31 to 33 ms of wall time
+  (ten runs, a quiet machine), against the 87 ms Python's derivation took from an empty memo (s2-design section 4):
+  about 2.7x, short of the gate's 5x.
+- Before it: S4.5 (layer 5) done and merged into `romp_fix` from `romp_fix-s45` with its review's fixes. Its review (ship,
   no must-fix) is under "The review round" in "S4.5 as built": its 10 edge-set gaps are filled, each shown to catch its
   mutant, and the memo claim is corrected. A Python-side finding from it: `_SUMMARY_ANCHOR_MEMO`'s key leaves out the
   seams, so after a seam splits a turn a later build can serve a stale summary anchor (reproduced with the real kernel
@@ -44,27 +51,36 @@ with no server. Both implementations run on one synthetic state, and the feed JS
     sessions and calls (9,054,772 values, `dump_layer5.py --fuzz`). Python's regex classes and `re.I` fold come from
     tables generated from its own engine, checked on every code point. 6 planted mistakes and 68 source mutants are each
     caught by the edge set; fuzz seed 1 catches all but seven; 4 more mutants are equivalent (see "S4.5 as built").
+  - S4.6: the body and its closures (_feed_session_entry with _note_peers, _subtree, _closure_done, _fsubmax,
+    _closure_blocked, _block_check_floor, _brief_landing and flatten, plus _card_warn_rows, _blocked_placeholder and
+    _awaiting_card) give every entry byte for byte: both worlds' 4 and 38 entries against `oracle/entries/` (17,470 and
+    114,100 bytes), 262 Python-made worlds (276 entries, 25 of them the same raise in both; 21 more worlds are refused
+    at load, as built to be) and 24,000 random worlds (40,058 entries, 3,813,717 values, `dump_layer6.py --fuzz`).
+    Python's line trace over the edge set runs 585 of the 592 lines; the 7 left cannot run on an admitted input.
   - S2 done before them (byte-identical oracle dumps across seeds and roots, "S2 as built"); S1 before that
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: S4.6, layer 6 (the body and its closures), scoped in "What layer 6 needs" below, which carries the
-  body's call order for _node_anchor_uuids forward from S4.4 and the summary-anchor memo's seam staleness from S4.5's
-  review. S4.5 is merged.
+- Next action: S4.6's review, then S4.7, layer 7 (the loop, the fold and the cross-session pass), scoped in "What
+  layer 7 needs" below, which carries forward what layer 6 found about the replay's cleared set, the raising session,
+  the serving fold and the handoff row's working bit.
   - Inputs: `python3 tools/rust-spike/dump_world.py --world small` (or `large`), then
     `python3 tools/rust-spike/dump_layer1.py DUMP`, `python3 tools/rust-spike/dump_layer2.py DUMP`,
     `python3 tools/rust-spike/dump_layer3.py DUMP`, `python3 tools/rust-spike/dump_layer4.py DUMP` and
-    `python3 tools/rust-spike/dump_layer5.py DUMP`. Never commit a dump.
+    `python3 tools/rust-spike/dump_layer5.py DUMP`. Layer 6 compares with the dump's own `oracle/entries/`;
+    `python3 tools/rust-spike/dump_layer6.py DUMP` checks its harness against them. Never commit a dump.
   - Checks: `romp-spike roundtrip DUMP`, `romp-spike layer1 DUMP`, `romp-spike layer2 DUMP`, `romp-spike layer3 DUMP`,
-    `romp-spike layer4 DUMP`, `romp-spike layer5 DUMP`,
+    `romp-spike layer4 DUMP`, `romp-spike layer5 DUMP`, `romp-spike layer6 DUMP`,
     `romp-spike layer2 rust/crates/romp-views/tests/fixtures/layer2_edge.json`,
     `romp-spike layer3 rust/crates/romp-views/tests/fixtures/layer3_edge.json`,
     `romp-spike layer4 rust/crates/romp-views/tests/fixtures/layer4_edge.json`,
     `romp-spike layer5 rust/crates/romp-views/tests/fixtures/layer5_edge.json`,
+    `romp-spike layer6 rust/crates/romp-views/tests/fixtures/layer6_edge.json`,
     `python3 tools/rust-spike/dump_layer2.py --fuzz 10000 --seed S`,
     `python3 tools/rust-spike/dump_layer3.py --fuzz 10000 --seed S`,
-    `python3 tools/rust-spike/dump_layer4.py --fuzz 10000 --seed S` and
-    `python3 tools/rust-spike/dump_layer5.py --fuzz 10000 --seed S` (seeds 1 to 6), and
+    `python3 tools/rust-spike/dump_layer4.py --fuzz 10000 --seed S`,
+    `python3 tools/rust-spike/dump_layer5.py --fuzz 10000 --seed S` (seeds 1 to 6),
+    `python3 tools/rust-spike/dump_layer6.py --fuzz 4000 --seed S` (seeds 1 to 6), and
     `python3 tools/rust-spike/check_store.py --dump DIR --fuzz 6` (`--dump` repeatable). Build with
     `~/.cargo/bin/cargo build --offline --release -p romp-spike`; the binary is in `rust/target/release/`.
   - Re-run check_store after any change to romp-transcript or to Python's reader. S6 should read "What the store
@@ -98,7 +114,7 @@ kernel, where the memory gain does not depend on interpreter speed.
 | `rust/crates/romp-transcript` | the transcript store: raw bytes plus a per-line index, the Python cache's identity contract (inode, size, mtime, CRC), positioned reads |
 | `rust/crates/romp-views` | the feed's per-card build only (the spike's slice of the views crate) |
 | `rust/crates/romp-spike` | the standalone binary: load a snapshot and transcripts, build the feed, print canonical JSON and timings |
-| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py` to `dump_layer5.py`), the measurement |
+| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py` to `dump_layer6.py`), the measurement |
 
 ## Steps
 
@@ -123,7 +139,7 @@ Each step lands as its own commit(s) with tests green. The status above is updat
   tracemalloc over the record cache plus its RSS difference. Alternate the two several times on the same load.
   Warm builds: Python's _SUMMARY_ANCHOR_MEMO survives across builds and its key leaves out the segment's atoms, so a
   warm Python build after a seam is stamped can serve a landing a memo-less port does not compute (S4.5's review,
-  "What layer 6 needs"). A warm comparison stamps no seam between builds, or clears that memo first.
+  "S4.6 as built"). A warm comparison stamps no seam between builds, or clears that memo first.
 - **S7 report.** Numbers against the gate, what replicated, what did not, and the recommendation.
 
 ## Revisions from the S2 map (2026-11-25)
@@ -683,7 +699,7 @@ notes flagged, as built:
   across a dump and across a world's sessions; the oracle clears the kernel's table first. The feed passes no sid, so
   _node_anchor_rev is not ported. Which nodes write the table, and in what order, is not this layer's: the body calls
   _node_anchor_uuids only inside its `flatten`, so the port's per-node calls in store order are a test harness, not
-  the body's sequence (see the first bullet of "What layer 6 needs", carried forward there from S4.4's review).
+  the body's sequence (built in S4.6 from the order carried forward from S4.4's review: "S4.6 as built").
 - Recursion: every walk is iterative. _agent_open_set and _open_leaves recurse in Python and raise RecursionError near
   1,000 levels, so the loader refuses a parent chain past `MAX_NODE_DEPTH` (500 nodes, counting a cycle's distinct
   members), and `body_children` refuses a healed forest past it. _goal_awaiting_stamp_full and the body's `_subtree`
@@ -989,7 +1005,7 @@ writes into the fixture. What the notes flagged, as built:
   comparisons meet: its key, `(fsid, nid, seg key, hash(line), the turn's end or t, stub_ok)`, leaves out the
   segment's atoms, and only eviction clears it. A seam stamped between two builds keeps the head segment's key and the
   turn's end, so the second build's hit serves the landing found over the unsplit segment (see "The review round"
-  below and "What layer 6 needs").
+  below and "S4.6 as built").
 - _summary_outrun compares with `max(int(distilledMt or 0), int(briefedMt or 0))`, so 100.9 covers a segment at
   100.5 only as far as 100: that segment outruns it. `int()` truncates toward zero (-2.5 reads -2, not -3), and a
   trail key missing from `seg_best` reads 0, which outruns a negative coverage. A coverage past i64 compares exactly
@@ -1249,70 +1265,270 @@ plant is caught on exactly the cases built for it, every code point against Pyth
 lines, the schema) and 1 in romp-spike for the comparison's messages.
 
 What this feeds: layer 6's `_brief_landing` calls _summary_outrun and _summary_text_anchor with the walk's maps, the
-card loop calls _pure_delegation_top per top, and the session's tail calls _provisional_card; "What layer 6 needs"
-below has the gates and the order.
+card loop calls _pure_delegation_top per top, and the session's tail calls _provisional_card; "S4.6 as built" below
+has the gates and the order as built.
 
-## What layer 6 needs (the body and its closures)
+## S4.6 as built (2026-11-26)
 
-Section 2 item 6: kernel._feed_session_entry (55894 to 57009 at this HEAD, 515 lines and 362 statements; the large
-world's replay runs 424 of the lines and 309 of the statements, all 90 top-level ones) with its closures _note_peers,
-_subtree, _closure_done, _fsubmax, _closure_blocked, _block_check_floor, _brief_landing and flatten. Layer 6 is the first
-layer whose answer is the card itself, so besides per-closure answers its oracle can use the dump's own
-`oracle/entries/<sid>.json` (the clock-free memo entry) and the replay's slice. Found while building layer 5 and scoping
-the body from the current source:
-- Carried forward for layer 6 (found in S4.4's review): the body calls _node_anchor_uuids inside `flatten` (kernel.py,
-  the `_pa, _wa = _node_anchor_uuids(nd, seg_trig, seg_uuid)` line, about 56228), not over the store. It runs once per
-  flattened node: a card top, then its children sorted by `_fsubmax` (the newest `mt`, else `t`, over the subtree)
-  descending, stably, each recursively before the next. The tops flattened are `children[None]` of the body's children
-  minus cleared tops (rollup status `cleared`, or in the build's cleared set) and pure-delegation tops (unless a live
-  floor keys on them). Hidden nodes, parentId-cycle members and orphans that are not born (their missing parent key
-  never hangs under None) are never flattened, so they never write or read the table. Layer 4's oracle and
-  `session_json` call it per node in store order, which agrees with the body only while no two flattened nodes share
-  an id. Since `AnchorTable` lives for the kernel run, the order decides which of two same-id nodes' anchors a later
-  cold lookup serves, within one build and across builds; and a session whose entry is served from the feed memo
-  (a `_feed_session_key` hit) runs no body, so it writes nothing that build. Layer 6 must make these calls from its
-  own flatten, in this order.
-- _brief_landing, the tiers layer 5 serves (about 56149): one resolve per build per `(nid, bool(completed), line or "")`
-  (`_land_memo`). In order: a completed node pins the newest substantive tail over its subtree (`tt > tail[0]`, strict,
-  so the first of equal times stays); else the cited `summaryAnchor` when it is in `cite_uuids` and _summary_outrun over
-  the subtree's trails says not outrun, with `summaryQuote` (unported today); else
-  `_summary_text_anchor(seg_turn.get(sk), line, memo_key=(fsid, nid, sk))`, where sk is the newest trail segment over
-  the subtree with `k in seg_turn` by `t >= skt` from `skt = -1` (the last of equal times wins, and a segment whose
-  `seg_best` time is below -1 never qualifies); else the latest-prose walk by `(bsub, bt) > (best[0], best[1])` (a tuple
-  compare: substantive first, strict); else the stub call (`stub_ok=True`, the same memo key); else the last resort: the
-  first node in `_subtree`'s order (the node itself first, then a stack pre-order that visits each node's children last
-  to first) whose trail, read from its end, names a segment with a work anchor (`seg_uuid.get(_seg_key(s))` truthy),
-  and that anchor. That is not necessarily the newest segment across the subtree, though the kernel's docstring says
-  "the newest trail segment's work anchor"; layer 6 must keep the code's order. It returns `(u, q or None)`. flatten
-  asks it for each row with `_landing_inputs("completed" if st == "done" else "blocked" if st == "question" else None,
-  "", nd)` and skips handoff rows and rows without a line; the card top asks with its own state and column (about
-  56805).
-- The summary-anchor memo across builds (S4.5's review): `_summary_text_anchor`'s memo key, `(fsid, nid, sk,
-  hash(line), the turn's end or t, stub_ok)`, leaves out the segment's atoms, and the memo lives for the kernel run
-  (only eviction clears it). A seam stamped between two builds keeps the head segment's key and the turn's end, so a
-  warm Python build serves the landing found over the unsplit segment, where a memo-less port searches the head's own
-  atoms first and can land on an older atom (reproduced under "The review round" in "S4.5 as built"). The spike's
-  comparisons run fresh processes and layer 5's oracle clears the memo, so they never meet it; layer 6's oracle should
-  do the same, a warm comparison (S6) stamps no seam between builds or clears the memo first, and a port that adds the
-  memo with this key inherits the staleness.
-- `_fsubmax` is `cn.get("mt", cn.get("t", 0))` then `max(m, child)`, so the first of equal values (and its int/float
-  tag) stays. Row fields read the Python way: `"mt": nd.get("mt", nd["t"])` (a present null stays null, and `nd["t"]` is
-  evaluated first), `"who": _name_of(sid) or sid[:8]` (code points), `"auth": (nd.get("agentTask") or {}).get("status")`,
-  `"reviewedEarlier": bool(boundary and out and done and _done_since(nd) <= boundary) or None`, `"born": _born or None`
-  (an empty born dict becomes None).
-- The body's layer-5 gates: _pure_delegation_top for each top of `children[None]` that is not cleared and not perm_top,
-  api_top or jauth_top, one memo per derivation; _provisional_card only when `not had_working and perm_top is None and
-  ps` and the store did not fault, else the blocked placeholder (`perm_state in _NEEDS_INPUT_STATES`) or the awaiting
-  card (`sess_awaiting_why`). The derivation's `faults` is the change in `_SUMMARY_ANCHOR_STATS["fault"]` across it
-  (always 0 on a tree the loader admits, layer 5), and an entry with faults is never memoized.
-- Keys layer 6 reads that the loader still refuses (`NODE_UNPORTED`): background, blockCheckT, briefParts, failLog,
-  followupPending, relayCarried, serving, stallSummary, summaryAnchors, summaryParts, summaryQuote, umbrella, warns;
-  `tracked` and `peerHost` on handoffs and origins; `a`, `q`, `login` and `fsid` on log rows. Type each with its reader
-  and check the list again with an ast scan of the body (S4.5 ran one over the node keys of the body and layers 1 to 5).
-- What the worlds miss is listed in s2-design.md section 2's "Left out" (hide, the cold warm-ask, store_faulted,
-  born and hidden tops, the API-error and judge-auth floors, the heal un-nest, the bg chip, the owned-task yield, the
-  stall, the cold summary fallback, the serving fold, the blocked and awaiting placeholders, and the card literal's
-  rarer arms). An edge set and a fuzz have to reach them, as for layers 2 to 5.
+**The problem.** Layers 1 to 5 answer the small questions; layer 6 is the function that asks them and assembles the
+answer: kernel._feed_session_entry, the per-session body of build_feed. For one session it decides which goals become
+cards, which column each card sits in (working, needs you, completed), what time and badges it wears (awaiting, blocked,
+stalled, interrupted, retrying, nudge failed), where a click on its title, its summary and each tree row lands, and
+which placeholder a session gets when no card covers it. The answer is one dict per session, which build_feed memoizes
+as a JSON string. That string is the strongest oracle the spike has: the S2 dump keeps Python's real one for every
+session of both worlds (`oracle/entries/<sid>.json`). So the check here is the bytes themselves, not values picked out
+of them. What can go wrong in a port is everything the earlier layers guarded against, now in combination: the order
+the body calls _node_anchor_uuids in (it changes what later lookups serve), Python's `max` and `min` keeping the first of
+equal values and their int/float tag, `x or y` against `.get(k, d)` against `is None`, the order of a dict's keys
+(including three conditional keys in the middle of the card), and which body reads raise, since a raise fails the whole
+entry.
+
+`layer6.rs` ports, line for line, kernel._feed_session_entry with its closures _note_peers, _subtree, _closure_done,
+_fsubmax, _closure_blocked, _block_check_floor, _brief_landing and flatten, and the three builders it calls that no
+earlier layer ported: _card_warn_rows (the debug-mode join), _blocked_placeholder and _awaiting_card. `Build` holds what
+one build reads across sessions (the snapshot's board, live map, names, flags and stores), and `Build::entries` runs
+every alive session in order with one anchor table, as a build does. What `_feed_session_key` hands the body through ctx
+is taken as the S2 replay's key takes it (the tree, _session_working over it, the recorded `_interrupting` answer, and
+`_closer_pending` under the key's gate). Every helper answer the body needs that the snapshot never recorded raises
+`NotRecorded`, as the replay harness raises, so a port that asks a helper Python did not ask fails loudly. What the notes
+flagged, as built:
+- _node_anchor_uuids runs inside flatten, once per flattened node in flatten's order (the card top, then its children by
+  `_fsubmax` descending, stably, each recursively before the next). The anchor table is carried across a build's
+  sessions in alive order. A node never flattened writes nothing: a hidden node, a cleared top, a pure-delegation top,
+  a parentId-cycle member, an orphan, and a session whose entry raises before its flatten (the card literal reads the
+  awaiting tasks before the tree, so an unrecorded tasks answer raises first). The `anchor-store-order` plant calls it
+  per node in store order instead, as layer 4's harness did; the worlds cannot tell (no id repeats), the edge set
+  catches it on 7 cases.
+- `max` and `min` keep the first of equal values and its tag: _fsubmax (`mt`, else `t`, else 0, against each child), the
+  completed card's `max([settledAt or 0] + dts)`, the blocked card's `max(bts)`, `max(disp_t, followupAt or 0)`, the
+  delegation's `max([t or 0 ...] or [0]) or None`. `min` in _block_check_floor cannot show its tie: `int()` makes every
+  candidate an int. `int()` truncates toward zero: the watermark (200.5 reads 200, so a reply at 200.3 re-judges) and
+  the nudge count (2.7 reads 2).
+- `.get(k, d)`, `or` and `is None`: a row's `mt` is `nd.get("mt", nd["t"])` (a present 0 stays 0); `_born or None` (an
+  empty born dict is null); `relayCarried`, `briefParts`, `summaryParts`, `warns`, `failLog` and `stallSummary` are
+  `or None` while `background`, `followupPending` and `summaryQuote` pass through raw; `followupAt or None`;
+  `awaitingAt or None` for the stamp's since; `jerr.get("note") or ""`; the landing's quote is `q or None` while the
+  card's cited `summaryQuote` is raw. `_sa_u is None and ps is None` serves the raw citation only without a parse.
+  _brief_landing's tiers test `u is None`, which the notes suggested a "" uuid would show; it cannot: _text_atoms admits
+  only atoms with a truthy uuid, so every tier yields a truthy uuid or None, and `not u` is equivalent (mutant M52).
+- Order: `reads` has `usage` before `nudges`; `handoffTo`, `delegTracked` and `satellite` sit between `origin` and
+  `followupPending`; `peers` is sorted; the card loop runs over `children[None]` after the floor un-nest, which appends a
+  healed or hidden top at the end and removes a healed one from its host's list (its host keeps its now shorter list,
+  which no reader can tell from a removed key).
+- `isinstance(n, int)` is true of a bool, so an awaiting count of `true` is kept (an int must also be positive on a card;
+  on the awaiting placeholder 0 and negatives pass); Python's `str.upper()` of the placeholder's first code point is the
+  full case mapping (`ß` gives `SS`).
+- Raises that fail the entry, each matched by name and message: `nodes[nid]["t"]` under the wait graph, a row's
+  `nd["text"]` and `nd["t"]` (after its anchors are written and its landing resolved), a stall record's `why` and
+  `since`, a session-awaiting answer's `why` and `kind`, segmentation in the placeholders, and every recorded answer the
+  body reaches unrecorded. Two recorded reads sit inside a `try` in Python and read False or None when unrecorded:
+  `_interrupted_by` and the live backend's `current_ask`.
+- Left out, as layers 3 and 5 left them out: the held aggregate (_FEED_SEG_HELD) and _SUMMARY_ANCHOR_MEMO, whose seam
+  staleness (S4.5's "The review round") only a warm build after a seam can meet; the oracles run fresh
+  processes and clear both. `lg.mark_refused` (a write to the login registry, no part of the entry) is not ported.
+  `faults` is the walk's `seg_turn` faults, always 0 on a tree the loader admits.
+
+Loader changes (round trip and layers 1 to 5 re-run on both worlds, every number as before): nodes type the 13 keys
+layer 6 reads (`background`, `followupPending`, `summaryQuote`, `briefParts`, `summaryParts`, `relayCarried`,
+`stallSummary`, `warns`, `failLog`, `umbrella` and `serving` as any JSON, `blockCheckT` as a number or null,
+`summaryAnchors` as any JSON that layer 6 checks), handoffs and origins type `tracked` and `peerHost`, and `NODE_UNPORTED`
+and the handoff and origin lists are empty. The log-row list (`a`, `q`, `login`, `fsid`) was an artifact of the ast
+scan's grouping by receiver name: those are reads of a summaryAnchors item, a debug row and build_feed's judge-auth
+entries, never of a log row, so it is empty too. The recorded answers gain `bgOwnerTops` and `bgServiceDescs`
+(`tools/rust-spike/dump_world.py` now records _bg_owner_tops and _bg_service_descs, which only a session with live
+background tasks reaches; no world does, and both worlds re-dumped byte-identical but for `run.json`) and `currentAsk`
+(recorded by dump_layer6.py's harness only). `layer6::validate` refuses, each with its path, what layer 6 would read
+differently from Python; none is in either world: a session without a `store` key, truthy `flags` that are not a dict, a
+wait-graph entry that is not a dict with a number `since`, a truthy stall record or judge-auth entry that is not a dict,
+a judge-auth entry with a truthy `login` (build_feed resolves its label through the SDK, which the replay does not) or a
+non-string label, debug rows that are not a list of dicts or hold a non-string `seg` or an unhashable `goal` item,
+non-string `confirming` items, a truthy `summaryAnchors` that is not a list or holds a truthy item without `a`, and
+recorded answers of a shape the body would `str()` or iterate differently (a session-awaiting `why` that is not a
+string, its `items` not a list, a peer sid that is not a string, owner tops not `{since: number, descs: [str]}`, a truthy
+current ask that is not a dict).
+
+**The oracle.** For the worlds it is the dump's own `oracle/entries/<sid>.json`, compared byte for byte. For synthetic
+worlds, `tools/rust-spike/dump_layer6.py` answers each case with one replay build_feed over it (dump_world's Replay
+harness, the fold stubbed: layer 7's), takes every entry from the memo put (the exact string build_feed memoizes, kept
+with its SHA-1), or the raise that failed the session (the harness's DumpError as `NotRecorded` with the helper and sid).
+_node_anchor_last and the build memos are cleared first, so a case starts as a fresh process does. Its own check:
+`dump_layer6.py DUMP` runs this harness over a dump's inputs, and its entries equal `oracle/entries/` on 4 of 4 and 38 of
+38 sessions. `romp-spike layer6` compares the bytes and, on a difference, names the first differing values by path.
+
+**Result on the worlds: zero differences.**
+- Small: 4 sessions, 7 cards, 10 tree rows, 17,470 entry bytes (755 values). Large: 38 sessions, 41 cards, 78 tree
+  rows, 114,100 entry bytes (5,107 values).
+- Why that is not enough. The worlds run 424 of the 592 lines of the body and its builders. No id repeats, nothing is
+  hidden, healed, cleared, waited on, stalled, latched, nudged or floored, no card has a stamp, a delegation, an origin,
+  a citation or a placeholder but s004's provisional card, and none of the six plants moves either world.
+
+**The edge set.** `dump_layer6.py --edge-cases` writes `rust/crates/romp-views/tests/fixtures/layer6_edge.json`
+(synthetic, 1.6 MB; it regenerates byte for byte under another hash seed). Its 283 worlds of one to three sessions: every
+session-level read (hide by the session's flags and by a peer row's, the cold warm ask, downtime, every interrupted
+answer, interrupting, retrying, the judges in flight and the closer, a faulted store, every recorded answer unrecorded
+where the body reaches it), the heal and the hidden set (counts that include absent nodes, born records, every floor's
+un-nest), the permission, picker, api-error (each flag, the login label, the offer) and judge-auth floors, debug rows
+(by goal, goal list and placement phase, the cap of 20), the card loop (cleared tops, pure delegation, the wait graph,
+owned tasks, the service chip, stamps, delegations, tracked handoffs and satellites, origins, handoff cards, every card
+time, re-check and re-judging, nudges, stalls, the pass-through keys, the serving fold), flatten (recency order and
+ties, the anchor table within and across sessions, rows), every landing tier, the three placeholders, peers and reads;
+and 21 worlds the loader must refuse.
+
+Result: 262 worlds load and give all 276 entries byte for byte (304 cards, 334 tree rows, 28,878 values), 0 differences;
+25 entries are the same raise in both, 3 are a hidden session's null. The other 21 worlds are refused at load, exactly
+the cases named REFUSE. Python's line trace ran 585 of the 592 lines. The 7 it did not run cannot run on an admitted
+input: _closure_done's absent node and _block_check_floor's memo hit (every caller passes a node of the tree, visited
+once), and the two placeholders' parse failures inside their `try` (the replay serves the same tree as the parse).
+
+**The randomized check.** `python3 tools/rust-spike/dump_layer6.py --fuzz N --seed S` draws worlds of one to three
+sessions. Each session's tree and store come from layer 5's generator (its sid renamed; node ids repeat across sessions,
+so the anchor table is shared), then every node gets what layer 6 reads (text, t and mt of both tags with ties and zeros,
+flags, log rows of every kind and source, stamps, watermarks, citations, the pass-through keys, serving, born records,
+tracked handoffs and origins), the store a status map, a focus and a confirming set, the session random recorded answers
+(one in 150 dropped), flags and a live row, and the board cleared sets, waits, stalls, latches, judges in flight, nudge
+records, debug rows and downtime. Any difference or refusal fails the run, and the same seed makes the same file byte for
+byte under another hash seed.
+- Result, seeds 1 to 6 at 4,000 worlds each (about 25 s apiece): 24,000 worlds, 40,058 entries (34,536 cards, 42,303
+  tree rows), 3,813,717 values, **0 differences**, 0 refused. 4,112 entries are the same raise in both (KeyError on
+  `text` 305, `t` 298, `uuid` 250, `session_id` 237, `trigger` 211, `since` 144; NotRecorded for a peer store 739, the
+  captions 454, and the 13 recorded helpers 1,474) and 4,004 are a hidden session's null. Python's line trace on seeds 1
+  to 3: the same 585 of 592 lines as the edge set.
+
+**Planted mistakes, each caught but one equivalent mutant.** The six plants are romp-spike's `--plant` options (`dump_layer6.py --fuzz ... --plant
+NAME` passes only when the plant is caught; `tests/layer6_edge.rs` checks each is caught on exactly the cases built for
+it). The 60 source mutants were edits to `layer6.rs`, each built, run on all four inputs and reverted by a scratch script
+(not committed). Each cell is differences, then the sessions (worlds) or cases they fell in.
+
+| Mistake | Small | Large | Edge set (262) | Fuzz, seed 1 (4,000) |
+|---|---|---|---|---|
+| `--plant anchor-store-order` (_node_anchor_uuids per node in store order, not from flatten) | 0 | 0 | 16 in 7 | 169 in 97 |
+| `--plant fsubmax-last` (_fsubmax keeps the last of equal values) | 0 | 0 | 12 in 3 | 322 in 89 |
+| `--plant mt-or` (a row's mt read as `mt or t`) | 0 | 0 | 3 in 2 | 566 in 495 |
+| `--plant land-first-equal` (the landing's newest trail segment keeps the first of equal times) | 0 | 0 | 2 in 2 | 12 in 6 |
+| `--plant peers-unsorted` (the peers in read order, not sorted) | 0 | 0 | 6 in 3 | 282 in 131 |
+| `--plant born-empty-kept` (an empty born record ships as `{}`) | 0 | 0 | 4 in 3 | 290 in 274 |
+| flatten orders children oldest first (M01) | 0 | 0 | 238 in 8 | 14,329 in 401 |
+| equal-recency children in reverse store order (M02) | 10 in 1 | 10 in 1 | 243 in 19 | 2,433 in 85 |
+| _fsubmax reads t before mt (M03) | 12 in 2 | 216 in 36 | 51 in 9 | 14,398 in 1,578 |
+| `reviewedEarlier` needs a done strictly before the boundary (M04) | 0 | 0 | 1 in 1 | 24 in 21 |
+| the heal's born record beats the node's own (M05) | 0 | 0 | 2 in 1 | 21 in 20 |
+| a handoff row's `who` is the whole sid, not its first 8 code points (M06) | 0 | 0 | 3 in 3 | 331 in 300 |
+| `parked` shows on any status (M07) | 0 | 0 | 2 in 2 | 6 in 6 |
+| a completed card counts rolled-down descendants (M08) | 0 | 0 | 2 in 1 | 2 in 1 |
+| a completed card takes the candidate even when it is 0 (M09) | 0 | 0 | 32 in 16 | 750 in 350 |
+| a working card ignores its follow-up stamp (M10) | 0 | 0 | 6 in 3 | 426 in 193 |
+| re-judging always reads the top's own watermark (M11) | 0 | 0 | 2 in 2 | 0 |
+| _block_check_floor without `int()` (M12) | 0 | 0 | 1 in 1 | 0 |
+| _block_check_floor takes the newest watermark (max) (M13) | 0 | 0 | 2 in 2 | 0 |
+| a diary row at the nudge's own time retires the failure (`>=`) (M14) | 0 | 0 | 1 in 1 | 0 |
+| the nudge count is not `int()` (M15) | 0 | 0 | 1 in 1 | 187 in 162 |
+| a stall on a done-confirming card floors it (M16) | 0 | 0 | 1 in 1 | 25 in 9 |
+| an in-flight stall does not light the swirl (M17) | 0 | 0 | 1 in 1 | 81 in 74 |
+| `waitingOn` on any column (M18) | 0 | 0 | 2 in 2 | 164 in 145 |
+| the wait counts only goals minted strictly before the question (M19) | 0 | 0 | 2 in 2 | 89 in 58 |
+| an awaiting count of `true` is dropped (M20) | 0 | 0 | 1 in 1 | 75 in 64 |
+| delegation names not deduplicated (M21) | 0 | 0 | 1 in 1 | 0 |
+| the delegation's since keeps the last of equal times (M22) | 0 | 0 | 1 in 1 | 0 |
+| a registry-named sender keeps the plant-time host (M23) | 0 | 0 | 1 in 1 | 51 in 50 |
+| the satellite hides on a needs-you card too (M24) | 0 | 0 | 1 in 1 | 0 |
+| the card's quote is always the landing's (the cited span dropped) (M25) | 0 | 0 | 2 in 2 | 14 in 14 |
+| the cold fallback serves the citation even with a parse (M26) | 0 | 0 | 1 in 1 | 739 in 550 |
+| the completed tail keeps the last of equal times (`>=`) (M27) | 0 | 0 | 2 in 1 | 0 |
+| the latest-prose walk compares the time before substantive (M28) | 0 | 0 | 2 in 1 | 52 in 45 |
+| the last resort reads each trail from its start (M29) | 0 | 0 | 1 in 1 | 5 in 5 |
+| the landing keeps a falsy quote (no `q or None`) (M30) | 0 | 0 | 1 in 1 | 1 in 1 |
+| the nudges read before the usage read (M31) | 0 | 0 | 21 in 21 | 594 in 565 |
+| the heal count counts only nodes in the store (M32) | 0 | 0 | 1 in 1 | 0 |
+| the un-nest leaves the top under its host too (M33) | 0 | 0 | 6 in 2 | the run dies (signal 9) |
+| an unrecorded interrupted answer reads true (M34) | 0 | 0 | 1 in 1 | 7 in 6 |
+| the awaiting card capitalizes ASCII only (M35) | 0 | 0 | 3 in 3 | 171 in 169 |
+| the long question's cut is not right-stripped (M36) | 0 | 0 | 1 in 1 | 0 |
+| warn rows keep the first 20, not the last (M37) | 0 | 0 | 20 in 1 | 0 |
+| warn rows ignore the `#live` phase (M38) | 0 | 0 | 19 in 1 | 4 in 4 |
+| an auth error outranks a spend limit in the badge's text (M39) | 0 | 0 | 1 in 1 | 0 |
+| the judge-auth floor yields only to the api floor (M40) | 0 | 0 | 1 in 1 | 5 in 5 |
+| a needs-you serving mirror folds too (M41) | 0 | 0 | 2 in 1 | 112 in 56 |
+| a whitespace summary counts for `summaryStale` (M42) | 0 | 0 | 1 in 1 | 9 in 9 |
+| `doneConfirming` on any column (M43) | 0 | 0 | 1 in 1 | 88 in 81 |
+| a provisional card despite a live floor (M44) | 0 | 0 | 5 in 5 | 208 in 206 |
+| a completed card's time keeps the last of equal values (M45) | 0 | 0 | 4 in 2 | 2 in 1 |
+| a blocked card's time keeps the last of equal values (M46) | 0 | 0 | 2 in 1 | 0 |
+| a working card's follow-up floor takes the stamp on a tie (M47) | 0 | 0 | 2 in 1 | 130 in 63 |
+| the card's relayNote passes a falsy value through (no `or None`) (M48) | 0 | 0 | 1 in 1 | 238 in 229 |
+| the card's followupAt passes 0 through (no `or None`) (M49) | 0 | 0 | 1 in 1 | 155 in 153 |
+| the stamp's since keeps a falsy anchor (no `or None`) (M50) | 0 | 0 | 1 in 1 | 74 in 73 |
+| the judge-auth text keeps a null note (no `or ""`) (M51) | 0 | 0 | 1 in 1 | 0 |
+| the landing's tiers test truthiness, not `u is None` (equivalent) (M52) | 0 | 0 | 0 | 0 |
+| the `satellite` key after `followupPending` (M53) | 0 | 0 | 1 in 1 | 2 in 2 |
+| an unrecorded current ask raises (outside the `try`) (M54) | 0 | 0 | 2 in 2 | 2 in 2 |
+| the anchor table starts empty for each session (M55) | 0 | 0 | 7 in 3 | 173 in 97 |
+| a node without `t` under the wait graph reads 0, no KeyError (M56) | 0 | 0 | 2 in 1 | 0 |
+| a stall record without `since` reads null, no KeyError (M57) | 0 | 0 | 1 in 1 | 19 in 14 |
+| the card's briefParts passes a falsy value through (no `or None`) (M58) | 0 | 0 | 1 in 1 | 204 in 196 |
+| the card's background drops a falsy value (`or None`) (M59) | 0 | 0 | 1 in 1 | 204 in 187 |
+| a row's `text` reads null when absent, no KeyError (M60) | 0 | 0 | 1 in 1 | 54 in 48 |
+
+The worlds catch 2 of the 66: equal-recency siblings in reverse store order (s001's delegating goal has two handoff rows
+of one time) and _fsubmax reading `t` before `mt` (every touched node). The edge set catches every row but M52, which
+is equivalent: _text_atoms admits only atoms with a truthy uuid, so every landing tier yields a truthy uuid or None, and
+`not u` cannot differ from `u is None` on an admitted input. M33 makes the fuzz run die (leaving a healed top under its
+host as well as under the roots lets flatten walk a cycle). Fuzz seed 1 misses 16 rows (M11 to M14, M21, M22, M24, M27,
+M32, M36, M37, M39, M46, M51, M52, M56). The generator draws none of their inputs: blocked children with distinct
+watermarks around a fractional reply time (M11 to M13), a diary row at exactly the nudge block's time (M14), two peers
+under one registry name (M21), equal times of both tags in the delegation, the completed tail or the blocked card (M22,
+M27, M46), a tracked satellite on a card that stays needs-you (M24), heal entries for nodes the store lacks (M32), a
+long question whose cut lands on whitespace (M36), more than 20 debug rows on one card (M37), an api error with both
+`authErr` and `spendLimit` (M39), a judge-auth entry whose note is null rather than absent (M51), and a raise under the
+wait graph with the same id in a later session (M56).
+
+The first sweep of the 60 mutants over the then 273-world edge set missed 12. Three of them (M18, M24, M41) were cases
+that meant to test a needs-you card but dropped to working by re-judging, since the tree's later plain prompt postdated
+the block; a watermark past the reply keeps them needs-you. The others got a world each (M05, M07 twice, M21, M26, M27,
+M28, M43, M56, plus a completed card under a wait for M18), 10 worlds in all, and each of the 11 now fails the 283-world
+set; M52 is the equivalent one. M36 and M45 to M51 were written against claims in `layer6.rs`'s header that had no
+mutant, and the cases they needed (a question cut on whitespace, ties of both tags in three times, a fractional reply
+time, falsy pass-through keys, a follow-up stamp of 0) went in before the run.
+
+**Findings beyond the port.**
+- The S2 replay's `_cleared_ids_display` answers a set, and build_feed's frame code after the session loop reads it as a
+  dict (`_cleared_foreign(cleared)` calls `cleared.get(i)`), so any world with a non-empty cleared set raises there in the
+  replay. The body only tests membership, so the entries are right, but layer 7 compares frames: the replay must hand a
+  dict (ids to clear times) first. Both worlds' cleared sets are empty, so no dump was wrong.
+- The release build makes the large world's 38 entries in 31 to 33 ms of wall time (the command's own clock, ten runs
+  on a quiet machine; readings taken while other jobs ran were 40 to 90 ms). Python's derivation from an empty memo took
+  87 ms (s2-design section 4), so about 2.7x. It is not a measurement (S6 times process CPU, alternates the two, and
+  matches the timed regions), but it is a warning: most of the work is segmenting and walking the 16,877 turns (layers
+  2 and 3), the port allocates freely (cloned keys, owned strings, hash maps per derivation), and as written it is short
+  of the gate's 5x. S6 should profile before it times.
+
+Tests: 8 new, 156 pass in the workspace: 3 unit tests in `layer6.rs`, the snapshot test rewritten for the typed keys,
+`tests/layer6_edge.rs` (4: every entry byte for byte with its SHA-1, each plant caught on exactly its cases, the line
+trace's missed lines, the schema) and 1 in romp-spike for the comparison's messages.
+
+What this feeds: layer 7's loop folds these entries (the tint from each card's `_ageT`, the bells, the working and
+awaiting dots, the service chip, the serving-fold join, absent sessions); "What layer 7 needs" below.
+
+## What layer 7 needs (the loop, the fold and the cross-session pass)
+
+Section 2 item 7: the build_feed loop minus memo and key (57255-57320 at this HEAD), _feed_fold_session, _feed_fold_stamp
+and _feed_fold_card, cm.age_rgb and ramp (colormap.py), _notify_card_effective, _push_explicit_bell, the handoff
+whoWorking stamp, the serving-fold join, and the frame assembled from the passthrough keys. Found while building layer 6:
+- The fold reads the entry string, and layer 6's entry is byte-identical to it, so the fold can take layer 6's value
+  directly. A placeholder's `_ageT` is null (its `t` is the build's clock, which the fold restamps); every other card's
+  and row's `_ageT` is its tint's epoch.
+- A session whose derivation raises: build_feed serves its previous entry when the memo holds one, else lists the sid in
+  `absentSids` and folds nothing. The spike has no memo, so a raising session is absent. 4,112 of the fuzz's 40,058
+  entries raise, so layer 7's fuzz meets this often.
+- The replay's cleared set is a Python set where the frame's `_cleared_foreign` reads a dict (the first finding above):
+  fix the harness before comparing a frame with a cleared set.
+- A handoff row ships `whoWorking: false`; build_feed stamps the recipient's working bit after the session loop, from
+  the sids behind `working`. A serving-fold candidate (`servingFolds`) commits only when its tracker row rendered this
+  build, else the candidate keeps its own card. Two more producers add cards to `asks` after the loop (parked handoffs
+  and notices, "S2 as built"), empty in both worlds.
+- The bells: the fold stamps `notify` and `notifyRaw` from `_notify_cards` and each session's raw flag; the body reads
+  neither, so layer 6 met no bell. `heal`, `hidden` and `cold` only feed build_feed's log line and the background warm.
+- The anchor table carries across a build's sessions in alive order and across builds; with the memo (S6's warm
+  builds), a hit runs no body and writes nothing to the table that build.
 
 ## Log
 
@@ -1486,3 +1702,22 @@ the body from the current source:
     stamped between builds makes a warm hit serve the pre-seam landing (reproduced with the real kernel functions).
     Reworded in `layer5.rs` and SPIKE.md, carried into "What layer 6 needs" and step S6; flagged for lczh as a
     Python-side stale landing.
+- 2026-11-26: S4.6, layer 6 (the body and its closures), on fresh dumps (`romp-spike layer6`, `dump_layer6.py`).
+  - Worlds: every entry byte for byte against the S2 dump's `oracle/entries/`: small 4 sessions, 7 cards, 17,470 bytes;
+    large 38 sessions, 41 cards, 114,100 bytes; 0 differences. The harness reproduces those entries itself (4 of 4,
+    38 of 38) and runs 424 of the body's 592 lines on the worlds.
+  - Edge set: 283 worlds; 262 load and give all 276 entries byte for byte (304 cards, 28,878 values), 0 differences;
+    21 refused at load (every REFUSE case); 25 entries raise identically. Python ran 585 of the body's 592 lines; the 7
+    left cannot run on an admitted input.
+  - `dump_layer6.py --fuzz`: seeds 1 to 6 at 4,000 worlds, 40,058 entries, 3,813,717 values, 0 differences, 0 refused;
+    4,112 entries raise identically in both.
+  - Planted: 6 `--plant` options and 60 source mutants. The edge set catches every plant and 59 mutants (M52 is
+    equivalent); fuzz seed 1 catches every plant and 44 mutants (M33 by crashing the run); the worlds catch 2. The first
+    sweep's edge set missed 12: 10 worlds were added and 3 cases kept needs-you, and each of the 11 now fails.
+  - Loader: the 13 node keys, handoff and origin `tracked` and `peerHost`, and three recorded answers typed;
+    `layer6::validate` refuses the shapes layer 6 would read differently. dump_world.py records _bg_owner_tops and
+    _bg_service_descs; both worlds re-dumped byte-identical (every file but `run.json`). Re-run: the round trip and
+    layers 1 to 5 on both worlds and the layer 2 to 5 edge sets, every number as before. Rust tests: 156 pass.
+  - Findings: the replay's cleared set is a Python set where the frame's `_cleared_foreign` reads a dict (layer 7);
+    the release build makes the large world's entries in 31 to 33 ms (ten runs), against Python's 87 ms derivation
+    (about 2.7x, short of the 5x gate; not a measurement), which S6 should profile before it times.
