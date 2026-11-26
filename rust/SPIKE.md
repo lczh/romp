@@ -144,9 +144,9 @@ the small world, a short fuzz seed. Every agent brief for this spike must say so
   scratch, and each stage was copied to the group pool from the login node and verified again there, after the pool's
   NFS mount hung on some compute nodes). (1) Ask lczh whether to run the S6.1 measurement once on the Mac, the
   gate's platform (arm64 CPython 3.13.18 on the M4 Max): one process, about 2.5 GB for about 10 minutes,
-  `measure_drive.py --cpu --memo` as `measure.sbatch` runs it. Before that run, give the port's memo rows a phase of
-  their own, as Python's have (`romp-spike measure`; the position cost under "What leans which way" in "S6.1 results
-  (cluster)"), with the light checks, or the Mac's memo ratios carry the same bias. Without the go-ahead, S7 quotes the
+  `measure_drive.py --cpu --memo` as `measure.sbatch` runs it. The port's memo rows now have a phase of their own, as
+  Python's have (2026-11-26, light checks only: "The port's memo rows in a phase of their own" under "S6.1 results
+  (cluster)"); that run, or a cluster rerun, shows whether the position cost is gone. Without the go-ahead, S7 quotes the
   cluster figures as indicative. (2) Merge `romp_fix-memo2` into `romp_fix`: the correctness checks are complete, and
   the merge does not wait on the Mac run. (3) S7. The decision S7 takes to lczh: whether a feed port is worth a month
   when, with the memo on both sides, it is about three times cheaper per build on the cluster, short of five, with
@@ -2719,7 +2719,8 @@ derivation serves the previous entry when there is one; a departed session's ent
   sequence over a dump in place.
   Where a fresh comparison is skipped, the step records the frame keys that differ (`keys` beside `frameDiffers`).
 - Measurement: `romp-spike measure cpu --memo` adds three rows (`memo`: every session a hit; `memoMiss`: the largest
-  session misses on its transcript and derives over its held aggregate; `memoBuild`: the whole memo-served build);
+  session misses on its transcript and derives over its held aggregate; `memoBuild`: the whole memo-served build), in a
+  phase of their own since 2026-11-26 ("The port's memo rows in a phase of their own" under "S6.1 results (cluster)");
   `measure.py cpu --memo` adds a phase with the real key over the same recorded facts (`memoKeyed`, `memoKeyedMiss`), its
   region the whole per-session loop less the replay's stand-ins (the harness's leaves, the recorded helpers, the store
   copy); `measure_drive.py --memo` pairs them (hit against hit, miss against miss) and blends both sides at production's
@@ -3278,6 +3279,22 @@ cluster ran only the tuned build, so these runs cannot say how much the tuning b
   chance. Production's is the whole build on 6 real sessions on the Mac, stats and frame included, in wall time; this
   is the per-session loop's process CPU on 38 synthetic sessions on a cluster CPU, stand-ins out.
 
+*The port's memo rows in a phase of their own (2026-11-26, after these runs; light checks only, nothing measured).*
+`romp-spike measure cpu --memo` now times its three memo rows after every other row has finished, as measure.py's
+run_memo_rows follows its plain rows: a fresh memo, held table and anchor table, the same three warm-up builds (cold,
+the peers settle, served whole, each checked against the oracle, the third required to be all hits), then K rounds
+(the same `--builds`) of the memo rows alone, one build of each per round, even rounds in the order memoBuild, memo,
+memoMiss and odd rounds reversed: Python's rule for memoKeyed and memoKeyedMiss. With memoBuild left out, the sequence
+is exactly Python's (memo, memoMiss, then memoMiss, memo, and so on), and memoBuild, itself an all-hit build, sits
+only between two all-hit builds, so the hit row and the miss row each follow what their Python rows follow: an all-hit
+build in even rounds, a miss build in odd rounds. A unit test pins that, and it fails on the order memo, memoMiss,
+memoBuild, where the miss row would follow memoBuild in odd rounds instead of another miss. What each row times, the
+driver's first-build drop and its even/odd balancing are unchanged; the seven other rows rotate as they do without
+`--memo` (the only neighbor that changes is buildNew's in odd rounds, which was the memo row). Python's memo region
+still comes from its instrumented builds, which the port has no counterpart for (it times its region directly). The
+figures above predate the change; in the next run, the summary's `byPositionMs` for memo, memoMiss and memoBuild shows
+whether the parity gap is gone.
+
 *The cluster, briefly.* The group pool's NFS mount hung on some compute nodes: on node1623 a job's slurmstepd sat in D
 state for 2 hours and a stat of the pool timed out while scratch answered, and node1294 had shown the same signature
 earlier. Jobs now write only to scratch, and each stage is copied to the pool from the login node and verified again
@@ -3700,3 +3717,5 @@ load, and S7 should set that number beside the ratios. A Mac run can move the ra
   - Reworded, not withdrawn: the held counters' per-build agreement on both sides. The summary's `seg` field shows
     only Python's last build, but the driver compares the counter sets over every build on both sides and flagged
     nothing; the text now names that check.
+- 2026-11-26: the port's memo rows given a phase of their own (`romp-spike measure cpu --memo`: "The port's memo
+  rows in a phase of their own" under "S6.1 results (cluster)"); light checks only on this Mac, nothing measured.
