@@ -342,6 +342,22 @@ impl<'a> Build<'a> {
         self.flags.get(sid).and_then(|f| f.as_object()).is_some_and(|f| f.get(flag).is_some_and(py_truthy))
     }
 
+    /// `_session_flag_raw(sid, flag)`: the flag's stored value as a bool, None when the session's flags are not a dict
+    /// or hold no value (absent or null) for it. The tri-state the bells read (layer 7).
+    pub fn session_flag_raw(&self, sid: &str, flag: &str) -> Option<bool> {
+        self.flags.get(sid).and_then(|f| f.as_object()).and_then(|f| f.get(flag)).filter(|v| !v.is_null()).map(py_truthy)
+    }
+
+    /// The build's cleared set (`_cleared_ids_display()`'s ids), which the body and layer 7 test for membership.
+    pub fn cleared(&self) -> &HashSet<String> {
+        &self.cleared
+    }
+
+    /// The build clock.
+    pub fn now(&self) -> Num {
+        self.now
+    }
+
     fn wmap(&self) -> Option<&'a OMap<J>> {
         self.board.wmap.as_ref()
     }

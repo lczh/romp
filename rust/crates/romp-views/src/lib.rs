@@ -5,7 +5,8 @@
 //! layer 3, the tree facts and the anchor walk (`layer3`), layer 4, the store helpers (`layer4`), and layer 5, landing,
 //! delegation and provisional (`layer5`, over `pyre`: Python's regex classes and ignore-case folding, from generated
 //! tables), and layer 6, the body and its closures (`layer6`: the per-session entry build_feed memoizes, over
-//! `pystr::upper`: Python's `str.upper()`, from a generated table in `pystr_tables`). Layer 7 follows.
+//! `pystr::upper`: Python's `str.upper()`, from a generated table in `pystr_tables`), and layer 7, the loop, the fold and the
+//! cross-session pass (`layer7`: the whole feed frame).
 
 #[macro_use]
 pub mod record;
@@ -15,6 +16,7 @@ pub mod layer3;
 pub mod layer4;
 pub mod layer5;
 pub mod layer6;
+pub mod layer7;
 pub mod load;
 pub mod pyre;
 pub mod pyre_tables;

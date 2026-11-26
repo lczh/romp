@@ -98,6 +98,16 @@ record! {
         /// Host suspensions, oldest first: `[start, end]` wall times (kernel._downtime, read by _suspended_after in
         /// layer 3). Anything but a pair of numbers is refused: Python unpacks each entry as `(start, _e)`.
         downtime: Vec<(Num, Num)> = "downtime",
+        /// The postal log's records (timeline/messages.jsonl, decoded, in file order), which kernel._parked_handoffs
+        /// folds with _parked_fold_step (layer 7). Absent: no log. The S2 dumper writes none (neither world parks a
+        /// handoff); dump_layer7.py's worlds carry it.
+        postal_log: Vec<serde_json::Value> = "postalLog",
+        /// The maildir files that stand: `[recipient sid, message id]` for each `postal/mail/<to>/new/<mid>` (the
+        /// "still parked" test _parked_handoffs makes per candidate). Absent: none.
+        mail_new: Vec<(String, String)> = "mailNew",
+        /// The notice files (STATE/notices/<sid>.jsonl): file sid to its lines, decoded, in file order, which
+        /// kernel._notice_rows filters and _notice_cards projects (layer 7). Absent: no notice files.
+        notices: OMap<Vec<serde_json::Value>> = "notices",
     }
 }
 
