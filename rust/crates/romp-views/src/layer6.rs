@@ -48,12 +48,14 @@
 //!
 //! Left out, as in layer 5: _SUMMARY_ANCHOR_MEMO (SPIKE.md, "What layer 6 needs": a pure cache within one build, so the
 //! spike's fresh-process comparisons never meet the memo's seam staleness). The held aggregate (_FEED_SEG_HELD) is
-//! used only when a build is given a table (`Build::with_held`, S6: layer3::SegHeld); by default every turn is walked. `lg.mark_refused` is a side effect on the login registry with no part in the entry, so it is not
+//! used only when a build is given a table (`Build::with_held`, S6: layer3::SegHeld); by default every turn is walked.
+//! build_feed's per-session memo is used only when a build is given one (`Build::with_memo`, S6.1: memo.rs); by default
+//! every session derives, with a fresh anchor table. `lg.mark_refused` is a side effect on the login registry with no part in the entry, so it is not
 //! ported. `faults` is the walk's lazy `seg_turn` faults, always 0 on a tree the loader admits.
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{FxMap as HashMap, FxSet as HashSet};
 
 use romp_json::Value as Out;
 use serde_json::Value as J;
@@ -278,25 +280,28 @@ fn py_str(v: &J) -> String {
 /// What one build reads across sessions, prepared from a snapshot and its trees.
 pub struct Build<'a> {
     pub snap: &'a Snapshot,
-    trees: HashMap<&'a str, &'a Tree>,
+    pub(crate) trees: HashMap<&'a str, &'a Tree>,
     pub names: Names,
-    world: PeerWorld,
-    now: Num,
-    cleared: HashSet<String>,
+    pub(crate) world: PeerWorld,
+    pub(crate) now: Num,
+    pub(crate) cleared: HashSet<String>,
     /// jd.load_goals_shared_or_fault's view: the sessions' stores, then the peers' over them.
-    stores: HashMap<&'a str, Option<&'a Store>>,
+    pub(crate) stores: HashMap<&'a str, Option<&'a Store>>,
     /// kernel._session_flags(): the peers' flags, then the sessions' over them (a null entry skipped).
-    flags: HashMap<&'a str, &'a J>,
-    downtime: Vec<(Num, Num)>,
-    board: &'a Board,
-    live_map: &'a OMap<LiveRow>,
+    pub(crate) flags: HashMap<&'a str, &'a J>,
+    pub(crate) downtime: Vec<(Num, Num)>,
+    pub(crate) board: &'a Board,
+    pub(crate) live_map: &'a OMap<LiveRow>,
     pub plant: Option<Plant>,
     /// S6's cheap bound (`Build::with_closed`): each session's closed part, folded ahead and taken by its derivation,
     /// whose walk then folds only the open turn. None: every turn is walked, as Python's walk with nothing held.
-    closed: Option<&'a RefCell<HashMap<String, ClosedPart<'a>>>>,
+    pub(crate) closed: Option<&'a RefCell<HashMap<String, ClosedPart<'a>>>>,
     /// S6's held aggregate (`Build::with_held`): the table kept across builds (kernel._FEED_SEG_HELD). None: nothing is
     /// held, every turn is walked.
-    held: Option<&'a RefCell<SegHeld<'a>>>,
+    pub(crate) held: Option<&'a RefCell<SegHeld<'a>>>,
+    /// S6.1's per-session memo (`Build::with_memo`): entries served while their key stands, kept across builds by the
+    /// caller, as Python's _feed_memo is (memo.rs). None: every session derives.
+    memo: Option<&'a RefCell<crate::memo::FeedMemo>>,
 }
 
 /// The session's walk inputs as Derive::new reads them (the replay key's hide gate, the tree's turns, the store unless
@@ -309,7 +314,7 @@ fn walk_inputs<'a>(b: &Build<'a>, fsid: &str, facts: &'a SessionFacts) -> (Optio
         Some(st) => Some(st),
         None => None,
     };
-    (turns, store, flag(&facts.leaf_ok))
+    (turns, store, crate::memo::leaf_inode(b.snap, fsid, facts).is_some())
 }
 
 static EMPTY_BOARD: std::sync::LazyLock<Board> = std::sync::LazyLock::new(Board::default);
@@ -320,8 +325,18 @@ static EMPTY_NODES: std::sync::LazyLock<OMap<Node>> = std::sync::LazyLock::new(O
 
 impl<'a> Build<'a> {
     pub fn new(snap: &'a Snapshot, trees: &'a [(String, Option<Tree>)], plant: Option<Plant>) -> Build<'a> {
-        let mut stores = HashMap::new();
-        let mut flags = HashMap::new();
+        Build::from_parts(snap, trees.iter().filter_map(|(s, t)| t.as_ref().map(|t| (s.as_str(), t))), plant)
+    }
+
+    /// A build over a snapshot and trees held elsewhere (sid to tree; a session with no tree is left out), as the memo's
+    /// change sequences hold them, re-reading only the trees a step touched (romp-spike memo).
+    pub fn from_parts(
+        snap: &'a Snapshot,
+        trees: impl IntoIterator<Item = (&'a str, &'a Tree)>,
+        plant: Option<Plant>,
+    ) -> Build<'a> {
+        let mut stores = HashMap::default();
+        let mut flags = HashMap::default();
         for (psid, p) in snap.peers.iter().flat_map(OMap::iter) {
             if let Some(f) = p.flags.as_ref().filter(|f| !f.is_null()) {
                 flags.insert(psid.as_str(), f);
@@ -339,7 +354,7 @@ impl<'a> Build<'a> {
         let board = snap.board.as_ref().unwrap_or(&EMPTY_BOARD);
         Build {
             snap,
-            trees: trees.iter().filter_map(|(s, t)| t.as_ref().map(|t| (s.as_str(), t))).collect(),
+            trees: trees.into_iter().collect(),
             names: Names::from_snapshot(snap),
             world: PeerWorld::default(),
             now: snap.now(),
@@ -352,7 +367,15 @@ impl<'a> Build<'a> {
             plant,
             closed: None,
             held: None,
+            memo: None,
         }
+    }
+
+    /// The build with the memo: each alive session is served its previous entry while its key stands and derives
+    /// otherwise (memo.rs), the anchor table carried in the memo across builds.
+    pub fn with_memo(mut self, memo: &'a RefCell<crate::memo::FeedMemo>) -> Build<'a> {
+        self.memo = Some(memo);
+        self
     }
 
     /// The build with the held aggregate: each derivation's walk is served from and stores into `held`, kept across
@@ -373,7 +396,7 @@ impl<'a> Build<'a> {
     /// Every alive session's closed part (layer3::closed_part over the turns and store its derivation walks), for the
     /// sessions whose walk Python would hold: a leaf head (`leafOk`) and at least one closed turn that folds.
     pub fn closed_parts(&self) -> HashMap<String, ClosedPart<'a>> {
-        let mut out = HashMap::new();
+        let mut out = HashMap::default();
         for row in self.snap.alive() {
             let fsid = row.sid.as_deref().expect("required at load");
             let Some(facts) = self.snap.sessions.as_ref().and_then(|m| m.get(fsid)) else { continue };
@@ -393,7 +416,7 @@ impl<'a> Build<'a> {
     }
 
     /// `_session_flag(sid, flag)`.
-    fn session_flag(&self, sid: &str, flag: &str) -> bool {
+    pub(crate) fn session_flag(&self, sid: &str, flag: &str) -> bool {
         self.flags.get(sid).and_then(|f| f.as_object()).is_some_and(|f| f.get(flag).is_some_and(py_truthy))
     }
 
@@ -429,6 +452,9 @@ impl<'a> Build<'a> {
     /// Every alive session's entry, in alive order, with one anchor table across them (_node_anchor_last, cleared
     /// before the build). Each entry is `Ok(the entry)` or the raise that failed it.
     pub fn entries(&self) -> Vec<(String, Result<Out, Raise>)> {
+        if let Some(m) = self.memo {
+            return crate::memo::entries(self, m);
+        }
         let mut table = AnchorTable::default();
         if let Some(h) = self.held {
             h.borrow_mut().build_begin(); // _feed_seg_build_begin, before the loop
@@ -502,6 +528,7 @@ struct Derive<'a, 'b> {
     healed: Healed,
     parked: HashMap<String, usize>,
     walk: FeedSegWalk<'a>,
+    row: &'a AliveRow,
     peers_read: Vec<String>,
     cdone: HashMap<String, bool>,
     fsmemo: HashMap<String, Num>,
@@ -545,17 +572,7 @@ impl<'a, 'b> Derive<'a, 'b> {
         };
         let nodes = store.nodes.as_ref().unwrap_or(&EMPTY_NODES);
         let status = store.status.as_ref().unwrap_or(&EMPTY_STATUS);
-        let walk_store = if store_faulted { None } else { Some(store) };
-        let walk = match b.held {
-            Some(held) => {
-                let head = if flag(&facts.leaf_ok) { Some(row.transcript.as_deref().unwrap_or("")) } else { None };
-                held.borrow_mut().walk(fsid, head, turns, walk_store)
-            }
-            None => {
-                let closed = b.closed.and_then(|c| c.borrow_mut().remove(fsid));
-                layer3::feed_seg_walk_from(turns, walk_store, closed)
-            }
-        };
+        let _ = turns;
         Ok(Derive {
             b,
             fsid,
@@ -569,22 +586,45 @@ impl<'a, 'b> Derive<'a, 'b> {
             ns: Ns::new(nodes),
             status,
             children: Children::default(),
-            agent_open: HashSet::new(),
+            agent_open: HashSet::default(),
             healed: OMap::default(),
-            parked: HashMap::new(),
-            walk,
+            parked: HashMap::default(),
+            // the anchor walk runs where the body runs it (`walk_now`, after the retrying read): a read that raises
+            // before it leaves the held table untouched, as in Python
+            walk: layer3::feed_seg_walk_from(None, None, None),
+            row,
             peers_read: Vec::new(),
-            cdone: HashMap::new(),
-            fsmemo: HashMap::new(),
-            qmemo: HashMap::new(),
-            bcmemo: HashMap::new(),
-            sub_memo: HashMap::new(),
-            land_memo: HashMap::new(),
+            cdone: HashMap::default(),
+            fsmemo: HashMap::default(),
+            qmemo: HashMap::default(),
+            bcmemo: HashMap::default(),
+            sub_memo: HashMap::default(),
+            land_memo: HashMap::default(),
             planted: None,
             interrupting,
             closer,
             live_row: tm,
         })
+    }
+
+    /// `_feed_seg_walk(fsid, ctx["leaf_head"], ps["turns"] if ps else None, store)`, at the body's point: over the held
+    /// table when the build has one (the leaf head is the transcript's path and inode from the key's stat, None when it
+    /// failed: memo.rs), else every turn (or the cheap bound's closed part).
+    fn walk_now(&self) -> FeedSegWalk<'a> {
+        let b = self.b;
+        let turns: Option<&'a [Turn]> = self.tree.map(|t| t.turns.as_deref().unwrap_or_default());
+        let walk_store = if self.store_faulted { None } else { Some(self.store) };
+        match b.held {
+            Some(held) => {
+                let head = crate::memo::leaf_inode(b.snap, self.fsid, self.rec.facts)
+                    .map(|ino| (self.row.transcript.as_deref().unwrap_or(""), ino));
+                held.borrow_mut().walk(self.fsid, head, turns, walk_store)
+            }
+            None => {
+                let closed = b.closed.and_then(|c| c.borrow_mut().remove(self.fsid));
+                layer3::feed_seg_walk_from(turns, walk_store, closed)
+            }
+        }
     }
 
     fn note_peer(&mut self, p: &str) {
@@ -986,7 +1026,7 @@ impl<'a, 'b> Derive<'a, 'b> {
         let live = tm.is_some();
         let ps = self.tree;
         let turns: Option<&'a [Turn]> = ps.map(|t| t.turns.as_deref().unwrap_or_default());
-        if ps.is_none() && flag(&self.rec.facts.leaf_ok) {
+        if ps.is_none() && crate::memo::leaf_inode(b.snap, self.fsid, self.rec.facts).is_some() {
             let w = self.rec.get("_warm_wanted", &rec.warm_wanted)?;
             if py_truthy(w) {
                 cold_parse = true;
@@ -1017,6 +1057,7 @@ impl<'a, 'b> Derive<'a, 'b> {
         };
         let sess_interrupting = self.interrupting;
         let sess_retrying = self.rec.get("_session_retrying", &rec.session_retrying)?.clone();
+        self.walk = self.walk_now();
         let store = self.store;
         let sess_judging = !who_working && (b.board.jactive.as_ref().is_some_and(|j| j.iter().any(|s| s == fsid)) || self.closer);
         let nodes_ns = &self.ns;
@@ -1153,7 +1194,7 @@ impl<'a, 'b> Derive<'a, 'b> {
             }
         }
         if self.b.plant == Some(Plant::AnchorStoreOrder) {
-            let mut p = HashMap::new();
+            let mut p = HashMap::default();
             for (i, (_, nd)) in self.ns.iter().enumerate() {
                 p.insert(i, layer4::node_anchor_uuids(nd, &WalkTrig(&self.walk.maps), &WalkWork(&self.walk.maps), table));
             }

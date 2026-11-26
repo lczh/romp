@@ -4,7 +4,7 @@ Rust's (`romp-spike measure`) in turn, N times on the same dump, each run a fres
 numbers in one JSON file, with a summary computed from them.
 
     python3 tools/rust-spike/measure_drive.py --dump DIR [--dump DIR ...] [--runs N] [--python EXE ...]
-        [--cpu] [--mem] [--builds K] [--instrumented M] [--appends K] [--schedule active|all] [--active N]
+        [--cpu] [--mem] [--memo] [--builds K] [--instrumented M] [--appends K] [--schedule active|all] [--active N]
         [--growth blocks,double] [--relief] [--mem-dir DIR ...] [--perf FILE [--perf FILE]] [--binary PATH] [--out FILE]
     python3 tools/rust-spike/measure_drive.py --summarize FILE
 
@@ -20,7 +20,10 @@ default 4), one to four of the file's own records per round, picked at random wi
 transcripts besides the dumps' (read-only: it is copied first); real transcripts need lczh's OK. Copies live under one
 scratch directory in the system temp dir, removed at the end. `--perf FILE` (measure.py perf's output) folds the live
 kernel's memo counters into the summary: given twice (a snapshot before and after an active window), the difference;
-given once, the counters since the kernel booted (flagged).
+given once, the counters since the kernel booted (flagged). `--memo` (step S6.1) adds both sides' memo rows to every CPU
+run (measure.py --memo: the real key over the recorded facts; romp-spike measure --memo: the port's memo) and the
+summary's memo comparisons: hit against hit, one miss on the largest session against the same, and the production blend
+with both sides memoized.
 
 Nothing is written inside the repo. The output defaults to <system temp>/romp-s6-measure-<UTC stamp>.json; it names
 interpreters by version and architecture and dumps by directory name, never by a path under the home directory.
@@ -211,7 +214,7 @@ def drive(a):
     doc = {"schema": SCHEMA, "startedUtc": utc(), "machine": machine(), "git": git_rev(),
            "settings": {"runs": a.runs, "cpu": a.cpu, "mem": a.mem, "builds": a.builds, "instrumented": a.instrumented,
                         "appends": a.appends, "schedule": a.schedule, "active": a.active, "growth": a.growth,
-                        "relief": a.relief},
+                        "relief": a.relief, "memo": a.memo},
            "interpreters": [i for _e, i in interps], "dumps": [dump_info(d) for d in dumps], "runs": []}
     if a.perf:
         doc["perf"] = []
@@ -240,9 +243,9 @@ def drive(a):
                     for pos, (side, exe, lab) in enumerate(sides):
                         if side == "python":
                             argv = [exe, "-I", MEASURE, "cpu", d, "--builds", str(a.builds), "--instrumented",
-                                    str(a.instrumented)]
+                                    str(a.instrumented)] + (["--memo"] if a.memo else [])
                         else:
-                            argv = [exe, "measure", "cpu", d, "--builds", str(a.builds)]
+                            argv = [exe, "measure", "cpu", d, "--builds", str(a.builds)] + (["--memo"] if a.memo else [])
                         started = utc()
                         rec = run_child(argv, env)
                         rec.update(run=i, kind="cpu", dump=label, side=side, interp=lab, order=pos, startedUtc=started)
@@ -365,6 +368,19 @@ def inst_runs(x, row):
 
 def inst_ms(x, row, key):
     return ms(balanced([(i, r["derived"].get(key)) for i, r in inst_runs(x, row)]))
+
+
+def memo_inst_ms(x, row, key):
+    """A memo-phase row's instrumented figure (measure.py --memo), balanced as `inst_ms`."""
+    runs = ((((x.get("memoRows") or {}).get("instrumentedRows") or {}).get(row) or {}).get("runs")) or []
+    pairs = list(enumerate(runs))
+    pairs = pairs[1:] if len(pairs) > 1 else pairs
+    return ms(balanced([(i, r["derived"].get(key)) for i, r in pairs]))
+
+
+def memo_row_ms(x, row):
+    rows = (x.get("memoRows") or {}).get("rows") or {}
+    return row_ms(rows[row]) if row in rows else None
 
 
 def rust_row(x, row):
@@ -531,6 +547,56 @@ def summarize(doc):
                 cmp_["unfair upper bound: plain cold build / Rust cold"] = paired(
                     [(ms(by_run[i]["cold"]["cpuNs"]), ms(rust_by_run[i]["cold"]["cpuNs"])) for i in sorted(by_run)
                      if i in rust_by_run])
+            # S6.1: both sides memoized (measure.py --memo, romp-spike measure --memo)
+            if rust_by_run and any(x.get("memoRows") for x in res) and "memo" in (s["rust"]["rows"] or {}):
+                cmp_["memo, hit against hit: memoKeyed region / memo"] = pair(
+                    lambda x: memo_inst_ms(x, "memoKeyed", "regionCorrectedNs"), "memo")
+                cmp_["memo, one miss on the largest session: memoKeyedMiss region / memoMiss"] = pair(
+                    lambda x: memo_inst_ms(x, "memoKeyedMiss", "regionCorrectedNs"), "memoMiss")
+                cmp_["memo, the port's memo against S6's memo-less port: Rust held / Rust memo"] = spread(
+                    [ratio(rust_row(rust_by_run[i], "held"), rust_row(rust_by_run[i], "memo")) for i in sorted(rust_by_run)])
+                cmp_["unfair upper bound: plain memoKeyed build / memoBuild"] = pair(
+                    lambda x: memo_row_ms(x, "memoKeyed"), "memoBuild")
+                p["memo"] = {
+                    "pythonMs": {k: spread([memo_inst_ms(x, r, k2) for x in res]) for k, r, k2 in (
+                        ("memoKeyedRegion", "memoKeyed", "regionCorrectedNs"),
+                        ("memoKeyedMissRegion", "memoKeyedMiss", "regionCorrectedNs"),
+                        ("memoKeyedKeyLessStandins", "memoKeyed", "keyLessStandinsNs"),
+                        ("memoKeyedKeyStandins", "memoKeyed", "keyStandinsNs"),
+                        ("memoKeyedFold", "memoKeyed", "foldNs"), ("memoKeyedBook", "memoKeyed", "memoBookNs"))},
+                    "pythonPlainMs": {r: spread([memo_row_ms(x, r) for x in res]) for r in ("memoKeyed", "memoKeyedMiss")},
+                    "rustMs": {r: s["rust"]["rows"].get(r) for r in ("memo", "memoMiss", "memoBuild")},
+                    "decisions": {"python": sorted({json.dumps(b.get("memo"), sort_keys=True) for x in res
+                                                    for r in ("memoKeyed", "memoKeyedMiss")
+                                                    for b in ((x.get("memoRows") or {}).get("rows") or {}).get(r, [])}),
+                                  "rust": sorted({json.dumps({k: (b.get("memo") or {}).get(k) for k in ("hits", "misses",
+                                                                                                    "raises")},
+                                                             sort_keys=True)
+                                                  for x in rust_by_run.values() for r in ("memo", "memoMiss")
+                                                  for b in x["rows"].get(r, [])})}}
+                dec = p["memo"]["decisions"]
+                if dec["python"] != dec["rust"]:
+                    s["problems"].append("%s: the memo rows' decisions differ: python %r, rust %r" % (lab, dec["python"],
+                                                                                                     dec["rust"]))
+                if perf and perf.get("missesPerBuild") is not None:
+                    mpb = min(1.0, perf["missesPerBuild"])
+
+                    def blend(hit, miss1):
+                        return None if hit is None or miss1 is None else hit + mpb * (miss1 - hit)
+                    pairs_ = []
+                    for i in sorted(by_run):
+                        if i not in rust_by_run:
+                            continue
+                        x, rx = by_run[i], rust_by_run[i]
+                        pb = blend(memo_inst_ms(x, "memoKeyed", "regionCorrectedNs"),
+                                   memo_inst_ms(x, "memoKeyedMiss", "regionCorrectedNs"))
+                        rb = blend(rust_row(rx, "memo"), rust_row(rx, "memoMiss"))
+                        pairs_.append((pb, rb))
+                    p["memo"]["productionBlend"] = {
+                        "missesPerBuild": mpb, "note": "hit + misses per build x (one miss on the largest session - hit), "
+                                                       "both sides memoized; production's misses all on the largest session",
+                        "pythonMs": spread([a for a, _b in pairs_]), "rustMs": spread([b for _a, b in pairs_]),
+                        "pythonOverRust": paired(pairs_)}
             p["compare"] = cmp_
             # the production blend: hits cost the memoServed row's hit, misses the heldWarm (or emptyMemo) row's miss,
             # both without the key; m per session per build, uniform over the world's sessions, or production's misses
@@ -727,6 +793,7 @@ def main(argv=None):
     ap.add_argument("--python", action="append", help="an interpreter to measure (repeatable; default this one)")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--mem", action="store_true")
+    ap.add_argument("--memo", action="store_true", help="add both sides' memo rows to the CPU runs (step S6.1)")
     ap.add_argument("--builds", type=int, default=11, help="rounds per run; odd, so after the first is dropped both "
                     "positions keep as many builds")
     ap.add_argument("--instrumented", type=int, default=5)

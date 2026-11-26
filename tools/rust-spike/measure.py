@@ -2,7 +2,7 @@
 """Step S6's measurement, the Python side (rust/SPIKE.md, "S6 method"). Each mode runs in a fresh process and prints one
 JSON line; tools/rust-spike/measure_drive.py alternates it with `romp-spike measure` and keeps every run.
 
-    python3 tools/rust-spike/measure.py cpu DUMP [--builds K] [--instrumented M]
+    python3 tools/rust-spike/measure.py cpu DUMP [--builds K] [--instrumented M] [--memo]
     python3 tools/rust-spike/measure.py mem DIR PAYLOAD [--appends K] [--tracemalloc] [--relief]
     python3 tools/rust-spike/measure.py perf --out FILE
 
@@ -23,6 +23,16 @@ wire and every memo entry) before anything is reported; the last build of every 
   heldNoLanding  heldWarm with _SUMMARY_ANCHOR_MEMO cleared too: the held aggregates serve, the landing memo does not,
               as the port, which has no landing memo (the size of the one Python cache the port still lacks);
   memoServed  nothing cleared: every session is a memo hit (the replay's key is constant), no derivation.
+With --memo (step S6.1), a second phase after these rows, with the REAL _feed_session_key and _feed_key_with_deps over
+the dump's recorded key facts (tools/rust-spike/dump_memo.py's KeyHarness: the files the key stats and the revisions it
+reads answered from the snapshot's keyFacts, the same inputs the port's key reads), warmed by three builds (cold, the peers
+settle, served whole; the third checked against the oracle and required to be all hits). Two rows, round-robin:
+  memoKeyed      nothing cleared: every session's real key is computed and every session is a hit;
+  memoKeyedMiss  the largest session's recorded transcript identity moves before each build (same inode, so its held
+                 aggregate serves): that session misses and derives, every other session hits.
+Their instrumented builds report `regionNs`: the key, the memo's bookkeeping, the entry's serialization and decode, the
+derivation and the fold, the replay's stand-ins (inside the key: the harness's leaves, the recorded helpers and the store
+copy) out, the same loop the port's memo rows time.
 The rows run round-robin, one build of each per round, even rounds in the order above and odd rounds in ROWS_ODD's (the
 held rows need the aggregates emptyMemo just stored, memoServed a memo a build just filled), K rounds; each build keeps its collections per generation and the
 held walk's counters (segHeld, segWalkTurns, ...). Then M instrumented builds per row, with a wrapper on each function
@@ -454,7 +464,116 @@ def per_session(bysid):
 
 
 # ───────────────────────────── cpu ─────────────────────────────
-def cpu_main(dump, builds, instrumented):
+# the harness's leaves (dump_memo.KeyHarness) the memo phase counts as stand-ins, beside the recorded helpers
+MEMO_STANDINS_KM = ("_chat_ident", "_feed_reg_sig", "_postal_session_slice", "_rewind_hold_get", "_watch_awaiting",
+                    "_usage_cap_open", "_auth_key_present", "_auto_nudge_data", "_nudge_times", "_postal_maps_indexed",
+                    "_bg_live_norm")
+MEMO_STANDINS_JD = ("_store_identity", "shared_replay_wrote")
+MEMO_ROWS = ("memoKeyed", "memoKeyedMiss")
+
+
+def derived_memo(attrib, total, per_call_ns=None):
+    """A memo-phase build split as `derived` splits the others: `regionNs` is everything build_feed's per-session loop
+    does (the key, the memo's bookkeeping, the serialization and decode, the derivation, the fold) less the replay's
+    stand-ins called inside it; `regionCorrectedNs` takes the wrappers' cost out the same way."""
+    g = lambda k: attrib.get(k, [0, 0])[0]
+    c = lambda k: attrib.get(k, [0, 0])[1]
+    parts = ("key", "memo", "json.dumps", "json.loads", "entry", "fold")
+    top = sum(g(p + "@build") for p in parts)
+    sub = g("standins@key") + g("standins@entry") + g("standins@fold") + g("standins@memo")
+    sub_calls = c("standins@key") + c("standins@entry") + c("standins@fold") + c("standins@memo")
+    inner_calls = sum(v[1] for k, v in attrib.items() if k.endswith(("@key", "@entry", "@fold", "@memo")))
+    out = {"totalNs": total, "regionNs": top - sub, "keyNs": g("key@build"), "keyStandinsNs": g("standins@key"),
+           "keyLessStandinsNs": g("key@build") - g("standins@key"), "memoBookNs": g("memo@build"),
+           "memoSerdeNs": g("json.dumps@build") + g("json.loads@build") + g("json.loads@fold"),
+           "entryNs": g("entry@build"), "foldNs": g("fold@build"), "standinsNs": sub, "standinsCalls": sub_calls,
+           "frameNs": g("frame@build") + g("nameColor@build"), "preloopNs": g("preloop@build"),
+           "wrappedCalls": sum(v[1] for v in attrib.values())}
+    if per_call_ns is not None:
+        keep = inner_calls - sub_calls
+        out["regionCorrectedNs"] = out["regionNs"] - keep * per_call_ns - sub_calls * per_call_ns / 2
+        out["wrapperUncertaintyNs"] = sub_calls * per_call_ns / 2
+        out["totalLessWrappersNs"] = total - out["wrappedCalls"] * per_call_ns
+    return out
+
+
+def run_memo_rows(dw, km, dump, snap, trees, builds, instrumented, doc):
+    """The --memo phase (the module docstring): the real key over the recorded facts, two rows round-robin."""
+    import copy
+    import importlib.util
+    import dump_memo as dm
+    spec = importlib.util.spec_from_file_location("romp_spike_dump_layer6", os.path.join(HERE, "dump_layer6.py"))
+    l6 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(l6)
+    now = dw.NOW
+    snap = copy.deepcopy(snap)
+    turns = {sid: len((t or {}).get("turns") or []) for sid, t in trees.items()}
+    big = min(turns, key=lambda k: (-turns[k], k))
+    clear_all(dw, km)
+    real_key, real_deps = km._feed_session_key, km._feed_key_with_deps
+    rp = dw.Replay(km, snap, trees)
+    rp.install()
+    h = dm.KeyHarness(dw, l6, km, rp, snap)
+    h.install(real_key, real_deps)
+    km._HEAL_LOG.update(n=10 ** 9, h=10 ** 9)
+    files = snap.setdefault("keyFacts", {}).setdefault("files", {})
+    stamp = [0]
+
+    def move_big():
+        stamp[0] += 1
+        files["transcript:" + big] = [0, stamp[0], 0, 0]
+
+    def counts():
+        d = list(h.decisions.values())
+        return {"hits": sum(1 for x in d if x.get("hit")), "misses": sum(1 for x in d if "miss" in x),
+                "raises": sum(1 for x in d if "raise" in x)}
+    out = {"missSession": big, "checks": {}, "rows": {r: [] for r in MEMO_ROWS}}
+    try:
+        for what in ("cold", "peers settle", "served"):
+            h.decisions = {}
+            feed, s = timed_build(km, now)
+            out["checks"][what] = dict(check(dw, km, rp, dump, feed, "memo " + what), memo=counts())
+        if out["checks"]["served"]["memo"]["hits"] != len(snap["alive"]):
+            raise MeasureError("the third memo build is not served whole: %r" % out["checks"]["served"]["memo"])
+        for i in range(builds):
+            for row in (MEMO_ROWS[::-1] if i % 2 else MEMO_ROWS):
+                if row == "memoKeyedMiss":
+                    move_big()
+                h.decisions = {}
+                feed, s = timed_build(km, now)
+                s["memo"] = counts()
+                out["rows"][row].append(s)
+        out["checks"]["after rounds"] = check(dw, km, rp, dump, feed, "memo after the rounds")
+        if instrumented:
+            per_call = (doc.get("wrapperOverhead") or wrapper_overhead())["perCallNs"]
+            inst = {row: {"runs": []} for row in MEMO_ROWS}
+            meter = Meter()
+            meter.install(km, list(dw.RECORDED) + [n for n in MEMO_STANDINS_KM if n not in dw.RECORDED])
+            for n in MEMO_STANDINS_JD:
+                meter.wrap(km.jd, n, "standins", False)
+            try:
+                for i in range(instrumented):
+                    for row in (MEMO_ROWS[::-1] if i % 2 else MEMO_ROWS):
+                        if row == "memoKeyedMiss":
+                            move_big()
+                        h.decisions = {}
+                        meter.take()
+                        meter.take_sids()
+                        feed, s = timed_build(km, now)
+                        attrib = meter.take()
+                        meter.take_sids()
+                        inst[row]["runs"].append({"span": s, "attrib": attrib, "memo": counts(),
+                                                  "derived": derived_memo(attrib, s["cpuNs"], per_call)})
+            finally:
+                meter.uninstall()
+            out["instrumentedRows"] = inst
+    finally:
+        h.uninstall()
+        rp.uninstall()
+    doc["memoRows"] = out
+
+
+def cpu_main(dump, builds, instrumented, memo=False):
     import dump_world as dw
     out_doc = {"side": "python", "mode": "cpu", "schema": SCHEMA, "interpreter": interpreter(), "builds": builds,
                "instrumented": instrumented,
@@ -494,6 +613,12 @@ def cpu_main(dump, builds, instrumented):
         finally:
             time.time = real_time
             rp.uninstall()
+        if memo:
+            time.time = lambda: float(dw.NOW)
+            try:
+                run_memo_rows(dw, km, dump, snap, trees, builds, instrumented, out_doc)
+            finally:
+                time.time = real_time
         out_doc["guards"] = {"spawns": len(rec["spawns"]), "refusedWrites": len(rec["refused_writes"]),
                              "threadStarts": rec["thread_starts"], "warmCalls": len(rec["warm_calls"])}
     finally:
@@ -806,6 +931,7 @@ def main(argv=None):
     c.add_argument("dump")
     c.add_argument("--builds", type=int, default=11)
     c.add_argument("--instrumented", type=int, default=5)
+    c.add_argument("--memo", action="store_true", help="add the memo phase (step S6.1: the real key, memoKeyed rows)")
     m = sub.add_parser("mem")
     m.add_argument("dir")
     m.add_argument("payload")
@@ -821,7 +947,7 @@ def main(argv=None):
         if a.mode == "cpu":
             if a.builds < 1 or a.instrumented < 0:
                 ap.error("--builds must be at least 1 and --instrumented at least 0")
-            doc = cpu_main(a.dump, a.builds, a.instrumented)
+            doc = cpu_main(a.dump, a.builds, a.instrumented, a.memo)
         else:
             doc = mem_main(a.dir, a.payload, a.appends, a.tracemalloc, a.relief)
     except MeasureError as e:

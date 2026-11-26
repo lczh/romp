@@ -88,7 +88,7 @@
 //! the port reads it as exact pairs; dump_layer7.py refuses to answer a world where a parked candidate's `exists()`
 //! disagrees with its `mailNew` membership on the filesystem it runs on, as it refuses notice files that collide.
 
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{FxMap as HashMap, FxSet as HashSet};
 
 use romp_json::Value as Out;
 use serde_json::{Map, Value as J};
@@ -642,8 +642,8 @@ impl Pass<'_, '_> {
     /// kernel._notice_projection(sid, now, cleared) over one file's filtered rows.
     fn notice_projection<'r>(&self, sid: &str, rows: &[&'r Map<String, J>]) -> Vec<Proj<'r>> {
         let mut newest: Vec<(&'r str, &'r Map<String, J>)> = Vec::new();
-        let mut retired: HashSet<(&str, i64)> = HashSet::new();
-        let mut acted: HashSet<(&str, i64)> = HashSet::new();
+        let mut retired: HashSet<(&str, i64)> = HashSet::default();
+        let mut acted: HashSet<(&str, i64)> = HashSet::default();
         for &r in rows {
             let op = r.get("op").and_then(J::as_str);
             if !matches!(op, Some("post" | "expire" | "acted")) {
@@ -839,7 +839,7 @@ fn fold_sessions(p: &Pass<'_, '_>) -> Result<Folded, Raise> {
     let (mut asks, mut working, mut awaiting, mut serving) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut bg: Obj = Vec::new();
     let mut absent: Vec<String> = Vec::new();
-    let mut working_sids: HashSet<String> = HashSet::new();
+    let mut working_sids: HashSet<String> = HashSet::default();
     let entries = p.b.entries();
     let sessions = entries.len();
     for (row, (sid, got)) in alive_rows.iter().zip(entries) {
@@ -905,7 +905,7 @@ pub fn build_feed_on(b: &Build<'_>, plant: Option<Plant>) -> Result<Feed, Raise>
     let n_folded = asks.len();
     let mut serving_folded: Vec<Out> = Vec::new();
     if !serving.is_empty() {
-        let mut byrow: HashMap<String, (usize, usize)> = HashMap::new();
+        let mut byrow: HashMap<String, (usize, usize)> = HashMap::default();
         for (ci, c) in asks.iter().enumerate() {
             for (ri, r) in as_obj(c).map(rows_of).unwrap_or_default().iter().enumerate() {
                 let Some(r) = as_obj(r) else { continue };

@@ -20,5 +20,19 @@ romp-json = { path = "crates/romp-json" }
 romp-transcript = { path = "crates/romp-transcript" }
 romp-views = { path = "crates/romp-views" }
 
+# S6.1's tuning (rust/SPIKE.md): whole-program LTO and one codegen unit let the build's hot paths inline across the four
+# crates; panic = "abort" drops the unwinding tables and landing pads (no code catches a panic: a panic ends the run,
+# which every harness reads as a failure, as before). Tests and benches ignore `panic` and keep unwinding.
 [profile.release]
 debug = 1          # symbols for profiling the measurement runs
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+# The memo mutant sweep's profile only (tools/rust-spike/orcd/mutants.sbatch): the release profile without LTO and with
+# parallel codegen, so each mutant builds in a fraction of the time; never measured.
+[profile.mutant]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = 0

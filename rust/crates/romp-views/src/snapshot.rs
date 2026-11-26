@@ -22,6 +22,10 @@ record! {
         peers: OMap<PeerFacts> = "peers",
         frame_keys: Vec<String> = "frameKeys",
         frame: OMap<serde_json::Value> = "frame",
+        /// The memo key's board-wide recorded facts (memo.rs, S6.1): the file identities the key stats (`files`,
+        /// by kind and name), the key on hand (`auth`) and the capped usage window (`capOpen`). Absent: none
+        /// recorded, every identity null. Only the memo reads it; `memo::validate` checks its shape.
+        key_facts: serde_json::Value = "keyFacts",
     }
     required: [schema, world, alive, live_map, board, sessions, peers, frame_keys, frame]
 }
@@ -131,6 +135,10 @@ record! {
         /// that reaches the read anyway must fail loudly (layer 5's provisional card).
         captions: Option<OMap<CaptionRow>> = "captions",
         recorded: Recorded = "recorded",
+        /// The memo key's per-session recorded facts (memo.rs, S6.1): the in-memory revisions and records the key
+        /// reads besides files (`cut`, `live`, `watch`, `postal`, `reg`, `anchors`, `userWrite`, `snapDone`, `hold`,
+        /// `replayWrote`). Absent: Python's values for a session nothing has touched.
+        key_facts: serde_json::Value = "keyFacts",
     }
     required: [recorded]
 }

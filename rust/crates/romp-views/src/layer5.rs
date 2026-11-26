@@ -47,7 +47,7 @@
 
 use std::borrow::Cow;
 use std::cell::OnceCell;
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{FxMap as HashMap, FxSet as HashSet};
 
 use romp_json::Value as Out;
 
@@ -563,7 +563,7 @@ impl<'a> PromptIndex<'a> {
 
     fn get(&self, pu: &str) -> Option<&'a Atom> {
         let recs = self.recs.get_or_init(|| {
-            let mut recs = HashMap::new();
+            let mut recs = HashMap::default();
             for turn in self.tree.and_then(|t| t.turns.as_deref()).unwrap_or_default() {
                 for a in turn.atoms.iter().flatten() {
                     if let Some(u) = a.uuid().filter(|u| !u.is_empty()) {
@@ -616,7 +616,7 @@ pub fn pure_delegation_top(ns: &Ns<'_>, top: &str, dictated: &mut dyn FnMut(&str
         }
     }
     let children = Children::from_parents(ns);
-    let (mut leaves, mut stack, mut seen) = (Vec::new(), vec![top.to_string()], HashSet::new());
+    let (mut leaves, mut stack, mut seen) = (Vec::new(), vec![top.to_string()], HashSet::default());
     while let Some(x) = stack.pop() {
         if seen.contains(&x) || !ns.contains(&x) {
             continue;
@@ -773,7 +773,7 @@ pub fn live_replanned(p: &Placements, seg_id: &str) -> bool {
 /// kernel._card_gone(nodes, nid): the node is missing, or it or an ancestor is cleared (a seen-set walk up the parents;
 /// a cycle ends it, not gone).
 pub fn card_gone(ns: &Ns<'_>, nid: &str) -> bool {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut cur = Some(nid);
     while let Some(n) = cur {
         if !seen.insert(n) {

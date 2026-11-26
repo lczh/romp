@@ -19,7 +19,7 @@
 //! (`tree::validate_turn`), and a lazy atom never reaches here, so em.hydrate's call in _seam_real_work is dropped.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{FxMap as HashMap, FxSet as HashSet};
 
 use romp_json::Value as Out;
 

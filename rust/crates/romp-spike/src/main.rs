@@ -27,6 +27,9 @@
 //!     romp-spike store-serve [--plant NAME]
 //!         One store kept across requests, for tools/rust-spike/check_store.py's lockstep cases: each stdin line
 //!         `read<TAB>PATH` answers one JSON line {"kind", "generation", "file", "lines"} (records in full).
+//!     romp-spike memo CASES.json|DUMP [--plant peers-settled|tag-strict|row-whole|raise-absent|no-forget|stalls-all]
+//!         S6.1's memo (memo_cmd.rs): change sequences against Python's own decisions and bytes (dump_memo.py), or a
+//!         dump built three times with the memo, each build's bytes against its oracle.
 //!     romp-spike measure cpu DUMP [--builds K] | romp-spike measure mem DIR PAYLOAD [--appends K]
 //!         S6's measurement (measure.rs, rust/SPIKE.md "S6 method"): the feed build's process CPU (cold, warm, the
 //!         entries alone) after checking its bytes against the oracle, or the transcript store's resident size cold
@@ -56,6 +59,7 @@
 //! Exit status: 0 when everything matched, 1 on any difference, 2 on a usage or load error.
 
 mod measure;
+mod memo_cmd;
 
 use romp_transcript::canon::{self, RecordMode};
 use romp_transcript::{Plant, ReadKind, Store};
@@ -79,7 +83,7 @@ use romp_views::snapshot::{Snapshot, Store as GoalStore};
 use romp_views::tree::{self, Atom, Content, Tree, Turn};
 
 const USAGE: &str =
-    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]\n       romp-spike layer5 DUMP|EDGE.json [--plant lowercase|em-text|uuid-exclude|outrun-float|prompt-bytes|idle-tail]\n       romp-spike layer6 DUMP|EDGE.json [--plant anchor-store-order|fsubmax-last|mt-or|land-first-equal|peers-unsorted|born-empty-kept]\n       romp-spike feed DUMP|EDGE.json [--plant bell-falsy-skip|serving-first-row|who-owner|parked-unsorted|notice-cap-held|absent-last]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]\n       romp-spike measure cpu DUMP [--builds K]\n       romp-spike measure mem DIR PAYLOAD [--appends K]";
+    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]\n       romp-spike layer5 DUMP|EDGE.json [--plant lowercase|em-text|uuid-exclude|outrun-float|prompt-bytes|idle-tail]\n       romp-spike layer6 DUMP|EDGE.json [--plant anchor-store-order|fsubmax-last|mt-or|land-first-equal|peers-unsorted|born-empty-kept]\n       romp-spike feed DUMP|EDGE.json [--plant bell-falsy-skip|serving-first-row|who-owner|parked-unsorted|notice-cap-held|absent-last]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]\n       romp-spike memo CASES.json|DUMP [--plant NAME]\n       romp-spike measure cpu DUMP [--builds K] [--memo]\n       romp-spike measure mem DIR PAYLOAD [--appends K]";
 const MAX_SHOWN: usize = 10;
 
 fn store_usage() -> ExitCode {
@@ -224,6 +228,7 @@ fn main() -> ExitCode {
         "store" => return store_cmd(rest),
         "store-serve" => return serve_cmd(rest),
         "measure" => return measure::cmd(rest),
+        "memo" => return memo_cmd::cmd(rest),
         _ => {}
     }
     let (dir, plant) = match rest {
@@ -1289,7 +1294,7 @@ fn layer5_dump(dir: &Path, plant: Option<Plant5>) -> Result<bool, String> {
     let facts = snap.sessions.as_ref().ok_or("snapshot.json: no sessions")?;
     let live = snap.live_map.as_ref();
     let names = layer4::Names::from_snapshot(snap);
-    let cleared: std::collections::HashSet<String> =
+    let cleared: romp_views::fxhash::FxSet<String> =
         snap.board.as_ref().and_then(|b| b.cleared.clone()).unwrap_or_default().into_iter().collect();
     let empty_heal = OMap::default();
     let t0 = Instant::now();
