@@ -567,6 +567,26 @@ class ScalarWalkers(Restored):
                 self.assertEqual(km._seg_last_text(r_seg["atoms"]), km._seg_last_text(w_seg["atoms"]))
         self.assertEqual(em.asm_checkpoint_stats()["hydratedAtoms"], h0, "the anchors, jump and last-text reads hydrate nothing")
 
+    def test_the_summary_anchor_memos_key_reads_a_restored_turns_uuids_and_builds_nothing(self):
+        # 2026-11-26: the brief landing's memo key names the segment's and the turn's atoms by uuid (km._atom_uuids), so a
+        # seam that moves atoms between them is a miss; on a restored turn the uuids come from the index, so a hit still
+        # builds no atom, as the key without them did
+        path, whole, tree = self.restored_tree()
+        km = self.km
+        pre, w_turn = tree["turns"][0], whole["turns"][0]
+        seg, w_seg = em.segments(pre)[0], em.segments(w_turn)[0]
+        self.assertEqual(km._atom_uuids(pre["atoms"]), tuple(pre["uuids"]))
+        self.assertEqual(km._atom_uuids(pre["atoms"]), km._atom_uuids(w_turn["atoms"]), "the index's uuids are the atoms' own")
+        self.assertEqual(km._atom_uuids(seg["atoms"]), km._atom_uuids(w_seg["atoms"]), "…and a segment view's too")
+        self.assertEqual(em.asm_index_stats()["materialized"], 0, "reading the uuids built nothing: %s" % em.asm_index_stats()["materializedBy"])
+        line, mk = "No atom of the turn carries this opening sentence.", (SID, "g1", "k1")
+        km._SUMMARY_ANCHOR_MEMO.pop(next((k for k in km._SUMMARY_ANCHOR_MEMO if k[:3] == mk), None), None)
+        first = km._summary_text_anchor((w_turn, w_seg["atoms"]), line, memo_key=mk)    # filled from the whole parse's atoms
+        hits = km._SUMMARY_ANCHOR_STATS["hit"]
+        again = km._summary_text_anchor((pre, seg["atoms"]), line, memo_key=mk)          # the same atoms, restored: one key
+        self.assertEqual((again, km._SUMMARY_ANCHOR_STATS["hit"]), (first, hits + 1), "the restored turn's ask is a hit")
+        self.assertEqual(em.asm_index_stats()["materialized"], 0, "…that built nothing: %s" % em.asm_index_stats()["materializedBy"])
+
     def test_the_work_rule_is_pinned_beside_the_document_version(self):
         """The document stores atom_has_work's verdict (w), seg_prompt_atom's (hp), _prose_chars (pc, pcs) and postal_mids
         (mid, mids): a change to any of them changes what a stored document means, so it is a version bump. Re-pin here
