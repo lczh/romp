@@ -7,6 +7,8 @@
 //!         Layer 2 (segmentation) against DUMP/layer2.json, or against an edge set (both by dump_layer2.py).
 //!     romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]
 //!         Layer 3 (tree facts and the anchor walk) against DUMP/layer3.json, or an edge set (dump_layer3.py).
+//!     romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]
+//!         Layer 4 (the store helpers) against DUMP/layer4.json, or an edge set (dump_layer4.py).
 //!     romp-spike store DUMP [--records] [--plant NAME]
 //!         Read every file of DUMP/transcripts/ through the transcript store and print the canonical summary
 //!         (romp_transcript::canon): per file one line, then one line per record. --records prints each record's
@@ -20,8 +22,10 @@
 //! `bytes` counts atom_prose_chars in UTF-8 bytes; layer2's `end` ends each segment at its own last atom and its
 //! `bytes` counts the seam prose floor in UTF-8 bytes; layer3's `max-last` keeps the last of equal times in the
 //! plain-prompt max, `overwrite-moves` moves a repeated key to the end of the anchor maps, `bytes` counts the
-//! substantive floor in UTF-8 bytes and `raise-skips` skips a raising turn instead of stopping the walk; the store's
-//! plants are no-tool-result, vt-strip and skip-held-crc.
+//! substantive floor in UTF-8 bytes and `raise-skips` skips a raising turn instead of stopping the walk; layer4's
+//! `max-last` keeps the last of equal awaiting stamps, `int-round` rounds an awaited row's `since`, `uuid-strict` makes
+//! the uuid shape refuse a trailing newline, `table-off` forgets warm anchors and `parked-sorted` sorts parked rows;
+//! the store's plants are no-tool-result, vt-strip and skip-held-crc.
 //! Exit status: 0 when everything matched, 1 on any difference, 2 on a usage or load error.
 
 use romp_transcript::canon::{self, RecordMode};
@@ -36,13 +40,14 @@ use romp_json::Value as Out;
 use romp_views::layer1::{self, ATOM_COLUMNS, SEG_COLUMNS, TURN_KEYS};
 use romp_views::layer2::{self, Plant as Plant2, Probe};
 use romp_views::layer3::{self, Plant as Plant3};
+use romp_views::layer4::{self, Plant as Plant4};
 use romp_views::load;
 use romp_views::record::{Num, OMap, ToJson};
 use romp_views::snapshot::{Snapshot, Store as GoalStore};
 use romp_views::tree::{self, Atom, Content, Tree, Turn};
 
 const USAGE: &str =
-    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
+    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
 const MAX_SHOWN: usize = 10;
 
 fn store_usage() -> ExitCode {
@@ -201,6 +206,8 @@ fn main() -> ExitCode {
         ("layer2", Some("bytes")) => layer2_cmd(&dir, Some(Plant2::FloorInBytes)),
         ("layer3", None) => layer3_cmd(&dir, None),
         ("layer3", Some(p)) if Plant3::parse(p).is_some() => layer3_cmd(&dir, Plant3::parse(p)),
+        ("layer4", None) => layer4_cmd(&dir, None),
+        ("layer4", Some(p)) if Plant4::parse(p).is_some() => layer4_cmd(&dir, Plant4::parse(p)),
         _ => return usage(),
     };
     match result {
@@ -1012,6 +1019,196 @@ fn layer3_edge(file: &Path, plant: Option<Plant3>) -> Result<bool, String> {
     Ok(tally.diffs == 0)
 }
 
+/// A file of Python's answers read as Python's `json.loads` reads it (romp-transcript's decoder): an integer past u64
+/// stays an integer (serde_json without `arbitrary_precision` would read `int(1e20)` as the float 1e+20).
+fn exact_doc(bytes: &[u8], name: &str) -> Result<Out, String> {
+    romp_transcript::decode::decode(bytes).map_err(|e| format!("{name}: {} (reading Python's answers)", e.reason()))
+}
+
+fn exact_items<'a>(doc: &'a Out, key: &str, name: &str) -> Result<&'a [Out], String> {
+    match member(doc, key) {
+        Some(Out::Array(v)) => Ok(v),
+        _ => Err(format!("{name}: no {key} list")),
+    }
+}
+
+fn plant4_name(plant: Option<Plant4>) -> String {
+    plant.map_or_else(String::new, |p| format!(" [planted: {}]", p.name()))
+}
+
+/// Layer 4 against Python's answers: DUMP/layer4.json for a dump directory, or an edge set file.
+fn layer4_cmd(path: &Path, plant: Option<Plant4>) -> Result<bool, String> {
+    if path.is_dir() { layer4_dump(path, plant) } else { layer4_edge(path, plant) }
+}
+
+fn layer4_dump(dir: &Path, plant: Option<Plant4>) -> Result<bool, String> {
+    let dump = load::load_dump(dir)?;
+    let bytes = read(&dir.join("layer4.json"))?;
+    let expect: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("layer4.json: {e}"))?;
+    let exact = exact_doc(&bytes, "layer4.json")?;
+    let exact_sessions = exact_items(&exact, "sessions", "layer4.json")?;
+    if expect["schema"] != "romp-spike-layer4/1" {
+        return Err(format!("layer4.json: schema {}, expected romp-spike-layer4/1", expect["schema"]));
+    }
+    let snap = &dump.snapshot;
+    let sessions = expect["sessions"].as_array().ok_or("layer4.json: no sessions")?;
+    if sessions.len() != dump.trees.len() {
+        return Err(format!("layer4.json has {} sessions, the dump {}", sessions.len(), dump.trees.len()));
+    }
+    let queries = layer4::dump_queries(snap);
+    let want_q: Vec<Option<String>> =
+        serde_json::from_value(expect["queries"].clone()).map_err(|e| format!("layer4.json queries: {e}"))?;
+    if queries != want_q {
+        return Err(format!("layer4.json asks {} names, this dump gives {} (or another order)", want_q.len(),
+                           queries.len()));
+    }
+    let facts = snap.sessions.as_ref().ok_or("snapshot.json: no sessions")?;
+    let live = snap.live_map.as_ref();
+    let names = layer4::Names::from_snapshot(snap);
+    let world = layer4::PeerWorld::default();
+    let ctx = layer4::Ctx { names: &names, world: &world, plant };
+    let empty_heal = OMap::default();
+    let t0 = Instant::now();
+    let mut tally = Tally::default();
+    let mut table = layer4::AnchorTable::default();
+    let (mut n_nodes, mut n_stores, mut differing) = (0usize, 0usize, 0usize);
+    for (((sid, tree), sess), exact_sess) in dump.trees.iter().zip(sessions).zip(exact_sessions) {
+        if sess["sid"].as_str() != Some(sid.as_str()) {
+            return Err(format!("layer4.json's sessions are out of order at {sid}"));
+        }
+        let f = facts.get(sid).ok_or_else(|| format!("snapshot.json: no facts for {sid}"))?;
+        let store: Option<&GoalStore> = f.store.as_ref().and_then(Option::as_ref);
+        let rec = f.recorded.as_ref().ok_or_else(|| format!("snapshot.json: no recorded answers for {sid}"))?;
+        let turns: &[Turn] = tree.as_ref().and_then(|t| t.turns.as_deref()).unwrap_or_default();
+        let w = layer3::feed_seg_walk(tree.as_ref().map(|_| turns), store);
+        let (work, trig) = (layer4::WalkWork(&w.maps), layer4::WalkTrig(&w.maps));
+        n_stores += usize::from(store.is_some());
+        n_nodes += store.and_then(|s| s.nodes.as_ref()).map_or(0, OMap::len);
+        let si = layer4::SessionIn {
+            store,
+            healed: rec.heal_session_tops.as_ref().unwrap_or(&empty_heal),
+            answered: rec.peer_answered.as_ref().map(|(t, m)| layer4::Answered::Pair(*t, m)),
+            live_row: live.and_then(|m| m.get(sid)),
+            api_error: rec.api_error.as_ref(),
+            seg_work: &work,
+            seg_trig: &trig,
+        };
+        let got = layer4::session_json(&ctx, &si, &mut table).map_err(|e| format!("{sid}: refused: {e}"))?;
+        let before = tally.diffs;
+        tally.compare(sid, &got, member(exact_sess, "answer").ok_or("layer4.json: a session without its answer")?);
+        differing += usize::from(tally.diffs > before);
+    }
+    let want_names = member(&exact, "names").ok_or("layer4.json: no names")?;
+    tally.compare("names", &layer4::names_json(&ctx, &queries), want_names);
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    for s in &tally.shown {
+        println!("  {s}");
+    }
+    println!(
+        "layer4 {}{}: {} sessions, {} stores, {} nodes, {} names: {} values compared, {} differences in {} sessions \
+         ({:.0} ms; python {})",
+        world_name(snap),
+        plant4_name(plant),
+        dump.trees.len(),
+        n_stores,
+        n_nodes,
+        queries.len(),
+        tally.values,
+        tally.diffs,
+        differing,
+        ms,
+        expect["python"].as_str().unwrap_or("?")
+    );
+    let bc = &expect["buildCheck"];
+    println!(
+        "  python: coverage {}; build check {} calls compared, {} mismatches",
+        expect["coverage"], bc["compared"], expect["buildMismatches"]
+    );
+    Ok(tally.diffs == 0)
+}
+
+fn layer4_edge(file: &Path, plant: Option<Plant4>) -> Result<bool, String> {
+    let name = file.display().to_string();
+    let bytes = read(file)?;
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("{name}: {e}"))?;
+    let exact = exact_doc(&bytes, &name)?;
+    let exact_cases = exact_items(&exact, "cases", &name)?;
+    if doc["schema"] != "romp-spike-layer4-edge/1" {
+        return Err(format!("{name}: schema {}, expected romp-spike-layer4-edge/1", doc["schema"]));
+    }
+    let cases = doc["cases"].as_array().ok_or_else(|| format!("{name}: no cases"))?;
+    if cases.len() != exact_cases.len() {
+        return Err(format!("{name}: {} cases, {} read exactly", cases.len(), exact_cases.len()));
+    }
+    let mut tally = Tally::default();
+    let (mut loaded, mut refused, mut raised_refused, mut differing) = (0, 0, 0, 0);
+    let mut kinds: Vec<(String, usize)> = Vec::new();
+    for (case, exact_case) in cases.iter().zip(exact_cases) {
+        let cname = case["name"].as_str().ok_or("a case without a name")?;
+        let python_raises = case["expect"].get("raises").is_some();
+        let loaded_case = layer4::EdgeCase::load(case).and_then(|c| match c.refused_session() {
+            Some(e) => Err(e),
+            None => Ok(c),
+        });
+        let loaded_case = match loaded_case {
+            Ok(c) => c,
+            Err(e) => {
+                if cname.starts_with("REFUSE ") {
+                    refused += 1;
+                    raised_refused += usize::from(python_raises);
+                } else {
+                    tally.diff(format!("{cname}: the loader refused it: {e}"));
+                    differing += 1;
+                }
+                continue;
+            }
+        };
+        if cname.starts_with("REFUSE ") {
+            tally.diff(format!("{cname}: the loader accepted it"));
+            differing += 1;
+            continue;
+        }
+        loaded += 1;
+        let kind = case["kind"].as_str().unwrap_or("?");
+        match kinds.iter_mut().find(|(k, _)| k == kind) {
+            Some((_, n)) => *n += 1,
+            None => kinds.push((kind.to_string(), 1)),
+        }
+        let before = tally.diffs;
+        let got = loaded_case.answer(plant);
+        if let Some(h) = case.get("expectSha1").and_then(|v| v.as_str()) {
+            // a long answer kept as the SHA-1 of Python's json.dumps of it, which romp-json writes byte for byte
+            let mine = romp_views::sha1::hex(romp_json::dumps(&got).as_bytes());
+            tally.compare(&format!("{cname} (sha1)"), &Out::Str(mine), &Out::Str(h.to_string()));
+        } else {
+            let want = member(exact_case, "expect").ok_or_else(|| format!("{cname}: no expect"))?;
+            tally.compare(cname, &got, want);
+        }
+        differing += usize::from(tally.diffs > before);
+    }
+    for s in &tally.shown {
+        println!("  {s}");
+    }
+    println!(
+        "layer4 edge set{}: {} cases, {} loaded and compared ({} values), {} refused at load (every REFUSE case), {} \
+         differences in {} cases (python {})",
+        plant4_name(plant),
+        cases.len(),
+        loaded,
+        tally.values,
+        refused,
+        tally.diffs,
+        differing,
+        doc["python"].as_str().unwrap_or("?")
+    );
+    println!(
+        "  loaded by kind: {}; Python raises on {} of the refused cases",
+        kinds.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", "),
+        raised_refused
+    );
+    Ok(tally.diffs == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,6 +1270,20 @@ mod tests {
         assert_eq!(t.diffs, 4);
         assert_eq!(plant3_name(Some(Plant3::MaxKeepsLast)), " [planted: max-last]");
         assert_eq!(plant3_name(None), "");
+    }
+
+    #[test]
+    fn the_layer4_reader_keeps_pythons_big_ints_and_names_its_plants() {
+        // serde_json reads an integer past u64 as a float; Python's int(1e20) must come back as its 21 digits
+        let doc = br#"{"cases": [{"expect": {"since": 100000000000000000000, "t": 5.0}}]}"#;
+        let exact = exact_doc(doc, "doc").unwrap();
+        let case = &exact_items(&exact, "cases", "doc").unwrap()[0];
+        assert_eq!(romp_json::dumps(member(case, "expect").unwrap()), r#"{"since": 100000000000000000000, "t": 5.0}"#);
+        let lossy: serde_json::Value = serde_json::from_slice(doc).unwrap();
+        assert_eq!(romp_json::dumps(&lossy["cases"][0]["expect"]["since"].to_json()), "1e+20");
+        assert_eq!(exact_items(&exact, "sessions", "doc").unwrap_err(), "doc: no sessions list");
+        assert_eq!(plant4_name(Some(Plant4::IntRounds)), " [planted: int-round]");
+        assert_eq!(plant4_name(None), "");
     }
 
     #[test]

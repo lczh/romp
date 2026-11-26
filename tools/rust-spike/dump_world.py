@@ -856,8 +856,14 @@ class Replay:
         if key not in rec or (sub is not None and sub not in rec[key]):
             self.missing.append("%s(%s%s)" % (name, sid, "," + sub if sub else ""))
             raise DumpError("no recorded answer for %s(%s%s): Python never called it in the dump" % (name, sid, sub or ""))
-        v = rec[key][sub] if sub is not None else rec[key]
-        return copy.deepcopy(v)
+        v = copy.deepcopy(rec[key][sub] if sub is not None else rec[key])
+        if name == "_peer_answered" and isinstance(v, list):
+            # the live helper returns a tuple (newest answered time, {peer key: time}), and _peer_stamp_superseded
+            # branches on isinstance(answered, tuple): the JSON round trip's list would take its legacy scalar path,
+            # and with any stamp that has an anchor compare a number with a list (TypeError). Found by S4.4; neither
+            # world has a stamp, so no dump changes.
+            v = tuple(v)
+        return v
 
     def install(self):
         km, jd, snap = self.km, self.jd, self.snap
