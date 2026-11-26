@@ -117,7 +117,9 @@ record! {
         flags: serde_json::Value = "flags",
         leaf_ok: bool = "leafOk",
         store: Option<Store> = "store",
-        captions: serde_json::Value = "captions",
+        /// The captions `_captions(fsid)` answered (unit id to caption row), null when the build never read them: a port
+        /// that reaches the read anyway must fail loudly (layer 5's provisional card).
+        captions: Option<OMap<CaptionRow>> = "captions",
         recorded: Recorded = "recorded",
     }
     required: [recorded]
@@ -159,7 +161,10 @@ record! {
         seq: Num = "seq",
         placements_v: Num = "placementsV",
         nodes: OMap<Node> = "nodes",
-        placements: OMap<String> = "placements",
+        /// A segment id (with its `#p`, `#d` or `#live` phase) to the node the planner placed it on; null is a retired
+        /// placement, still a ruling (kernel._seg_placed, _live_cleared_under). The map may be null
+        /// (`(store or {}).get("placements") or {}`).
+        placements: Option<OMap<Option<String>>> = "placements",
         status: OMap<String> = "status",
         last_node: Option<String> = "lastNode",
         /// May be null (`store.get("seams") or []`).
@@ -211,8 +216,25 @@ record! {
         distilled_mt: Option<Num> = "distilledMt",
         /// The distiller's cited anchor (_node_anchor_uuids' cold fallback).
         summary_anchor: Option<String> = "summaryAnchor",
+        /// The judge's latched verdict on whether the top is the dictated ask (_pure_delegation_top): compared with
+        /// "human", "absent", "scheduled" and "machine", so any value loads and only those strings count.
+        ask_anchor: serde_json::Value = "askAnchor",
+        /// T105's chain-proven ask record (_pure_delegation_top reads only whether it is a dict).
+        user_ask: serde_json::Value = "userAsk",
+        /// The follow-up stamp and the brief's coverage stamp (_summary_outrun: `(followupAt or 0) > cov`,
+        /// `int(briefedMt or 0)`). Numbers or null; Python would also take a bool, and `int()` a numeric string, which
+        /// the loader refuses.
+        followup_at: Option<Num> = "followupAt",
+        briefed_mt: Option<Num> = "briefedMt",
     }
     required: [id]
+}
+
+record! {
+    /// One caption row (kernel._captions' mapping value); _seg_caption reads `(row or {}).get("caption", "")`.
+    pub struct CaptionRow {
+        caption: serde_json::Value = "caption",
+    }
 }
 
 record! {
@@ -274,8 +296,8 @@ record! {
 /// Keys the per-card code reads on a node (an ast scan grouped by receiver: `nd`, `nodes[x]`, `nodes[nid]`, `root`)
 /// that `Node` does not type yet. No node in either world carries one; the layer that ports its reader types it.
 pub const NODE_UNPORTED: &[&str] = &[
-    "askAnchor", "background", "blockCheckT", "briefParts", "failLog", "followupAt", "followupPending", "relayCarried",
-    "serving", "stallSummary", "summaryAnchors", "summaryParts", "summaryQuote", "umbrella", "userAsk", "warns",
+    "background", "blockCheckT", "briefParts", "failLog", "followupPending", "relayCarried", "serving", "stallSummary",
+    "summaryAnchors", "summaryParts", "summaryQuote", "umbrella", "warns",
 ];
 /// The same for a handoff (`nd['handoff']`, `nodes[x]['handoff']`) and an origin (`o`).
 pub const HANDOFF_UNPORTED: &[&str] = &["tracked", "peerHost"];

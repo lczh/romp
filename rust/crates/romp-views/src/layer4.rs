@@ -763,7 +763,8 @@ impl Names {
     }
 }
 
-fn color_json(bg: Option<&str>) -> Out {
+/// kernel._name_color's answer for a registry color: `{bg, fg: "#ffffff"}`, or None.
+pub fn color_json(bg: Option<&str>) -> Out {
     bg.map_or(Out::Null, |bg| {
         Out::Object(vec![("bg".into(), Out::Str(bg.to_string())), ("fg".into(), Out::Str("#ffffff".into()))])
     })

@@ -9,6 +9,8 @@
 //!         Layer 3 (tree facts and the anchor walk) against DUMP/layer3.json, or an edge set (dump_layer3.py).
 //!     romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]
 //!         Layer 4 (the store helpers) against DUMP/layer4.json, or an edge set (dump_layer4.py).
+//!     romp-spike layer5 DUMP|EDGE.json [--plant lowercase|em-text|uuid-exclude|outrun-float|prompt-bytes|idle-tail]
+//!         Layer 5 (landing, delegation and provisional) against DUMP/layer5.json, or an edge set (dump_layer5.py).
 //!     romp-spike store DUMP [--records] [--plant NAME]
 //!         Read every file of DUMP/transcripts/ through the transcript store and print the canonical summary
 //!         (romp_transcript::canon): per file one line, then one line per record. --records prints each record's
@@ -25,6 +27,10 @@
 //! substantive floor in UTF-8 bytes and `raise-skips` skips a raising turn instead of stopping the walk; layer4's
 //! `max-last` keeps the last of equal awaiting stamps, `int-round` rounds an awaited row's `since`, `uuid-strict` makes
 //! the uuid shape refuse a trailing newline, `table-off` forgets warm anchors and `parked-sorted` sorts parked rows;
+//! layer5's `lowercase` matches the quote with Rust's lowercase instead of sre's fold, `em-text` searches em._text_of
+//! (a bare string counts) instead of jd._atom_text, `uuid-exclude` drops the turn's text atoms by uuid instead of by
+//! identity, `outrun-float` skips `int()` of the coverage stamps, `prompt-bytes` cuts the provisional prompt at 140
+//! UTF-8 bytes and `idle-tail` closes the provisional turn only on a trailing idle span;
 //! the store's plants are no-tool-result, vt-strip and skip-held-crc.
 //! Exit status: 0 when everything matched, 1 on any difference, 2 on a usage or load error.
 
@@ -41,13 +47,14 @@ use romp_views::layer1::{self, ATOM_COLUMNS, SEG_COLUMNS, TURN_KEYS};
 use romp_views::layer2::{self, Plant as Plant2, Probe};
 use romp_views::layer3::{self, Plant as Plant3};
 use romp_views::layer4::{self, Plant as Plant4};
+use romp_views::layer5::{self, Plant as Plant5};
 use romp_views::load;
 use romp_views::record::{Num, OMap, ToJson};
 use romp_views::snapshot::{Snapshot, Store as GoalStore};
 use romp_views::tree::{self, Atom, Content, Tree, Turn};
 
 const USAGE: &str =
-    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
+    "usage: romp-spike roundtrip DUMP [--plant float-tag]\n       romp-spike layer1 DUMP [--plant bytes]\n       romp-spike layer2 DUMP|EDGE.json [--plant end|bytes]\n       romp-spike layer3 DUMP|EDGE.json [--plant max-last|overwrite-moves|bytes|raise-skips]\n       romp-spike layer4 DUMP|EDGE.json [--plant max-last|int-round|uuid-strict|table-off|parked-sorted]\n       romp-spike layer5 DUMP|EDGE.json [--plant lowercase|em-text|uuid-exclude|outrun-float|prompt-bytes|idle-tail]\n       romp-spike store DUMP [--records] [--plant NAME]\n       romp-spike store-serve [--plant NAME]";
 const MAX_SHOWN: usize = 10;
 
 fn store_usage() -> ExitCode {
@@ -208,6 +215,8 @@ fn main() -> ExitCode {
         ("layer3", Some(p)) if Plant3::parse(p).is_some() => layer3_cmd(&dir, Plant3::parse(p)),
         ("layer4", None) => layer4_cmd(&dir, None),
         ("layer4", Some(p)) if Plant4::parse(p).is_some() => layer4_cmd(&dir, Plant4::parse(p)),
+        ("layer5", None) => layer5_cmd(&dir, None),
+        ("layer5", Some(p)) if Plant5::parse(p).is_some() => layer5_cmd(&dir, Plant5::parse(p)),
         _ => return usage(),
     };
     match result {
@@ -334,9 +343,9 @@ fn seg_inputs(snap: &Snapshot, trees: &[(String, Option<Tree>)]) -> Vec<Option<S
             out.extend(nd.trail.iter().flatten().cloned().map(Some));
             out.extend(nd.log.iter().flatten().filter_map(|r| r.seg.clone().flatten()).map(Some));
         }
-        for (k, v) in st.placements.iter().flat_map(OMap::iter) {
+        for (k, v) in st.placements.iter().flatten().flat_map(OMap::iter) {
             out.push(Some(k.clone()));
-            out.push(Some(v.clone()));
+            out.push(v.clone());
         }
         out.extend(st.status.iter().flat_map(OMap::keys).cloned().map(Some));
         if let Some(Some(last)) = &st.last_node {
@@ -1215,6 +1224,183 @@ fn layer4_edge(file: &Path, plant: Option<Plant4>) -> Result<bool, String> {
     Ok(tally.diffs == 0)
 }
 
+fn plant5_name(plant: Option<Plant5>) -> String {
+    plant.map_or_else(String::new, |p| format!(" [planted: {}]", p.name()))
+}
+
+/// Layer 5 against Python's answers: DUMP/layer5.json for a dump directory, or an edge set file.
+fn layer5_cmd(path: &Path, plant: Option<Plant5>) -> Result<bool, String> {
+    if path.is_dir() { layer5_dump(path, plant) } else { layer5_edge(path, plant) }
+}
+
+fn check_cite5(doc: &serde_json::Value, file: &str) -> Result<(), String> {
+    let floor = doc["constants"]["CITE_MIN_CHARS"].as_u64();
+    if floor != Some(layer5::CITE_MIN_CHARS as u64) {
+        return Err(format!("{file}: CITE_MIN_CHARS is {floor:?} in Python, {} here", layer5::CITE_MIN_CHARS));
+    }
+    Ok(())
+}
+
+fn layer5_dump(dir: &Path, plant: Option<Plant5>) -> Result<bool, String> {
+    let dump = load::load_dump(dir)?;
+    let bytes = read(&dir.join("layer5.json"))?;
+    let expect: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("layer5.json: {e}"))?;
+    if expect["schema"] != "romp-spike-layer5/1" {
+        return Err(format!("layer5.json: schema {}, expected romp-spike-layer5/1", expect["schema"]));
+    }
+    check_cite5(&expect, "layer5.json")?;
+    let exact = exact_doc(&bytes, "layer5.json")?;
+    let exact_sessions = exact_items(&exact, "sessions", "layer5.json")?;
+    let snap = &dump.snapshot;
+    let sessions = expect["sessions"].as_array().ok_or("layer5.json: no sessions")?;
+    if sessions.len() != dump.trees.len() {
+        return Err(format!("layer5.json has {} sessions, the dump {}", sessions.len(), dump.trees.len()));
+    }
+    let facts = snap.sessions.as_ref().ok_or("snapshot.json: no sessions")?;
+    let live = snap.live_map.as_ref();
+    let names = layer4::Names::from_snapshot(snap);
+    let cleared: std::collections::HashSet<String> =
+        snap.board.as_ref().and_then(|b| b.cleared.clone()).unwrap_or_default().into_iter().collect();
+    let empty_heal = OMap::default();
+    let t0 = Instant::now();
+    let mut tally = Tally::default();
+    let (mut n_nodes, mut n_turns, mut differing) = (0usize, 0usize, 0usize);
+    for ((((sid, tree), sess), exact_sess), row) in
+        dump.trees.iter().zip(sessions).zip(exact_sessions).zip(snap.alive())
+    {
+        if sess["sid"].as_str() != Some(sid.as_str()) {
+            return Err(format!("layer5.json's sessions are out of order at {sid}"));
+        }
+        let f = facts.get(sid).ok_or_else(|| format!("snapshot.json: no facts for {sid}"))?;
+        let store: Option<&GoalStore> = f.store.as_ref().and_then(Option::as_ref);
+        let rec = f.recorded.as_ref().ok_or_else(|| format!("snapshot.json: no recorded answers for {sid}"))?;
+        n_nodes += store.and_then(|s| s.nodes.as_ref()).map_or(0, OMap::len);
+        n_turns += tree.as_ref().and_then(|t| t.turns.as_ref()).map_or(0, Vec::len);
+        let si = layer5::SessionIn {
+            sid,
+            has_path: true,
+            name: row.name.to_json(),
+            color: layer4::color_json(names.name_color(sid)),
+            live: live.is_some_and(|m| m.get(sid).is_some()),
+            tree: tree.as_ref(),
+            store,
+            captions: f.captions.as_ref().and_then(Option::as_ref),
+            cleared: &cleared,
+            healed: rec.heal_session_tops.as_ref().unwrap_or(&empty_heal),
+        };
+        let got = layer5::session_json(&si, plant).map_err(|e| format!("{sid}: refused: {e}"))?;
+        let before = tally.diffs;
+        tally.compare(sid, &got, member(exact_sess, "answer").ok_or("layer5.json: a session without its answer")?);
+        differing += usize::from(tally.diffs > before);
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    for s in &tally.shown {
+        println!("  {s}");
+    }
+    println!(
+        "layer5 {}{}: {} sessions, {} turns, {} nodes: {} values compared, {} differences in {} sessions ({:.0} ms; \
+         python {})",
+        world_name(snap),
+        plant5_name(plant),
+        dump.trees.len(),
+        n_turns,
+        n_nodes,
+        tally.values,
+        tally.diffs,
+        differing,
+        ms,
+        expect["python"].as_str().unwrap_or("?")
+    );
+    let bc = &expect["buildCheck"];
+    println!(
+        "  python: coverage {}; memo check {}; build check {} calls compared, {} unmatched, {} mismatches",
+        expect["coverage"], expect["memoCheck"], bc["compared"], bc["unmatched"], expect["buildMismatches"]
+    );
+    Ok(tally.diffs == 0)
+}
+
+fn layer5_edge(file: &Path, plant: Option<Plant5>) -> Result<bool, String> {
+    let name = file.display().to_string();
+    let bytes = read(file)?;
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("{name}: {e}"))?;
+    if doc["schema"] != "romp-spike-layer5-edge/1" {
+        return Err(format!("{name}: schema {}, expected romp-spike-layer5-edge/1", doc["schema"]));
+    }
+    check_cite5(&doc, &name)?;
+    let exact = exact_doc(&bytes, &name)?;
+    let exact_cases = exact_items(&exact, "cases", &name)?;
+    let cases = doc["cases"].as_array().ok_or_else(|| format!("{name}: no cases"))?;
+    if cases.len() != exact_cases.len() {
+        return Err(format!("{name}: {} cases, {} read exactly", cases.len(), exact_cases.len()));
+    }
+    let mut tally = Tally::default();
+    let (mut loaded, mut refused, mut raised_refused, mut differing) = (0, 0, 0, 0);
+    let mut kinds: Vec<(String, usize)> = Vec::new();
+    for (case, exact_case) in cases.iter().zip(exact_cases) {
+        let cname = case["name"].as_str().ok_or("a case without a name")?;
+        let python_raises = case["expect"].get("raises").is_some();
+        let loaded_case = layer5::EdgeCase::load_checked(case, exact_case).and_then(|c| match c.refused_session() {
+            Some(e) => Err(e),
+            None => Ok(c),
+        });
+        let loaded_case = match loaded_case {
+            Ok(c) => c,
+            Err(e) => {
+                if cname.starts_with("REFUSE ") {
+                    refused += 1;
+                    raised_refused += usize::from(python_raises);
+                } else {
+                    tally.diff(format!("{cname}: the loader refused it: {e}"));
+                    differing += 1;
+                }
+                continue;
+            }
+        };
+        if cname.starts_with("REFUSE ") {
+            tally.diff(format!("{cname}: the loader accepted it"));
+            differing += 1;
+            continue;
+        }
+        loaded += 1;
+        let kind = match case["kind"].as_str() {
+            Some("call") => format!("call {}", case["fn"].as_str().unwrap_or("?")),
+            k => k.unwrap_or("?").to_string(),
+        };
+        match kinds.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, n)) => *n += 1,
+            None => kinds.push((kind, 1)),
+        }
+        let before = tally.diffs;
+        let got = loaded_case.answer(plant);
+        let want = member(exact_case, "expect").ok_or_else(|| format!("{cname}: no expect"))?;
+        tally.compare(cname, &got, want);
+        differing += usize::from(tally.diffs > before);
+    }
+    for s in &tally.shown {
+        println!("  {s}");
+    }
+    println!(
+        "layer5 edge set{}: {} cases, {} loaded and compared ({} values), {} refused at load (every REFUSE case), {} \
+         differences in {} cases (python {})",
+        plant5_name(plant),
+        cases.len(),
+        loaded,
+        tally.values,
+        refused,
+        tally.diffs,
+        differing,
+        doc["python"].as_str().unwrap_or("?")
+    );
+    let sessions = kinds.iter().filter(|(k, _)| k == "session").map(|(_, n)| n).sum::<usize>();
+    println!(
+        "  loaded: {} sessions, {} direct calls; Python raises on {} of the refused cases",
+        sessions,
+        loaded - sessions,
+        raised_refused
+    );
+    Ok(tally.diffs == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1290,6 +1476,19 @@ mod tests {
         assert_eq!(exact_items(&exact, "sessions", "doc").unwrap_err(), "doc: no sessions list");
         assert_eq!(plant4_name(Some(Plant4::IntRounds)), " [planted: int-round]");
         assert_eq!(plant4_name(None), "");
+    }
+
+    #[test]
+    fn the_layer5_checks_name_their_plants_and_the_floor() {
+        assert_eq!(plant5_name(Some(Plant5::OutrunFloat)), " [planted: outrun-float]");
+        assert_eq!(plant5_name(None), "");
+        for p in Plant5::ALL {
+            assert_eq!(Plant5::parse(p.name()), Some(p));
+        }
+        let ok: serde_json::Value = serde_json::json!({"constants": {"CITE_MIN_CHARS": 80}});
+        assert_eq!(check_cite5(&ok, "f"), Ok(()));
+        let off: serde_json::Value = serde_json::json!({"constants": {"CITE_MIN_CHARS": 79}});
+        assert_eq!(check_cite5(&off, "f").unwrap_err(), "f: CITE_MIN_CHARS is Some(79) in Python, 80 here");
     }
 
     #[test]

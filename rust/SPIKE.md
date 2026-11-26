@@ -6,8 +6,9 @@ with no server. Both implementations run on one synthetic state, and the feed JS
 
 **Status (keep this current: a session that stops mid-step resumes from here):**
 
-- Step: S3 and S4.1 to S4.4 done, merged into `romp_fix` from `romp_fix-s3`, `romp_fix-s4a`, `romp_fix-s42`,
-  `romp_fix-s43` and `romp_fix-s44`, each with its review's fixes. S4.4's review (ship, no must-fix) is under "The
+- Step: S4.5 (layer 5) done on branch `romp_fix-s45`, not yet reviewed or merged into `romp_fix`. S3 and S4.1 to
+  S4.4 done, merged into `romp_fix` from `romp_fix-s3`, `romp_fix-s4a`, `romp_fix-s42`, `romp_fix-s43` and
+  `romp_fix-s44`, each with its review's fixes. S4.4's review (ship, no must-fix) is under "The
   review round" in "S4.4 as built"; its 11 edge-set gaps are filled, each shown to catch its mutant. S4.3's review
   (ship, no must-fix) found one edge-set gap, now filled and shown to catch its mutant. S4.2's two follow-ups (the
   empty-trigger pin, `dump_layer2.py --fuzz`) were independently verified: 65,000 more random cases on fresh seeds with
@@ -32,23 +33,34 @@ with no server. Both implementations run on one synthetic state, and the feed JS
     build makes), on 225 Python-made edge cases (25,011 values; 15 more are refused at load, as built to be) and on
     60,000 random worlds and calls (30,625,221 values, `dump_layer4.py --fuzz`). 5 planted mistakes and 78 source
     mutants are each caught by the edge set; fuzz seed 1 catches all but two (see "S4.4 as built").
+  - S4.5: landing, delegation and provisional (_summary_text_anchor with _opening_sentence and jd._locate_quote,
+    _summary_outrun, _dictated_prompt_uuid with jd._human_prompt_record, _pure_delegation_top, _provisional_card with
+    its placement, caption, prompt and segment helpers) match Python's own answers with zero differences on both worlds
+    (1,735 values small, 624,750 large; every call the replay's body makes, 7 and 41), on 415 Python-made edge cases
+    (14,856 values; 11 more are refused at load, as built to be) and on 60,000 random sessions and calls (9,054,772
+    values, `dump_layer5.py --fuzz`). Python's regex classes and `re.I` fold come from tables generated from its own
+    engine, checked on every code point. 6 planted mistakes and 58 source mutants are each caught by the edge set; fuzz
+    seed 1 catches all but four; 4 more mutants are equivalent (see "S4.5 as built").
   - S2 done before them (byte-identical oracle dumps across seeds and roots, "S2 as built"); S1 before that
     (romp-json matches `json.dumps` on 3,264 golden cases and 499,869 random floats).
 - S2 mapping: `rust/notes/s2-design.md`, the raw maps in `rust/notes/s2-maps.json`, the probes in
   `rust/notes/probes/`. The design changed the plan; see "Revisions from the S2 map" below.
-- Next action: S4.5, layer 5 (landing, delegation and provisional), scoped in "What layer 5 needs" below. S4.4 is merged. That section also carries a fact layer 6 needs (the body's call order for
-  _node_anchor_uuids).
+- Next action: S4.6, layer 6 (the body and its closures), scoped in "What layer 6 needs" below, which carries the
+  body's call order for _node_anchor_uuids forward from S4.4. S4.5 waits for its review and merge.
   - Inputs: `python3 tools/rust-spike/dump_world.py --world small` (or `large`), then
     `python3 tools/rust-spike/dump_layer1.py DUMP`, `python3 tools/rust-spike/dump_layer2.py DUMP`,
-    `python3 tools/rust-spike/dump_layer3.py DUMP` and `python3 tools/rust-spike/dump_layer4.py DUMP`. Never commit a
-    dump.
+    `python3 tools/rust-spike/dump_layer3.py DUMP`, `python3 tools/rust-spike/dump_layer4.py DUMP` and
+    `python3 tools/rust-spike/dump_layer5.py DUMP`. Never commit a dump.
   - Checks: `romp-spike roundtrip DUMP`, `romp-spike layer1 DUMP`, `romp-spike layer2 DUMP`, `romp-spike layer3 DUMP`,
-    `romp-spike layer4 DUMP`, `romp-spike layer2 rust/crates/romp-views/tests/fixtures/layer2_edge.json`,
+    `romp-spike layer4 DUMP`, `romp-spike layer5 DUMP`,
+    `romp-spike layer2 rust/crates/romp-views/tests/fixtures/layer2_edge.json`,
     `romp-spike layer3 rust/crates/romp-views/tests/fixtures/layer3_edge.json`,
     `romp-spike layer4 rust/crates/romp-views/tests/fixtures/layer4_edge.json`,
+    `romp-spike layer5 rust/crates/romp-views/tests/fixtures/layer5_edge.json`,
     `python3 tools/rust-spike/dump_layer2.py --fuzz 10000 --seed S`,
-    `python3 tools/rust-spike/dump_layer3.py --fuzz 10000 --seed S` and
-    `python3 tools/rust-spike/dump_layer4.py --fuzz 10000 --seed S` (seeds 1 to 6), and
+    `python3 tools/rust-spike/dump_layer3.py --fuzz 10000 --seed S`,
+    `python3 tools/rust-spike/dump_layer4.py --fuzz 10000 --seed S` and
+    `python3 tools/rust-spike/dump_layer5.py --fuzz 10000 --seed S` (seeds 1 to 6), and
     `python3 tools/rust-spike/check_store.py --dump DIR --fuzz 6` (`--dump` repeatable). Build with
     `~/.cargo/bin/cargo build --offline --release -p romp-spike`; the binary is in `rust/target/release/`.
   - Re-run check_store after any change to romp-transcript or to Python's reader. S6 should read "What the store
@@ -82,7 +94,7 @@ kernel, where the memory gain does not depend on interpreter speed.
 | `rust/crates/romp-transcript` | the transcript store: raw bytes plus a per-line index, the Python cache's identity contract (inode, size, mtime, CRC), positioned reads |
 | `rust/crates/romp-views` | the feed's per-card build only (the spike's slice of the views crate) |
 | `rust/crates/romp-spike` | the standalone binary: load a snapshot and transcripts, build the feed, print canonical JSON and timings |
-| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py` to `dump_layer4.py`), the measurement |
+| `tools/rust-spike/` | the Python side: the world and oracle dumper (`dump_world.py`), each port layer's Python answers (`dump_layer1.py` to `dump_layer5.py`), the measurement |
 
 ## Steps
 
@@ -924,35 +936,245 @@ The first round of this table was weaker, and each check found what the other mi
   so `romp-spike layer4` reads Python's answers with romp-transcript's decoder (the first edge run showed `1e+20` against
   the port's 21 digits).
 
-## What layer 5 needs (landing, delegation and provisional)
+## S4.5 as built (2026-11-26)
 
-Section 2 item 5: _summary_text_anchor with _text_atoms, _opening_sentence (3 regexes) and jd._locate_quote;
-_dictated_prompt_uuid with jd._human_prompt_record, and _pure_delegation_top; _provisional_card with _seg_placed,
-_seg_caption, _seg_prompt, _split_reminders and jd._seg_human, _seg_command, _seg_slash_shaped (BARE_SLASH_RE),
-_seg_followup (FOLLOWUP_RE) and _seg_system. Found while scoping it from the current source (the line numbers in
-section 2 still hold at this HEAD) and the large world's `coverage/port.json`:
-- Unlisted functions and constants they call: _summary_outrun (the body's cited tier: `int(distilledMt or 0)`,
-  `briefedMt`, `followupAt`), jd._seg_command_worked, _live_replanned and _live_cleared_under (from _provisional_card),
-  em.postal_pairs and jd.NUDGE_MARKER_RE (from _human_prompt_record's attachment arm), and em.is_interrupt_record
-  (layer 1). _provisional_card reads the session's recorded captions (`_captions(fsid)`, in the snapshot) and the
-  store's placements.
-- Node keys to type: `askAnchor` and `userAsk` (_pure_delegation_top's latch and chain evidence), `followupAt` and
-  `briefedMt` (_summary_outrun); the loader refuses the first three today (`NODE_UNPORTED`). `briefedMt` is not in that
-  list, because the ast scan behind it missed _summary_outrun; it loads untyped now, so type it and check the list again.
-- Text semantics: jd._locate_quote tries an exact `find`, then a regex of the quote's words joined by `\s+` with
-  `re.I`. Python's `re.I` folds case one code point at a time with its own table, which matches the Kelvin sign (U+212A)
-  with k and the long s (U+017F) with s; a port's case-insensitive match must use that table, not a lowercase
-  comparison. `_opening_sentence` splits paragraphs with `re.split(r"\n\s*\n", ...)` and cuts at `[.!?](?=\s|$)` past
-  12 code points; `str(span)[:300]` and `sent[:200]` count code points. _provisional_card strips comments with
-  `re.sub(r"<!--.*?-->", "", ..., flags=re.S)` (lazy, across lines) and reads `held.get("t", lt["t"])`, where absent
-  and null differ.
-- State across calls: _summary_text_anchor memoizes into _SUMMARY_ANCHOR_MEMO, keyed with `hash(str(line))`, which
-  moves with PYTHONHASHSEED. It is a cache (a hit returns what a miss computes), so the port leaves it out as layer 3
-  left out the held aggregate, and the oracle must clear it and count its faults (_SUMMARY_ANCHOR_STATS) as layer 3's
-  oracle did. _pure_delegation_top's `memo` (children and the prompt index, once per derivation) is the same kind of
-  cache. _dictated_prompt_uuid indexes the first record under each uuid.
-- Inputs: _dictated_prompt_uuid and _provisional_card read the parse through `_parse_cached` and `_parse`, the
-  unmerged parse, where the dump holds the merged tree (S2's note); both worlds have no live atoms, so they agree.
+**The problem.** Layer 5 decides three things a card shows. Where a click on a card's brief or summary lands: the
+assistant reply that carries the summary's first sentence, else the segment's newest substantial reply. Whether a top
+whose every leaf is a handoff to a peer is the user's own dictated ask (a card) or only coordination (hidden). And the
+dotted "Working: ..." or "Analyzing: ..." placeholder a live session shows while the planner has not yet filed its
+newest prompt. Each is a few dozen lines of Python, and each leans on Python habits a port gets wrong without any
+ordinary session showing it: `re.I` folding one code point at a time with its own table, lengths and slices in code
+points, `\d`, `\w` and `\s` as Unicode classes, a regex `findall` consuming the text it matched, `is` against `==`, and
+`int()` truncating before a comparison. Neither world has a reminder, a slash command, a follow-up, an attachment, a
+drifted placement, a caption, a cleared card, an ask latch, or a quote found only case-insensitively.
+
+`layer5.rs` ports, line for line, kernel._summary_text_anchor with _text_atoms, _opening_sentence and jd._locate_quote;
+_summary_outrun; _dictated_prompt_uuid with jd._human_prompt_record (and em.postal_pairs, jd.NUDGE_MARKER_RE) and
+_pure_delegation_top; _provisional_card with _seg_placed, _live_replanned, _live_cleared_under, _card_gone (unlisted, as
+_provisional_card and _live_cleared_under call it), _seg_caption, _seg_prompt, _split_reminders and its inline comment
+strip, and jd._seg_human, _seg_command, _seg_command_worked, _seg_slash_shaped, _seg_followup and _seg_system. Every
+regex is matched by hand, as Python's engine matches it (the leftmost match, a lazy group as short as it can be).
+`pyre.rs` holds Python's own classes and case tables (`pyre_tables.rs`, generated from Python's `re` and `_sre` by
+`dump_layer5.py --tables`), and `tests/layer5_edge.rs` checks them on every code point against the tables Python
+writes into the fixture. What the notes flagged, as built:
+- jd._locate_quote tries an exact `find`, then the quote's words joined by `\s+` under `re.I`. sre folds one code point
+  at a time: an uncased pattern character matches only itself, a cased one any character whose simple lowercase
+  (`_sre.unicode_tolower`) is its own, or one listed for it in `re._casefix._EXTRA_CASES`. So the long s matches `s`,
+  the dotless ı `i`, the final ς `σ`, the micro sign `μ`, and `İ` (whose simple lowercase is `i`) `i`. A comparison
+  of lowercased characters gets all of these wrong; it gets the Kelvin sign right, because K lowercases to `k`. One
+  reading in the notes did not hold: `ß` and `ẞ` match each other both ways (sre takes `ß` as cased, its uppercase
+  being the first letter of "SS"), and no pair is asymmetric.
+- _opening_sentence: paragraphs split at `\n\s*\n` (a whitespace run holding two newlines, Unicode whitespace
+  included); a leading list marker whose digits are any Unicode decimal (`١.` and `１.` are markers, `².` is not, and
+  the marker needs whitespace after it); the first line; the cut after the first `.`, `!` or `?` past 12 code points
+  that Unicode whitespace or the end follows; `[:200]` then `strip()`. `str(span)[:300]` and the offset `find`
+  returns count code points too.
+- _summary_text_anchor searches jd._atom_text, which reads a bare-string content as "", while _text_atoms admits that
+  atom through em.atom_has_text; such an atom can only be the stub. The turn's other text atoms leave out the
+  segment's by identity (`a is s`), so a second atom with a repeated uuid is still searched. The memo is left out (a
+  cache: a hit returns what a miss computes), as layer 3 left out the held aggregate; the oracle checks it.
+- _summary_outrun compares with `max(int(distilledMt or 0), int(briefedMt or 0))`, so 100.9 covers a segment at
+  100.5 only as far as 100: that segment outruns it. A coverage past i64 compares exactly (an integral float).
+- The segment predicates find the trigger atom by `uuid == seg["trigger"]`: with no trigger, the first atom without a
+  uuid is the trigger, before `atoms[0]`. _seg_prompt instead searches only for a truthy trigger, so a trigger of ""
+  falls to the first user atom.
+- em.postal_pairs is a findall: a `romp-msg-kind` marker whose lazy value runs over a `romp-msg-id` marker consumes it,
+  and no pair is made, so such an attachment is still a dictated record.
+- _provisional_card reads `_captions(fsid)` before it looks at whether the segment is a system notice: an unrecorded
+  caption read fails even where the caption is never shown (the port returns `NotRecorded`, as the oracle's reader
+  raises). `pre + g` raises TypeError on a truthy caption that is not a string, with Python's message. The turn is open
+  only if no atom anywhere in it is an idle span, unlike _session_working's trailing test. BARE_SLASH_RE's `\w` is
+  Python's (a combining vowel sign is not one, so `/kaा` is not slash-shaped), and its `$` matches before a final
+  newline.
+- Not pinned, because no input the loader admits shows a difference. Four were tried as mutants and moved nothing on
+  any check: the `$` in the cut's `(?=\s|$)` (a stop at the very end cuts nothing off, the same as no stop, and the
+  first line holds no newline; M58); the `endswith("#p")` test in _seg_caption's drift scan (a key whose jd._seg_key
+  equals `_seg_key(seg + "#p")` already ends in `#p`; N1); `any(v is None)` in _live_cleared_under (the
+  `all(isinstance(v, str) and ...)` after it is already false then; N2); FOLLOWUP_RE's lazy group (`[^\s>]` cannot
+  cross the `>` of a `-->`, so a greedy group finds the same id; N3). One needs no mutant: `held.get("t", lt["t"])`
+  never meets an absent `t` (every segment carries one, and a turn without `t` is refused at load). em.postal_pairs'
+  lazy group, unlike FOLLOWUP_RE's, is pinned: `\S` crosses a `-->`, so `<!-- romp-msg-id: a-->b -->` is the id `a`,
+  where a greedy group reads `a-->b` (N4).
+
+Loader changes (round trip and layers 1 to 4 re-run on fresh dumps, every number as before): a placement's value may
+be null (a retired placement, still a ruling) and the map itself may be null (`or {}`); nodes now type `askAnchor` and
+`userAsk` (any value; only the strings and the dict test are read), `followupAt` and `briefedMt` (numbers or null), and
+all but `briefedMt` leave `NODE_UNPORTED`. An ast scan of the node keys read by the body and the layer 1 to 5
+functions found no other untyped key outside that list. The session's recorded captions are typed (id to a row whose
+`caption` is any value). An atom whose `text` is truthy and not a string is refused (`tree::validate_atom`):
+jd._human_prompt_record reads `str(a.get("text") or "")`, and Python's `str()` of a number, list or dict is not
+ported; no dumped atom carries `text`. Refused at load where Python answers or raises, none in either world: a
+truthy non-string atom text, a placement value that is not a string or null, a caption row that is not a dict (Python
+raises AttributeError), a `followupAt` or `briefedMt` that is a string or a bool (Python raises TypeError on the
+first, reads `int("500")` and `True` as numbers), null `nodes`, captions that are not a dict, and an integer past i64.
+
+**The oracle.** `tools/rust-spike/dump_layer5.py DUMP` loads the real kernel as the earlier dumpers do and, per alive
+session, asks the real functions what the per-card build asks them, with the session's tree served as its parse, its
+recorded captions as `_captions(fsid)` (a session whose captions were never read raises `NotRecorded`) and the board's
+cleared set as `_cleared_ids_display()`: _provisional_card (whatever the body's gate), per segment of every turn the six
+predicates, _seg_prompt, _split_reminders, the comment strip (the kernel's own line; the dumper refuses a kernel whose
+_provisional_card no longer holds it), _seg_placed, _live_replanned, _live_cleared_under, _seg_caption and _text_atoms;
+per atom jd._human_prompt_record; per node _card_gone, _dictated_prompt_uuid, _pure_delegation_top (one memo per
+session, as the body's), and over the body's subtree of the node (layer 4's children, from the kernel's own lines)
+_summary_outrun and _summary_text_anchor for every trail key of the subtree, every line and both stub_ok values, with
+layer 3's real walk. It writes `DUMP/layer5.json`; `romp-spike layer5 DUMP` builds the same from the typed structs and
+compares value by value. Two self-checks: every landing call again with a memo key, twice (a miss, then a hit), must
+answer as without one, with no fault; and one replay build with _provisional_card, _pure_delegation_top,
+_summary_text_anchor and _summary_outrun wrapped compares every call the body makes with the oracle's answer for the
+same session, node, key, line and stub_ok.
+
+**Result on the worlds: zero differences.**
+- Small: 4 sessions, 42 turns, 10 nodes, 1,735 values. Large: 38 sessions, 16,877 turns, 78 nodes, 624,750 values
+  (129 ms).
+- Build check: small 7 calls (1 provisional card, 5 delegation tops, 1 landing), large 41 (1, 39, 1); 0 unmatched,
+  0 mismatches. The body never calls _summary_outrun in either world (no node has a cited anchor). Memo check: 12 of 12
+  calls per world agree, 12 hits, 0 faults.
+- Why that is not enough. Every segment of both worlds is a human prompt with no marker, command, reminder or
+  caption; nothing is cleared, latched or seamed; only 12 landing calls are made per world (2 land on a quote); and 36
+  of 38 sessions' provisional card reads captions the dump never recorded (both sides raise `NotRecorded` there).
+
+**The edge set.** `dump_layer5.py --edge-cases` writes `rust/crates/romp-views/tests/fixtures/layer5_edge.json`
+(synthetic, 0.56 MB, Python's tables included). Its 415 cases: 170 sessions (every gate of the provisional card,
+follow-ups over standing, cleared, absent and replanned targets, every placement phase and drift, retired and
+cleared-out placements, captions of every shape, seam tails, every trigger lookup, landings by quote, by fold, by
+substantive and stub atoms, identity against uuid, outrun stamps, every latch and anchor of the delegation test) and
+245 direct calls (opening sentences, quote location, reminders, postal pairs, BARE_SLASH_RE, FOLLOWUP_RE, the comment
+strip, prompt records, outrun, card_gone, placements, captions, the landing over hand-made segments).
+
+Result: 404 cases load and match on every value (14,856), 0 differences. The other 11 are refused at load, exactly
+the cases named REFUSE: Python raises on 3 and answers 8. Python's line trace ran 263 of the 275 lines of the 23
+ported functions. The 12 it did not run cannot run in the port's input set: the memo's key, hit and put, the
+lazy-body read and its fault (the loader refuses lazy atoms), `if not segs: return None` (em.segments always answers a
+segment), and the caption drift index (the replay hands _seg_caption a plain dict, which scans; the index gives the
+same answer by design).
+
+**The randomized check.** `python3 tools/rust-spike/dump_layer5.py --fuzz N --seed S` draws sessions from layer 3's
+random trees, decorated with prompts carrying follow-up, system, nudge and postal markers, slash commands, reminders,
+comments and interrupts, bare-string and `text`-field prompts, assistant prose from a pool of sentences, and stores
+whose summaries are opening sentences taken from the tree's own prose and mangled (case, whitespace, the long s, the
+Kelvin sign, the dotless i, list markers, paragraphs), whose trails name the tree's segments (some at drifted times),
+with coverage stamps around the segments' times, handoffs, latches, userAsk and origin shapes, seams, placements and
+captions under every phase and drift, cleared sets and heals; one case in five is a direct call. Any difference or
+refusal fails the run, and the same seed makes the same file.
+- Result, seeds 1 to 6 at 10,000 cases each (about 9 s apiece): 60,000 cases (48,113 sessions, 11,887 direct calls),
+  9,054,772 values, **0 differences**, 0 refused. The same seed makes the same file byte for byte under another hash
+  seed, and so does the edge set.
+- What they reached: 127,717 turns and 198,142 segments (1,328 seam tails); 6,324 provisional cards (292 resuming,
+  140 "Working past", 422 captioned), 38,577 gates that close and 3,212 raises (unrecorded captions, a non-string
+  caption, segmentation); 350,600 landing calls (35,432 on a located quote); 129,187 nodes (6,664 dictated anchors,
+  21,467 machine ones, 34,091 pure delegations, 13,900 outruns, 3,414 subtrees in a cycle); 143,152 prompt records;
+  12,654 reminders, 10,009 follow-ups, 2,011 slash-shaped and 3,202 system triggers, 37,145 placed and 7,268
+  cleared-out segments.
+
+**Planted mistakes, each caught.** The six plants are romp-spike's `--plant` options (`dump_layer5.py --fuzz ... --plant NAME` passes only
+when the plant is caught). The 62 source mutants were edits to `layer5.rs` and `pyre.rs`, each built, run on all four
+inputs and reverted by a scratch script (not committed); 58 are below and 4 are the equivalent ones named above (M58,
+N1 to N3), which no check can catch because no admitted input tells them apart. The table is the run on the final
+bytes: the 415-case edge set and fuzz seed 1. Each cell is differences, then the sessions or cases they fell in.
+
+| Mistake | Small | Large | Edge set (404) | Fuzz, seed 1 (10,000) |
+|---|---|---|---|---|
+| `--plant lowercase` (`re.I` as Rust's lowercase) | 0 | 0 | 28 in 9 | 797 in 247 |
+| `--plant em-text` (the quote searched in em._text_of) | 0 | 0 | 3 in 1 | 385 in 77 |
+| `--plant uuid-exclude` (the turn's atoms excluded by uuid) | 0 | 0 | 14 in 5 | 27 in 6 |
+| `--plant outrun-float` (no `int()` of the coverage) | 0 | 0 | 2 in 2 | 729 in 686 |
+| `--plant prompt-bytes` (`prompt[:140]` in UTF-8 bytes) | 0 | 0 | 1 in 1 | 103 in 103 |
+| `--plant idle-tail` (only a trailing idle span closes the turn) | 0 | 0 | 1 in 1 | 250 in 240 |
+| the exact find is skipped (the regex alone) (M01) | 0 | 0 | 2 in 1 | 96 in 37 |
+| words joined by exactly one whitespace (no `\s+` run) (M02) | 0 | 0 | 4 in 2 | 476 in 142 |
+| the match's `\s+` takes ASCII whitespace only (M03) | 0 | 0 | 4 in 2 | 408 in 124 |
+| the quote splits on ASCII whitespace only (M04) | 0 | 0 | 6 in 3 | 404 in 126 |
+| paragraphs split at consecutive newlines only (no `\s*` between) (M05) | 0 | 0 | 1 in 1 | 0 |
+| list-marker digits ASCII only (M06) | 0 | 0 | 6 in 3 | 1,086 in 300 |
+| a list marker needs no whitespace after it (M07) | 0 | 0 | 4 in 4 | 58 in 26 |
+| the sentence cut searches from 0, not past 12 (M08) | 0 | 0 | 6 in 6 | 1,483 in 462 |
+| the cut's lookahead takes ASCII whitespace only (M09) | 0 | 0 | 4 in 4 | 136 in 55 |
+| the 200 cap counts UTF-8 bytes (M10) | 0 | 0 | 1 in 1 | 1 in 1 |
+| the located span is not cut at 300 (M11) | 0 | 0 | 2 in 1 | 0 |
+| the turn's other atoms searched before the segment's (M12) | 0 | 0 | 2 in 1 | 146 in 35 |
+| the quote search runs oldest first (M13) | 0 | 0 | 18 in 6 | 472 in 115 |
+| the substantive fallback takes the first, not the newest (M14) | 0 | 0 | 2 in 1 | 1,466 in 338 |
+| the stub is the first text atom, not the last (M15) | 0 | 0 | 4 in 4 | 806 in 326 |
+| _text_atoms keeps the settle reply (M16) | 0 | 0 | 7 in 2 | 1,465 in 671 |
+| _text_atoms keeps API errors (M17) | 0 | 0 | 2 in 1 | 1,571 in 656 |
+| outrun compares with >= (an equal stamp outruns) (M18) | 0 | 0 | 4 in 2 | 634 in 571 |
+| outrun ignores briefedMt (M19) | 0 | 0 | 4 in 4 | 1,211 in 1,071 |
+| outrun has no zero-coverage return (M20) | 10 in 3 | 78 in 37 | 32 in 20 | 7,466 in 4,060 |
+| a string prompt record is stripped (M21) | 0 | 0 | 47 in 47 | 902 in 788 |
+| the interrupt record counts as dictated (M22) | 0 | 0 | 96 in 49 | 413 in 375 |
+| an attachment's nudge marker is not checked (M23) | 0 | 0 | 48 in 46 | 219 in 188 |
+| a kind match does not consume what it spans (postal findall) (M24) | 0 | 0 | 49 in 47 | 0 |
+| any kind binds (no _POSTAL_KINDS check) (M25) | 0 | 0 | 1 in 1 | 7 in 7 |
+| the latch "scheduled" does not exempt (M26) | 0 | 0 | 1 in 1 | 9 in 9 |
+| an unresolvable anchor does not fail open (None suppresses) (M27) | 0 | 0 | 3 in 3 | 149 in 140 |
+| an origin dict does not skip the latch (M28) | 0 | 0 | 1 in 1 | 15 in 15 |
+| one handoff leaf is enough (any, not all) (M29) | 0 | 0 | 2 in 2 | 603 in 524 |
+| the prompt index keeps the last atom per uuid (M30) | 0 | 0 | 20 in 13 | 305 in 248 |
+| no trigger: atoms[0], not the first atom without a uuid (M31) | 0 | 0 | 4 in 2 | 654 in 502 |
+| _seg_prompt searches for a trigger of "" (M32) | 0 | 0 | 3 in 1 | 647 in 193 |
+| BARE_SLASH_RE's `\w` as Rust's is_alphanumeric (M33) | 0 | 0 | 4 in 3 | 165 in 139 |
+| BARE_SLASH_RE's `$` ignores a final newline (M34) | 0 | 0 | 1 in 1 | 0 |
+| the comment strip is greedy (the last `-->`) (M35) | 0 | 0 | 1 in 1 | 150 in 141 |
+| a reminder seam with a blank line rejoins with one newline (M36) | 0 | 0 | 2 in 2 | 29 in 18 |
+| an unclosed reminder is dropped (M37) | 0 | 0 | 1 in 1 | 809 in 757 |
+| no drift match for placements (exact only) (M38) | 0 | 0 | 8 in 7 | 741 in 630 |
+| _card_gone checks the node only, not its ancestors (M39) | 0 | 0 | 6 in 4 | 1,319 in 804 |
+| an absent caption reads null, not "" (M40) | 11 in 1 | 376 in 1 | 385 in 144 | 24,897 in 5,537 |
+| captions read after the system check (M41) | 0 | 0 | 1 in 1 | 15 in 15 |
+| the follow-up resurrect ignores whether the turn is open (M42) | 0 | 0 | 1 in 1 | 428 in 428 |
+| an absent follow-up target counts as gone without clear evidence (M43) | 0 | 0 | 1 in 1 | 43 in 43 |
+| the seam text is not cut at 100 (M44) | 0 | 0 | 1 in 1 | 1 in 1 |
+| an empty seam text is kept (no "a completed goal") (M45) | 0 | 0 | 2 in 2 | 5 in 5 |
+| a command that put the model to work gets no card (M46) | 0 | 0 | 2 in 2 | 28 in 28 |
+| judging is the turn being open (inverted) (M47) | 1 in 1 | 1 in 1 | 67 in 67 | 1,043 in 1,043 |
+| a non-string caption is formatted, not a TypeError (M48) | 0 | 0 | 6 in 6 | 6 in 6 |
+| the card's t is the turn's, not the held segment's (M49) | 0 | 0 | 26 in 13 | 1,080 in 540 |
+| the placed gate resurrects on an ended turn too (M50) | 0 | 0 | 1 in 1 | 32 in 32 |
+| re.I without re._casefix's extra cases (M51) (the table test passes) | 0 | 0 | 21 in 7 | 797 in 247 |
+| cased read from Rust's is_lowercase/is_uppercase (M52) (the table test fails) | 0 | 0 | 4 in 2 | 20 in 4 |
+| the human branch skips the interrupt test for a seg (jd._seg_human) (M53) | 0 | 0 | 94 in 47 | 383 in 334 |
+| a falsy command flag counts (command key present) (M54) | 0 | 0 | 3 in 1 | 1,472 in 1,152 |
+| the located offset counts UTF-8 bytes (M55) | 0 | 0 | 2 in 2 | 13 in 13 |
+| the sentence cut starts past 12 bytes, not 12 code points (M56) | 0 | 0 | 1 in 1 | 43 in 21 |
+| list-marker digits are any numeric character (is_numeric) (M57) | 0 | 0 | 1 in 1 | 915 in 258 |
+| em.postal_pairs' value group is greedy (N4) | 0 | 0 | 1 in 1 | 1 in 1 |
+
+The worlds catch 3 of the 64: a zero coverage no longer stops _summary_outrun (every node with a trail outruns), an
+absent caption read as null (s004's recorded captions are `{}`, so every segment row of it changes), and `judging`
+inverted (s004's provisional card). The edge set catches every row. Fuzz seed 1 catches every row but four: the
+paragraph split (M05: only a list marker whose `\s+` would run across a whitespace-only line into the next paragraph
+shows it), the 300 cut (M11: no fuzz span reaches 300 code points), the postal findall's consumption (M24: the fuzz
+makes no kind marker whose value runs into an id marker) and `$` before a final newline (M34: _seg_slash_shaped strips
+its text, so only a direct call on an unstripped line shows it, and the fuzz drew none). M52, the case table read from
+Rust's `is_lowercase` and `is_uppercase`, is caught by the edge set through the titlecase `ǅ` (cased to sre, neither
+case to Rust) and fails `tests/layer5_edge.rs`'s every-code-point table test; M51 (no extra cases) passes that test, as
+it changes no table, and fails the comparisons.
+
+The first rounds of this table were weaker, and each check found what the other missed. The edge set missed the
+paragraph split (its multi-paragraph line cut at the first line anyway), the cut's Unicode lookahead (its stops sat
+inside the first 12 code points), the tier order (no quote in both the segment and the rest of its turn) and the
+titlecase case table; cases were added for each, and each now fails on the cases added for it. The fuzz missed the follow-up
+gate on a closed turn (no follow-up named a cleared card) and the case table; the generator now aims follow-ups at
+cleared or cleared-logged cards on open and closed turns and draws the titlecase digraph. The cut's `$`, which the
+notes' reading suggested, turned out to be equivalent (M58).
+
+Tests: 17 new, 148 pass in the workspace: 7 unit tests in `layer5.rs`, 3 in `pyre.rs`, 1 in `tree.rs` (the `text`
+refusal), `tests/layer5_edge.rs` (5: every case answers as Python does, each plant is caught on exactly the cases built
+for it, every code point against Python's tables, the line trace's missed lines, the schema) and 1 in romp-spike for
+the comparison's messages.
+
+What this feeds: layer 6's `_brief_landing` calls _summary_outrun and _summary_text_anchor with the walk's maps, the
+card loop calls _pure_delegation_top per top, and the session's tail calls _provisional_card; "What layer 6 needs"
+below has the gates and the order.
+
+## What layer 6 needs (the body and its closures)
+
+Section 2 item 6: kernel._feed_session_entry (55894 to 57009 at this HEAD, 515 lines and 362 statements; the large
+world's replay runs 424 of the lines and 309 of the statements, all 90 top-level ones) with its closures _note_peers,
+_subtree, _closure_done, _fsubmax, _closure_blocked, _block_check_floor, _brief_landing and flatten. Layer 6 is the first
+layer whose answer is the card itself, so besides per-closure answers its oracle can use the dump's own
+`oracle/entries/<sid>.json` (the clock-free memo entry) and the replay's slice. Found while building layer 5 and scoping
+the body from the current source:
 - Carried forward for layer 6 (found in S4.4's review): the body calls _node_anchor_uuids inside `flatten` (kernel.py,
   the `_pa, _wa = _node_anchor_uuids(nd, seg_trig, seg_uuid)` line, about 56228), not over the store. It runs once per
   flattened node: a card top, then its children sorted by `_fsubmax` (the newest `mt`, else `t`, over the subtree)
@@ -965,10 +1187,35 @@ section 2 still hold at this HEAD) and the large world's `coverage/port.json`:
   cold lookup serves, within one build and across builds; and a session whose entry is served from the feed memo
   (a `_feed_session_key` hit) runs no body, so it writes nothing that build. Layer 6 must make these calls from its
   own flatten, in this order.
-- Branches the worlds miss, from `coverage/port.json` (large): _summary_text_anchor 29 of 42 lines (the turn-wide
-  search, the substantive and stub fallbacks, the memo hit), _locate_quote's case-insensitive arm, _split_reminders 3 of
-  24 (no reminder in either world), _human_prompt_record's interrupt and attachment arms, _provisional_card 30 of 46,
-  _pure_delegation_top's userAsk, latch and origin arms, _seg_placed's and _seg_caption's drift fallbacks.
+- _brief_landing, the tiers layer 5 serves (about 56149): one resolve per build per `(nid, bool(completed), line or "")`
+  (`_land_memo`). In order: a completed node pins the newest substantive tail over its subtree (`tt > tail[0]`, strict,
+  so the first of equal times stays); else the cited `summaryAnchor` when it is in `cite_uuids` and _summary_outrun over
+  the subtree's trails says not outrun, with `summaryQuote` (unported today); else
+  `_summary_text_anchor(seg_turn.get(sk), line, memo_key=(fsid, nid, sk))`, where sk is the newest trail segment over
+  the subtree with `k in seg_turn` by `t >= skt` from `skt = -1` (the last of equal times wins, and a segment whose
+  `seg_best` time is below -1 never qualifies); else the latest-prose walk by `(bsub, bt) > (best[0], best[1])` (a tuple
+  compare: substantive first, strict); else the stub call (`stub_ok=True`); else the newest trail segment's work anchor.
+  It returns `(u, q or None)`. flatten asks it for each row with `_landing_inputs("completed" if st == "done" else
+  "blocked" if st == "question" else None, "", nd)` and skips handoff rows and rows without a line; the card top asks
+  with its own state and column (about 56805).
+- `_fsubmax` is `cn.get("mt", cn.get("t", 0))` then `max(m, child)`, so the first of equal values (and its int/float
+  tag) stays. Row fields read the Python way: `"mt": nd.get("mt", nd["t"])` (a present null stays null, and `nd["t"]` is
+  evaluated first), `"who": _name_of(sid) or sid[:8]` (code points), `"auth": (nd.get("agentTask") or {}).get("status")`,
+  `"reviewedEarlier": bool(boundary and out and done and _done_since(nd) <= boundary) or None`, `"born": _born or None`
+  (an empty born dict becomes None).
+- The body's layer-5 gates: _pure_delegation_top for each top of `children[None]` that is not cleared and not perm_top,
+  api_top or jauth_top, one memo per derivation; _provisional_card only when `not had_working and perm_top is None and
+  ps` and the store did not fault, else the blocked placeholder (`perm_state in _NEEDS_INPUT_STATES`) or the awaiting
+  card (`sess_awaiting_why`). The derivation's `faults` is the change in `_SUMMARY_ANCHOR_STATS["fault"]` across it
+  (always 0 on a tree the loader admits, layer 5), and an entry with faults is never memoized.
+- Keys layer 6 reads that the loader still refuses (`NODE_UNPORTED`): background, blockCheckT, briefParts, failLog,
+  followupPending, relayCarried, serving, stallSummary, summaryAnchors, summaryParts, summaryQuote, umbrella, warns;
+  `tracked` and `peerHost` on handoffs and origins; `a`, `q`, `login` and `fsid` on log rows. Type each with its reader
+  and check the list again with an ast scan of the body (S4.5 ran one over the node keys of the body and layers 1 to 5).
+- What the worlds miss is listed in s2-design.md section 2's "Left out" (hide, the cold warm-ask, store_faulted,
+  born and hidden tops, the API-error and judge-auth floors, the heal un-nest, the bg chip, the owned-task yield, the
+  stall, the cold summary fallback, the serving fold, the blocked and awaiting placeholders, and the card literal's
+  rarer arms). An edge set and a fuzz have to reach them, as for layers 2 to 5.
 
 ## Log
 
@@ -1105,3 +1352,21 @@ section 2 still hold at this HEAD) and the large world's `coverage/port.json`:
     the layer 2 and 3 edge sets and one fuzz seed of each (97,398 values and 30,000 counts; 1,345,684 values), 0
     differences.
   - SPIKE.md carries the body's flatten order for _node_anchor_uuids forward to layer 6. Rust tests: 131 pass.
+- 2026-11-26: S4.5, layer 5 (landing, delegation and provisional), on fresh dumps (`dump_layer5.py`,
+  `romp-spike layer5`).
+  - Worlds: small 4 sessions, 42 turns, 10 nodes, 1,735 values; large 38 sessions, 16,877 turns, 78 nodes, 624,750
+    values; 0 differences. Build check: every layer-5 call the replay's body makes (7 and 41), 0 unmatched, 0
+    mismatches; memo check 12 of 12 per world.
+  - Edge set: 415 cases; 404 load and match on 14,856 values, 0 differences; 11 refused at load (every REFUSE case),
+    Python raising on 3. Python ran 263 of the 275 lines of the 23 functions; the 12 left cannot run in the port's
+    input set.
+  - `dump_layer5.py --fuzz`: seeds 1 to 6 at 10,000 cases, 9,054,772 values, 0 differences, 0 refused.
+  - Planted: 6 `--plant` options and 58 source mutants, every one caught by the edge set; fuzz seed 1 misses 4; the
+    worlds catch 3. 4 more source mutants are equivalent (no admitted input tells them apart) and are documented as not
+    pinned. One reading in the notes did not hold: `ß` and `ẞ` match each other both ways under `re.I`.
+  - Python's `\d`, `\w` and case tables generated from its engine (`dump_layer5.py --tables`, `pyre_tables.rs`) and
+    checked on every code point.
+  - Loader: placements may be null or hold null values, nodes type askAnchor, userAsk, followupAt and briefedMt,
+    captions are typed, a truthy non-string atom `text` is refused. Re-run: the round trip and layers 1 to 4 match on
+    both worlds (6,370 and 2,499,514 layer-1 values, 336 and 135,016 layer-2, 1,801 and 695,672 layer-3, 864 and 6,406
+    layer-4) and on the layer 2 to 4 edge sets, 0 differences. Rust tests: 148 pass.

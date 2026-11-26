@@ -311,10 +311,18 @@ pub fn validate_turn(turn: &Turn) -> Result<(), String> {
     Ok(())
 }
 
-/// Refuse an atom the port would read differently from Python: a lazy one (its body is on disk).
+/// Refuse an atom the port would read differently from Python: a lazy one (its body is on disk), or one whose `text`
+/// is truthy and not a string (jd._human_prompt_record reads `str(a.get("text") or "")`, and Python's `str()` of a
+/// number, a list or a dict is a repr the port does not write; a falsy one reads "", as null does).
 pub fn validate_atom(atom: &Atom) -> Result<(), String> {
     if atom.lazy.as_ref().is_some_and(|v| !v.is_null()) {
         return Err("a lazy atom (body on disk): em.hydrate is not ported".to_string());
+    }
+    if let Some(t) = &atom.text
+        && py_truthy(t)
+        && !t.is_string()
+    {
+        return Err(format!("a `text` that is truthy and not a string ({t}): its str() is not ported"));
     }
     Ok(())
 }
@@ -387,5 +395,16 @@ mod tests {
                    "turns[0]: a restored pre-cut turn (`pre`): its stored spans are not ported");
         let segs: Tree = serde_json::from_str(r#"{"turns": [{"atoms": [], "t": 1, "end": 2, "segs": []}]}"#).unwrap();
         assert_eq!(validate(&segs).unwrap_err(), "turns[0]: key \"segs\" is read by the per-card code but not typed");
+    }
+
+    #[test]
+    fn a_truthy_non_string_text_is_refused() {
+        for (text, ok) in [("\"x\"", true), ("\"\"", true), ("null", true), ("0", true), ("false", true), ("[]", true),
+                           ("{}", true), ("5", false), ("[1]", false), ("{\"a\": 1}", false), ("true", false)] {
+            let a = atom(&format!(r#"{{"type": "attachment", "t": 1, "text": {text}}}"#)).unwrap();
+            assert_eq!(validate_atom(&a).is_ok(), ok, "{text}");
+        }
+        let a = atom(r#"{"type": "attachment", "t": 1, "text": [1]}"#).unwrap();
+        assert_eq!(validate_atom(&a).unwrap_err(), "a `text` that is truthy and not a string ([1]): its str() is not ported");
     }
 }
