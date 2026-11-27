@@ -162,6 +162,10 @@ os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XD
 os.environ["ROMP_MANAGER_PORT"] = "1"
 os.environ["ROMP_KERNEL_PORT"] = "1"
 os.environ["ROMP_SERVE_PORT"] = "1"
+# No test reads the developer's Codex home (2026-11-27): the Codex backend reads its model caches for the context-window
+# ceiling every thread opens at (codex_backend._context_params), and a run on a machine with Codex installed would put
+# a config on every thread/start a run on CI does not. An empty home is CI's case; the twin of conftest.py's line.
+os.environ["CODEX_HOME"] = tempfile.mkdtemp(prefix="romp-tests-codex-home-")
 os.environ["ROMP_CKPT_FIRST_DOC_KB"] = "0"   # the young-session floor off for the fixtures, the twin of conftest.py's line (1721 round two): a
 #                                                bare unittest run gave 113 failures with every checkpoint shape skipped young without it
 os.environ["ROMP_GC_FREEZE"] = "off"   # #1735: the freeze off in the suite, the twin of conftest.py's line, so an in-process pusher cycle

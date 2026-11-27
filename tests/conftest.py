@@ -102,6 +102,9 @@ os.environ["ROMP_POSTAL_HERMETIC"] = "1"
 os.environ["ROMP_POSTAL_CLIENT_ONLY"] = "1"   # no in-process kernel of the run owns a bus: its ensure and its revive start none (2026-09-18: a revive
 #                                                on a daemon thread outran a test's environment restore and left a real bus detached on the box, whose
 #                                                port record under the shared state root redirected a later module's dial); a lab sets its own trio
+# an empty Codex home, so no test reads the developer's model caches (2026-11-27; the twin of tests/__init__.py's line,
+# which has the reason; kept below the postal trio, which a test pins right beside the state floor)
+os.environ["CODEX_HOME"] = tempfile.mkdtemp(prefix="romp-tests-codex-home-")
 os.environ["ROMP_CKPT_FIRST_DOC_KB"] = "0"   # the young-session floor is off for the suite's small fixtures (a document under 1 MB of
 #                                                pre-cut bytes is never written live); the floor's own test sets it. A plain assignment: an
 #                                                exported value in the shell (64, say) would red every checkpoint fixture (1721 round two);
