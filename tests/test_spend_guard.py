@@ -480,6 +480,68 @@ class Guard(unittest.TestCase):
         self.assertEqual((len(self.be.interrupts), len(self.be.sends)), (2, 2))
         self.assertEqual([r["kind"] for r in self._rows()], ["spend.ceiling", "spend.ceiling.cleared", "spend.ceiling"])
 
+    def _tick_as(self, backend, now):
+        km._spend_guard_tick(now, {SID: {"state": "working", "backend": backend}}, sessions=self.sessions, be=self.be,
+                             clients=self.clients, prices=PRICES)
+
+    def _codex_spend(self, t):
+        """A Codex session's leaf as the Codex backend writes it: assistant records on a gpt model with Claude-shaped
+        usage. At the dearest row (opus, $25 per million out) this is $300 in ten minutes, $1,800 an hour."""
+        write_jsonl(self.leaf, [user(t - 400, "u"),
+                                assistant(t - 300, "msg_%d" % int(t), out_tokens=12000000, in_tokens=0,
+                                          model="gpt-5-test")])
+
+    def test_a_codex_session_is_outside_the_ceiling(self):
+        # Codex bills its own plan, not Anthropic, and no table here prices it; the guard read a Codex transcript at the
+        # dearest Claude row and stopped a session spending nothing on the ceiling's account (2026-11-27)
+        self._codex_spend(NOW)
+        self.assertGreater(km._spend_rate_usd_per_hour(self.leaf, NOW, prices=PRICES), 1000.0,
+                           "the fixture would cross the ceiling were it priced as Claude")
+        self._tick_as("codex", NOW)
+        self.assertEqual((self.be.interrupts, self.be.sends, self.toasts, self._rows()), ([], [], [], []))
+        self.assertEqual(km._SPEND_GUARD, {}, "no latch: a Codex session is never measured against the ceiling")
+
+    def test_a_codex_sessions_standing_latch_is_cleared_once_and_says_why(self):
+        # a latch the old reading left standing (here a crossing read before the fix's rule could see the backend)
+        self._spend(NOW, 200.0)                          # $1,200 an hour of opus
+        self._tick_as("sdk", NOW)
+        self.assertEqual([r["kind"] for r in self._rows()], ["spend.ceiling"])
+        self._codex_spend(NOW + 60)
+        self._tick_as("codex", NOW + 60)
+        self.assertEqual(km._SPEND_GUARD[SID]["over"], False, "the latch is dropped")
+        rows = self._rows()
+        self.assertEqual([r["kind"] for r in rows], ["spend.ceiling", "spend.ceiling.cleared"])
+        self.assertTrue(rows[-1].get("codex"), "the clearing says it is the Codex rule's")
+        self.assertEqual(rows[-1]["usdPerHour"], 0.0)
+        self.assertEqual(len(self.toasts), 4, "the crossing and the clearing, each to every client")
+        self.assertEqual(self.toasts[-1]["phase"], "under")
+        self.assertIn("web is a Codex session: its calls bill its own plan, not Claude's prices, so the spend ceiling "
+                      "no longer counts it", self.toasts[-1]["text"])
+        self.assertEqual((len(self.be.interrupts), len(self.be.sends)), (1, 1), "the clearing sends the session nothing")
+        self._tick_as("codex", NOW + 120)
+        self.assertEqual(len(self._rows()), 2, "said once")
+        # and a restart seeds the cleared verdict from the ledger: nothing stands to clear again
+        km._SPEND_GUARD.clear(); km._SPEND_GUARD_SEEDED[0] = False
+        self._tick_as("codex", NOW + 180)
+        self.assertEqual(len(self._rows()), 2)
+        self.assertFalse(km._SPEND_GUARD.get(SID, {}).get("over"))
+
+    def test_a_claude_sessions_unpriced_model_still_counts_at_the_dearest_row(self):
+        # the guard errs high for a Claude session: only the Codex backend leaves the ceiling
+        self._codex_spend(NOW)
+        self._tick_as("sdk", NOW)
+        self.assertEqual(self.be.interrupts, [SID])
+        self.assertEqual([r["kind"] for r in self._rows()], ["spend.ceiling"])
+
+    def test_the_unpriced_model_line_says_codex_sessions_are_left_out(self):
+        said = []
+        with mock.patch.object(km, "_sdk_problem", side_effect=lambda line, *a, **k: said.append(line)):
+            km._PRICE_UNKNOWN_SAID.discard("gpt-5-unpriced")
+            self.assertIsNone(km._price_for("gpt-5-unpriced", PRICES))
+        self.assertEqual(len(said), 1)
+        self.assertIn("the spend guard prices a Claude session's calls of it at the dearest row's rates (it leaves "
+                      "Codex sessions out: Codex bills its own plan)", said[0])
+
     def test_the_ceiling_file_governs_and_zero_disables(self):
         self._spend(NOW, 200.0)                          # $1,200 an hour
         Path(self.td.name, km.SPEND_CEILING_SETTING).write_text("0")

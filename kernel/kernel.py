@@ -59427,6 +59427,21 @@ def _spend_guard_clear(s, rate, ceiling, now, be, clients):
                      ceilingUsdPerHour=float(ceiling), windowS=SPEND_GUARD_WINDOW_S)
 
 
+def _spend_guard_clear_codex(s, now, be, clients):
+    """A Codex session's standing latch, dropped because the ceiling does not count Codex (_spend_guard_tick, 2026-11-27):
+    said where the crossing was said, and filed as a clearing that names why, so the error center does not keep
+    reading the false crossing as standing."""
+    _jobs_gate_note("spendRow")                       # (the jobs pass's gate, shadow: an act)
+    sid, name = s["sid"], s.get("name") or s["sid"][:8]
+    if be is None:
+        be = Sessions.backend_for(sid)
+    text = ("%s is a Codex session: its calls bill its own plan, not Claude's prices, so the spend ceiling no longer "
+            "counts it (its earlier reading priced them at Claude's dearest rates)." % name)
+    _spend_guard_toast(text, clients, sid=sid, name=name, phase="under", usdPerHour=0.0, t=int(now))
+    _spend_guard_row("spend.ceiling.cleared", text, sid, name, be, t=int(now), usdPerHour=0.0, codex=True,
+                     ceilingUsdPerHour=float(_spend_ceiling()), windowS=SPEND_GUARD_WINDOW_S)
+
+
 def _spend_thread_rows(threads):
     """The guard's rows for the running comment threads `threads` (Sessions.thread_live's map). The live map leaves every
     thread out on purpose (no tab, lane or card of its own), yet a thread is a full session that can fan out agents at any
@@ -59493,6 +59508,17 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
             continue
         live.add(sid)
         live_paths.add(str(path))
+        if _session_backend(sid, states.get(sid)) == "codex":
+            # A Codex session is outside the ceiling (2026-11-27). Its calls bill the account's ChatGPT plan, not
+            # Anthropic, and no table here prices them. The guard nonetheless read its transcript like a Claude one, and
+            # each call fell to the dearest Claude row (a gpt model has no row and no Claude family). One Codex session
+            # read about $3,900 an hour while the Claude sessions spent about $14, and the guard stopped it mid-research.
+            # A latch such a reading left standing (this life's or seeded from the ledger) is cleared once and filed.
+            st = _SPEND_GUARD.get(sid)
+            if st and st.get("over"):
+                _SPEND_GUARD[sid] = {"over": False, "t": now, "rate": 0.0}
+                _spend_guard_clear_codex(s, now, be, clients)
+            continue
         can = _spend_can_spend(states.get(sid))                       # rule 1: statted while the session can spend, or on the edge
         dirty = getattr(_live_scope, "files_dirty", None)             #  after it stopped, or when the nudge prelude's observers marked
         stat = can or _SPEND_CAN_PREV.get(sid, True) or bool(dirty and (dirty[1] or sid in dirty[0]))   #  its files (a transcript
@@ -63550,8 +63576,9 @@ def _price_for(model, prices):
                     _price_unknown(model, "priced as %s (%s)" % (k, _price_rates_text(v)))
                     return v
     if m and not m.startswith("<"):
-        _price_unknown(model, "and no model of its family is: the spend guard prices its calls at the dearest row's "
-                              "rates and the cost view counts them at $0")
+        _price_unknown(model, "and no model of its family is: the spend guard prices a Claude session's calls of it at "
+                              "the dearest row's rates (it leaves Codex sessions out: Codex bills its own plan) and the "
+                              "cost view counts them at $0")
     return None
 
 
