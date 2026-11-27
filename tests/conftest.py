@@ -94,6 +94,9 @@ os.environ["GIT_AUTHOR_EMAIL"] = os.environ["GIT_COMMITTER_EMAIL"] = "tests@exam
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="romp-tests-state-")   # inside the root; the hook records it
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel exports this to its sessions; it outranks the XDG floor
+# an empty Codex home, so no test reads the developer's model caches (2026-11-27; the twin of tests/__init__.py's line,
+# which has the reason)
+os.environ["CODEX_HOME"] = tempfile.mkdtemp(prefix="romp-tests-codex-home-")
 # the postal bus port likewise (2026-09-11): a machine whose bus runs on a named port hands ROMP_POSTAL_PORT to every
 # session's shell, and a test run from one would carry the machine's name into every lab and in-process kernel; the
 # bus refuses its fixed port under a test unless the port is the run's own, which the marker beside a port says

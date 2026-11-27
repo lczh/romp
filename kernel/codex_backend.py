@@ -419,6 +419,66 @@ def _execution_permissions(cwd, thread_start=False):
     return {"permissions": WORKSPACE_PERMISSION, "runtimeWorkspaceRoots": [root]}
 
 
+# ── Every Codex thread opens at the largest context window Codex allows (the user, 2026-11-27) ───────────────────────
+# Codex opens a thread at each model's default window, which sits well below the model's own ceiling: its model cache
+# lists, per model, `context_window` (the default: 272000 for gpt-6.2-astra, 500000 for gpt-6.2-sol) and
+# `max_context_window` (872000 for every model it lists on 2026-11-27). The user wants every session, and every model
+# switch, at the ceiling. Probed on the pinned 0.169.0 runtime, 2026-11-27, on throwaway threads:
+#   * the thread-level `config.model_context_window` override is honored: astra reported 258400 (95% of 272000) without
+#     it and 828400 (95% of 872000) with 872000;
+#   * it survives a model switch: the same thread switched to gpt-6.2-sol at turn/start still reported 828400;
+#   * a value above a model's ceiling is clamped to that ceiling (2000000 on astra reported 828400), so passing the
+#     LARGEST ceiling the cache lists leaves each model at its own;
+#   * thread/resume of a thread the app-server already has loaded does NOT re-apply it (400000 stayed 380000 after a
+#     resume asking 872000), so the value rides every thread/start and every thread/resume, and a thread takes it when
+#     the app-server first loads it.
+# The ceiling's only source is Codex's own model cache (model/list does not carry it): CODEX_HOME's models_cache*.json,
+# ~/.codex by default, which this backend's app-server reads and writes. With no readable ceiling the override is left
+# out, so Codex keeps its default, and the backend logs it once (_context_params).
+MODELS_CACHE_GLOB = "models_cache*.json"
+_CEILING_CACHE = {}
+
+
+def _codex_home():
+    """CODEX_HOME as Codex resolves it: the environment's, else ~/.codex."""
+    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+
+
+def _max_context_window(home=None):
+    """The largest `max_context_window` over every model in Codex's model caches under `home` (CODEX_HOME by default),
+    or None when no cache is readable or none lists a positive integer ceiling. Cached on the files' stats: thread
+    starts are rare, but a cache file runs to about 600 KB."""
+    home = Path(home) if home is not None else _codex_home()
+    try:
+        files = sorted(home.glob(MODELS_CACHE_GLOB))
+    except OSError:
+        return None
+    key = []
+    for f in files:
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        key.append((str(f), st.st_mtime_ns, st.st_size))
+    key = tuple(key)
+    hit = _CEILING_CACHE.get(str(home))
+    if hit and hit[0] == key:
+        return hit[1]
+    best = None
+    for name, _m, _s in key:
+        try:
+            doc = json.loads(Path(name).read_text())
+        except (OSError, ValueError):
+            continue
+        models = doc.get("models") if isinstance(doc, dict) else doc
+        for m in models if isinstance(models, list) else ():
+            v = m.get("max_context_window") if isinstance(m, dict) else None
+            if isinstance(v, int) and not isinstance(v, bool) and v > 0 and (best is None or v > best):
+                best = v
+    _CEILING_CACHE[str(home)] = (key, best)
+    return best
+
+
 def _codex_config(config_cls, codex_bin, state_dir=None):
     """Launch ROMP's managed CLI, with its matching helpers, independently of PATH.
 
@@ -692,6 +752,10 @@ class CodexBackend:
         # six dynamic tools every thread registers (_postal_tools); None registers no tool, said once (_postal_params)
         self.postal = postal
         self._postal_unset_said = False
+        # where Codex's model caches live, for the context-window ceiling every thread opens at (_context_params);
+        # None is CODEX_HOME as Codex resolves it (2026-11-27)
+        self.codex_home = None
+        self._context_unset_said = False
         raw_log = log or (lambda m: sys.stderr.write("codex-backend: %s\n" % m))
 
         def _log(m):
@@ -1357,6 +1421,21 @@ class CodexBackend:
             self.log("postal tools not registered on Codex threads: this backend was built without a postal "
                      "callable, so its sessions cannot mail peers")
         return extra
+
+    def _context_params(self):
+        """The thread config that opens a Codex thread at the largest context window Codex allows, merged into every
+        thread/start and thread/resume: {"config": {"model_context_window": ceiling}}, the ceiling read from Codex's own
+        model caches (_max_context_window; why every start and resume, the note above it). {} when no cache names a
+        ceiling, and then the thread keeps Codex's default window, said ONCE so a short window is a logged fact and
+        never a quiet one (2026-11-27)."""
+        ceiling = _max_context_window(self.codex_home)
+        if ceiling is None:
+            if not self._context_unset_said:
+                self._context_unset_said = True
+                self.log("no context-window ceiling in Codex's model cache (%s under %s): Codex threads open at the "
+                         "model's default window" % (MODELS_CACHE_GLOB, self.codex_home or _codex_home()))
+            return {}
+        return {"config": {"model_context_window": ceiling}}
 
     def _postal_tool_call(self, params):
         """Answer one `item/tool/call` server request (a postal tool the thread carries, _postal_tools) in the shape the
@@ -2056,7 +2135,7 @@ class CodexBackend:
                 s.clearing = True
             self.push_session(sid)             # the chip reads "clearing" from here
             params = {"cwd": cwd, **_approval_params(mode), **_execution_permissions(cwd, thread_start=True),
-                      **self._postal_params(), "sessionStartSource": "clear"}
+                      **self._postal_params(), **self._context_params(), "sessionStartSource": "clear"}
             # the postal tools ride thread/start alone (a resume cannot add a registration, see _postal_tools), so
             # a thread minted here without them would carry no mail for its whole life (2026-09-20)
             if model:
@@ -2561,7 +2640,8 @@ class CodexBackend:
             return sid
         try:
             resp = c.thread_start({"cwd": cwd, **_approval_params(),
-                                   **_execution_permissions(cwd, thread_start=True), **self._postal_params()})
+                                   **_execution_permissions(cwd, thread_start=True), **self._postal_params(),
+                                   **self._context_params()})
             tid = resp.thread.id
             model = getattr(resp, "model", "") or ""
         except Exception as e:
@@ -2765,7 +2845,7 @@ class CodexBackend:
         placeholder branch always had, shared since 2026-09-19 with the restart fallback below. False when
         the session was killed while the create was in flight."""
         params = {"cwd": cwd, **_approval_params(s.mode),
-                  **_execution_permissions(cwd, thread_start=True), **self._postal_params()}
+                  **_execution_permissions(cwd, thread_start=True), **self._postal_params(), **self._context_params()}
         if model:
             params["model"] = model    # picked while the row was a placeholder: born on it
         resp = c.thread_start(params)
@@ -2878,7 +2958,8 @@ class CodexBackend:
             # history (2026-11-25; the pinned SDK passes a plain dict through, so the 0.144.4 models need
             # not know the key)
             c.thread_resume(tid, {"cwd": cwd, "excludeTurns": True, **_approval_params(s.mode),
-                                  **_execution_permissions(cwd, thread_start=True), **self._postal_params()})
+                                  **_execution_permissions(cwd, thread_start=True), **self._postal_params(),
+                                  **self._context_params()})
         except Exception as e:
             if _is_response_model_mismatch(e):
                 # The only RPC replies this backend consumes are thread/start's thread id and turn/start's

@@ -5904,5 +5904,117 @@ class TurnEndsPredicate(unittest.TestCase):
                              stop in em.END_STOPS, "mirrors the parser's END_STOPS")
 
 
+def _models_cache(home, rows, name="models_cache.json"):
+    """A synthetic Codex model cache: rows of (slug, context_window, max_context_window), in the shape Codex writes."""
+    Path(home).mkdir(parents=True, exist_ok=True)
+    models = [{"slug": s, "context_window": c, "max_context_window": m} for s, c, m in rows]
+    (Path(home) / name).write_text(json.dumps({"fetched_at": "2026-01-01T00:00:00Z", "models": models}))
+
+
+class ContextWindowCeiling(unittest.TestCase):
+    """Every Codex thread opens at the largest context window Codex allows (2026-11-27): the ceiling from Codex's own
+    model caches rides every thread/start and thread/resume as config.model_context_window."""
+
+    def test_the_largest_ceiling_across_models_and_files(self):
+        home = tempfile.mkdtemp()
+        _models_cache(home, [("gpt-5-test", 272000, 872000), ("gpt-5-other", 500000, 600000)])
+        _models_cache(home, [("gpt-5-third", 272000, 900000)], name="models_cache.desktop.json")
+        self.assertEqual(cb._max_context_window(home), 900000)
+
+    def test_no_readable_ceiling_is_none(self):
+        self.assertIsNone(cb._max_context_window(tempfile.mkdtemp()), "no cache at all")
+        bad = tempfile.mkdtemp()
+        (Path(bad) / "models_cache.json").write_text("{synthetic malformed json")
+        self.assertIsNone(cb._max_context_window(bad), "an unreadable cache")
+        odd = tempfile.mkdtemp()
+        (Path(odd) / "models_cache.json").write_text(json.dumps({"models": [
+            {"slug": "a", "context_window": 272000}, {"slug": "b", "max_context_window": True},
+            {"slug": "c", "max_context_window": "872000"}, {"slug": "d", "max_context_window": -1}, "not a row"]}))
+        self.assertIsNone(cb._max_context_window(odd), "no positive integer ceiling: no field, a bool, a string, -1")
+
+    def test_a_changed_cache_is_read_again(self):
+        home = tempfile.mkdtemp()
+        _models_cache(home, [("gpt-5-test", 272000, 872000)])
+        self.assertEqual(cb._max_context_window(home), 872000)
+        _models_cache(home, [("gpt-5-test", 272000, 1000000), ("gpt-5-more", 272000, 1000000)])
+        self.assertEqual(cb._max_context_window(home), 1000000)
+
+    def test_every_thread_start_and_resume_carries_the_ceiling(self):
+        home = tempfile.mkdtemp()
+        _models_cache(home, [("gpt-5-test", 272000, 872000)])
+        want = {"model_context_window": 872000}
+        be, fake, tmp = build()
+        be.codex_home = home
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertEqual(fake.called("thread_start")[0][1].get("config"), want, "the spawn's thread/start")
+        self.assertTrue(be.send(sid, "first synthetic turn"))
+        self.assertTrue(_lock_free(be, sid))
+        self.assertEqual(be.clear(sid), "")
+        self.assertEqual(fake.called("thread_start")[-1][1].get("sessionStartSource"), "clear")
+        self.assertEqual(fake.called("thread_start")[-1][1].get("config"), want, "the clear's thread/start")
+        restored = cb.CodexBackend(tmp, client_factory=lambda: fake)
+        restored.codex_home = home
+        try:
+            self.assertTrue(restored.send(sid, "second synthetic turn"))
+            self.assertTrue(until(lambda: not restored.busy(sid)))
+            resumes = fake.called("thread_resume")
+            self.assertTrue(resumes, "a restored session resumes its thread")
+            self.assertEqual(resumes[-1][2].get("config"), want, "the resume")
+        finally:
+            restored.kill(sid)
+
+    def test_a_placeholder_recovery_creates_its_thread_at_the_ceiling(self):
+        home = tempfile.mkdtemp()
+        _models_cache(home, [("gpt-5-test", 272000, 872000)])
+
+        def unavailable():
+            raise RuntimeError("synthetic unavailable client")
+        be, _, tmp = build(factory=unavailable)
+        sid = be.spawn("web", "/TESTDIR")
+        fake = FakeClient()
+        restored = cb.CodexBackend(tmp, client_factory=lambda: fake)
+        restored.codex_home = home
+        try:
+            self.assertTrue(restored.send(sid, "synthetic recovery"))
+            self.assertTrue(until(lambda: not restored.busy(sid)))
+            self.assertEqual(fake.called("thread_start")[-1][1].get("config"), {"model_context_window": 872000})
+        finally:
+            restored.kill(sid)
+
+    def test_a_model_switch_runs_on_the_threads_ceiling(self):
+        # the override is thread-level (turn/start carries no config), and the pinned runtime keeps it across a model
+        # switch; a switch therefore starts no new thread and the next turn names the new model
+        home = tempfile.mkdtemp()
+        _models_cache(home, [("gpt-5-test", 272000, 872000)])
+        be, fake, _ = build()
+        be.codex_home = home
+        sid = be.spawn("web", "/TESTDIR")
+        try:
+            self.assertTrue(be.set_model(sid, "gpt-5-other"))
+            self.assertTrue(be.send(sid, "synthetic turn on the new model"))
+            self.assertTrue(until(lambda: not be.busy(sid)))
+            self.assertEqual(fake.called("turn_start")[-1][3].get("model"), "gpt-5-other")
+            self.assertEqual(len(fake.called("thread_start")), 1, "the switch starts no new thread")
+            self.assertEqual(fake.called("thread_start")[0][1].get("config"), {"model_context_window": 872000})
+        finally:
+            be.kill(sid)
+
+    def test_no_ceiling_sends_no_config_and_says_so_once(self):
+        logs = []
+        be, fake, _ = build(log=logs.append)
+        be.codex_home = tempfile.mkdtemp()
+        a = be.spawn("web", "/TESTDIR")
+        b = be.spawn("api", "/TESTDIR")
+        try:
+            for call in fake.called("thread_start"):
+                self.assertNotIn("config", call[1], "no ceiling: Codex keeps its default window")
+            said = [m for m in logs if "no context-window ceiling" in m]
+            self.assertEqual(len(said), 1, "said once, at the first thread: %r" % said)
+            self.assertIn("models_cache*.json", said[0])
+        finally:
+            be.kill(a)
+            be.kill(b)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
